@@ -6,16 +6,16 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 > **Project is in teaching mode** (see [`/AGENTS.md`](AGENTS.md) for the protocol). Sessions are smaller than milestones — each session covers one new concept.
 
-**Next session: `WS-3` — CI as code + license + conventions.**
+**Next session: `M0-1` — Hello, adapter.** First real milestone.
 
-- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `WS-3`
-- Underlying milestone: [`docs/implementation/00-workspace-setup.md`](docs/implementation/00-workspace-setup.md)
-- Last session: `WS-2` — Rust attribute & derive macros (2026-05-01). Obsidian: `Lazydap Session 2026-05-01 WS-2.md`. Atomic concept: `Rust Procedural Macros.md`.
+- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M0-1`
+- Underlying milestone: [`docs/implementation/tasks/M00-hello-adapter.md`](docs/implementation/tasks/M00-hello-adapter.md)
+- Last session: `WS-3` — Convention as code (2026-05-01). Obsidian: `Lazydap Session 2026-05-01 WS-3.md`. Atomic concept: `Rust Project Conventions.md`.
 - Obsidian hub: `Lazydap Teaching Sessions.md` (vault root) — log goes here
 
-WS-2 deliverable: `crates/daemon` (`lazydap-daemon`) is a working clap CLI binary using `#[tokio::main]` + `#[derive(Parser)]`. `cargo run -p lazydap-daemon -- --help` prints the auto-generated help. `--version` reads `0.1.0` via workspace inheritance.
+WS-3 deliverable: lazydap is conventions-complete. `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`, dual licenses, `.github/workflows/ci.yml` (fmt/clippy/check/test) all in place. First commit landed: `6a06e68 chore: initial workspace scaffold`.
 
-When WS-3 is done, all WS-* sessions are complete — check the workspace setup box below and move on to M0.
+**All WS-* sessions complete. Next is M0.** Pre-session todo: install codelldb if not already present (do this in-session, not before).
 
 When all WS-* sessions are done, check the workspace setup box below.
 
@@ -23,8 +23,8 @@ If the user says "drop teaching mode," skip the teaching column and pick milesto
 
 ## Workspace setup (prerequisite to M0)
 
-- [ ] [Workspace setup](docs/implementation/00-workspace-setup.md) — Cargo workspace, daemon binary stub, CI, conventions
-  - In teaching mode: 3 sessions (`WS-1`, `WS-2`, `WS-3`) per [`docs/teaching/sessions.md`](docs/teaching/sessions.md)
+- [x] [Workspace setup](docs/implementation/00-workspace-setup.md) — Cargo workspace, daemon binary stub, CI, conventions
+  - Completed 2026-05-01 across 3 teaching sessions (`WS-1`, `WS-2`, `WS-3`). Initial commit: `6a06e68`.
 
 ## Now
 
