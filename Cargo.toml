@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/planetaryescape/lazydap"
+homepage = "https://github.com/planetaryescape/lazydap"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+panic = "warn"
+todo = "warn"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
