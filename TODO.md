@@ -6,23 +6,21 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 > **Project is in teaching mode** (see [`/AGENTS.md`](AGENTS.md) for the protocol). Sessions are smaller than milestones — each session covers one new concept.
 
-**Next session: `M2-1` — serde + typed protocols.** First proper Rust↔JSON mapping for DAP.
+**Next session: `M2-2` — DAP transport + atomic seq.** Generic methods, `AtomicI64` for sequence numbers, `thiserror` error type, real codelldb wire-up.
 
-- Book chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md) (stub — to be filled in-session)
-- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M2-1`
-- Underlying milestone: [`docs/implementation/tasks/M02-initialize-handshake.md`](docs/implementation/tasks/M02-initialize-handshake.md)
-- Last session: `M1-1` — Read one message (2026-05-03). Obsidian: `Lazydap Session 2026-05-03 M1-1.md`. Atomic concept: `Rust BufReader.md`. Public chapter: [`docs/book/05-read-one-message.md`](docs/book/05-read-one-message.md).
+- Book chapter: [`docs/book/07-dap-transport-and-seq.md`](docs/book/07-dap-transport-and-seq.md) (stub — to be filled in-session)
+- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M2-2`
+- Underlying milestone: [`docs/implementation/tasks/M02-initialize-handshake.md`](docs/implementation/tasks/M02-initialize-handshake.md) (M2-1 covered the type definitions; M2-2 adds the transport struct + generic request method)
+- Last session: `M2-1` — Serde and typed protocols (2026-05-03). Obsidian: `Lazydap Session 2026-05-03 M2-1.md`. Atomic concept: `Rust Serde.md`. Public chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md).
 - Obsidian hub: `Lazydap Teaching Sessions.md` (vault root) — log goes here
 
-**M1-1 deliverable** (shipped): `cargo run --example m1_read_one_message` connects to codelldb, sends an `initialize` request, and pretty-prints a real Content-Length-framed DAP response with full capability flags. Verified end-to-end against codelldb v20.1.4.
+**M2-1 deliverable** (shipped): `cargo test -p lazydap-dap` passes three tests round-tripping `Capabilities`, `DapResponse<Capabilities>`, and `InitializeArgs` against real DAP wire shapes. New crate `crates/dap` with `types.rs` housing the typed structs. Call-site diff demonstrated: chapter 05's `value["body"]["foo"].as_bool().unwrap_or(false)` becomes chapter 06's `resp.body.unwrap().foo: bool` — compile-time-checked field access replacing runtime hash-map walks.
 
-**Side learning that propagated up the stack from M1-1**: teaching skill rule 16 added (verify-before-publishing), bookgen skill updated to enforce it on generated chapters, global CLAUDE.md `VERIFY BEFORE TEACHING` framework added. Originated from a real version-drift hang in this session (milestone matcher expected `"Listening on port N"`, live codelldb v20 emits `"Listening on HOST:PORT"`).
-
-**Pre-session todo for M2-1**: none. `serde_json` already wired from M1-1.
+**Pre-session todo for M2-2**: none. `crates/dap` exists with type definitions; M2-2 adds `crates/dap/src/transport.rs` and the generic `request<T, R>` method. `thiserror` and `tracing` will need to be added to workspace deps (mechanical).
 
 ### Repo state notes (for cold-start agent)
 
-The lazydap repo is now on GitHub at [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), publicly available. Three chapter releases live: [chapter-04](https://github.com/planetaryescape/lazydap/releases/tag/chapter-04), [chapter-05](https://github.com/planetaryescape/lazydap/releases/tag/chapter-05), [chapter-06](https://github.com/planetaryescape/lazydap/releases/tag/chapter-06). Each represents the *start state* of that chapter (rule 18 of the teaching skill). Workflow at [.github/workflows/release.yml](.github/workflows/release.yml) auto-creates a release on every `chapter-*` tag push.
+The lazydap repo is now on GitHub at [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), publicly available. Four chapter releases live: [chapter-04](https://github.com/planetaryescape/lazydap/releases/tag/chapter-04), [chapter-05](https://github.com/planetaryescape/lazydap/releases/tag/chapter-05), [chapter-06](https://github.com/planetaryescape/lazydap/releases/tag/chapter-06), [chapter-07](https://github.com/planetaryescape/lazydap/releases/tag/chapter-07). Each represents the *start state* of that chapter (rule 18 of the teaching skill). Workflow at [.github/workflows/release.yml](.github/workflows/release.yml) auto-creates a release on every `chapter-*` tag push.
 
 ### Per-session ship checklist
 
@@ -59,7 +57,7 @@ If the user says "drop teaching mode," skip the teaching column and pick milesto
 
 - [x] [M0 — Hello, adapter](docs/implementation/tasks/M00-hello-adapter.md) — completed 2026-05-02 (session `M0-1`). Public chapter: [`docs/book/04-hello-adapter.md`](docs/book/04-hello-adapter.md). Two follow-up issues filed: [docs/issues/0001](docs/issues/0001-codelldb-symlink-install-broken.md), [docs/issues/0002](docs/issues/0002-codelldb-version-drift-rust-log.md). New reference: [docs/reference/codelldb-quirks.md](docs/reference/codelldb-quirks.md).
 - [x] [M1 — Read one message](docs/implementation/tasks/M01-read-one-message.md) — completed 2026-05-03 (session `M1-1`). Public chapter: [`docs/book/05-read-one-message.md`](docs/book/05-read-one-message.md). Side win: `verify-before-publishing` framework propagated to teaching/bookgen skills + global CLAUDE.md after live version-drift hang surfaced the principle.
-- [ ] [M2 — Initialize handshake](docs/implementation/tasks/M02-initialize-handshake.md)
+- [ ] [M2 — Initialize handshake](docs/implementation/tasks/M02-initialize-handshake.md) — session `M2-1` completed 2026-05-03 (typed structs in new `crates/dap`). Public chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md). Session `M2-2` next (transport struct + generic request method).
 - [ ] [M3 — Launch and observe](docs/implementation/tasks/M03-launch-and-observe.md)
 - [ ] [M4 — Pause on breakpoint](docs/implementation/tasks/M04-pause-on-breakpoint.md)
 

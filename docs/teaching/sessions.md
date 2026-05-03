@@ -13,7 +13,8 @@ Quick map from session ID → book chapter:
 | WS-3 | [`docs/book/03-conventions-as-code.md`](../book/03-conventions-as-code.md) | ✅ taught |
 | M0-1 | [`docs/book/04-hello-adapter.md`](../book/04-hello-adapter.md) | ✅ taught |
 | M1-1 | [`docs/book/05-read-one-message.md`](../book/05-read-one-message.md) | ✅ taught |
-| M2-1 onwards | `docs/book/06-*` and onwards | stub — fill during the live session |
+| M2-1 | [`docs/book/06-serde-typed-protocols.md`](../book/06-serde-typed-protocols.md) | ✅ taught |
+| M2-2 onwards | `docs/book/07-*` and onwards | stub — fill during the live session |
 
 ## Workspace setup → 3 sessions
 
