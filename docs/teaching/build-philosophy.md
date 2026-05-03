@@ -1,69 +1,47 @@
-# Teaching mode build philosophy
+# Build philosophy for tour-mode chapters
 
-Each teaching session must ship a **demonstrable runnable artifact**, not progress toward a future arrival point. Skateboard → scooter → bike → motorbike → car. Stop after any session and there's a working thing.
+This book runs in **tour mode**: the learner doesn't rebuild the anchor codebase, they read it. So "the artifact at chapter close" works differently than in a build-from-zero book.
 
-This mirrors and extends `docs/blueprint/14-roadmap.md`'s "Build philosophy" section, which already states the principle for full milestones. This doc applies it to **teaching sessions**, which are smaller units than milestones (some milestones split into 2–5 sessions).
+## What "artifact" means here
 
-## The principle
+In a reproduce-mode book, each chapter ends with a runnable thing. In a tour-mode book, each chapter ends with **understanding the learner can demonstrate**:
 
-> Every teaching session must produce something the learner can run and show. Not a concept piled toward a future arrival, but a real artifact — small if necessary, but real.
+- They can read a piece of the codebase they couldn't read at the start of the chapter.
+- They can predict what a related piece of code probably does, before they've read it.
+- They can explain the subsystem to a junior engineer in one paragraph.
+- They can answer "why is this designed this way and not that way?" with the codebase's actual reasoning.
 
-Why: senior-engineer learners have strong intrinsic motivation but high opportunity cost. "Concepts piling toward a future arrival" reads as stalling, even when the concepts are landing. Visible progress is the fuel that keeps slow learning sustainable.
+The artifact is a *paragraph*, not a binary. That's still demonstrable.
 
-## What counts as an artifact
+## The chapter-close ritual (tour-adapted)
 
-Anything the learner can run and demonstrate:
+**Open every chapter** by stating the artifact:
+> "Today's concept is X. By the end of this chapter you'll be able to explain how Y works in this codebase, predict what the next file you've never read does, and justify the design choice."
 
-- A CLI that prints something based on input.
-- A test that passes.
-- A function that returns the right value when called from a test or REPL.
-- A binary that connects to an external thing and prints what it gets.
-- A flag added to an existing CLI that changes behaviour visibly.
+**Close every chapter** by exercising the artifact:
+- Re-read a key function. Notice the learner now understands it.
+- Open a sibling file the learner hasn't read. Have them predict what's in it. Open it. Calibrate.
+- Verbally explain the chapter's subsystem to an imaginary junior engineer.
 
-The bar is **demonstrable** + **incremental over the previous session**. Small is fine. Real is the requirement.
+**Make the ladder visible** at chapter close:
+> "Last chapter you understood X. Now you understand X plus Y. Next chapter, X+Y enables you to follow Z."
 
-## The session-open / session-close ritual
+The progression is real even though no code gets built. The chapter sequence builds *one mental model*, in layers.
 
-**Open every session** by stating the artifact:
-> "Today's concept is X. By the end of this session you'll have Y you can run."
+## What if the learner wants to write code along the way?
 
-**Close every session** by demonstrating the artifact:
-> "Here's what you can do now that you couldn't an hour ago. Run it." [run it]
+Tour mode doesn't forbid it. Many chapters benefit from running the project locally, setting a breakpoint, and watching what actually happens. If a chapter motivates the learner to fork the project and add a tiny feature, do it — that's exactly the "you understand it now" demonstration tour mode is reaching for. Just don't *require* shipping code per chapter; that's not the contract.
 
-**Make the ladder visible** at session close:
-> "Last session you had a CLI that prints. Now you have a CLI that connects to a debug adapter and prints its greeting. Two sessions from now you'll have a CLI that drives a full DAP launch."
+## When this rule and the slowness rule (rule 12) seem to conflict
 
-Do not make the learner run the artifact themselves to feel motivated. That step is part of the session, not homework.
-
-## The ceremony exception
-
-Some sessions are unavoidable ceremony — workspace setup, license decisions, CI configuration. They produce no user-visible artifact. In these sessions:
-
-- **Name the ceremony at open**: "Today is workspace setup — there's nothing user-visible to show at the end. But here's what's now possible because of it..."
-- **Close by stating what's now possible**, not what was demonstrated.
-- **Pull a tiny artifact forward where possible**: even ceremony sessions can usually include a one-liner like "run `cargo fmt --check` and watch it pass" as a minimal demo.
-
-The lazydap WS-1, WS-2, WS-3 sessions are illustrative: WS-1 was pure ceremony (workspace structure), WS-2 produced a small artifact (`cargo run -p lazydap-daemon -- --message hi` works end-to-end), WS-3 was mostly ceremony (CI / conventions / license) with a small artifact at the end (the four CI checks all passing locally and the first commit landing).
-
-## Reconciliation with rule #12 (slowness)
-
-The teaching skill's rule #12 says slowness is the goal — resist racing. Rule #13 (this principle) says every session ships an artifact. They aren't in conflict:
-
-- **Rule #12 governs pace within a session** — don't race through concepts.
-- **Rule #13 governs deliverables across sessions** — don't pile concepts without artifacts.
-
-A slow session can ship a small artifact. A 90-minute session might produce a 5-line CLI command. That's correct. The artifact's size scales with the session's pace, not with raw time spent.
+They don't. Slowness governs *pace within a chapter*; this rule governs *what the learner has to show at the end*. A slow chapter can produce a sharp paragraph of understanding. A fast chapter that produces fuzziness has violated both rules.
 
 ## Failure mode to watch for
 
-When you finish three sessions in a row without an explicit demonstration at session close, the rule was violated. Pull the artifact forward in the next session — even a one-line behavior change is enough. The visibility matters more than the size.
-
-If the learner asks "where is this going?" — that's the signal that the cumulative narrative has gone fuzzy. Re-anchor by demonstrating what they can run today vs. last session.
+If the learner finishes three chapters in a row and can't articulate what each chapter taught them, the chapters were skim-reads, not tours. Slow down. Re-read with predicts active. The pedagogy depends on the learner doing the work; tour mode makes it easier to fake doing the work because there's no compiler to call the bluff.
 
 ## See also
 
-- [`docs/blueprint/14-roadmap.md`](../blueprint/14-roadmap.md) — the canonical statement of this philosophy at the milestone level.
-- [`docs/teaching/sessions.md`](sessions.md) — the per-session teaching plan; each row should produce an artifact.
-- The portable `teaching` skill at `~/.dotfiles/.agents/skills/teaching/SKILL.md` — rule #13 in the operating rules; expanded in `references/operating-rules.md`.
-- Obsidian: `[[Skateboard MVP]]` and `[[Shippable Increment Per Session]]` — the underlying concepts.
-- Obsidian: `[[Teaching Senior Engineers]]` — the synthesis hub for the full pedagogy.
+- `~/.skills/teaching/SKILL.md` — rule 13 (artifact per chapter, tour-mode adapted) and rule 15 (chapter-as-curriculum)
+- `~/.skills/teaching/references/operating-rules.md` — the long-form rules
+- The reproduce-mode counterpart at `references/templates/reproduce/build-philosophy.md`

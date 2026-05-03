@@ -40,22 +40,23 @@ If you don't have it, install via `~/.local/share/nvim/mason/bin/codelldb` (Maso
 `examples/m0_hello_adapter.rs`:
 
 ```rust
+use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use std::process::Stdio;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // codelldb requires --port 0 (TCP, not stdio). On port 0 it picks a free port
-    // and prints "Listening on port N" to stderr.
+    // codelldb listens on TCP — with --port 0 it picks a free port. Modern codelldb
+    // (≥ v1.10) is silent on stderr unless RUST_LOG=debug; see docs/reference/codelldb-quirks.md.
     let mut child = Command::new("codelldb")
         .arg("--port").arg("0")
+        .env("RUST_LOG", "debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
-    // Read first chunk from stderr (where codelldb announces the port).
+    // Read first chunk from stderr (where codelldb logs).
     let mut stderr = child.stderr.take().expect("stderr piped");
     let mut buf = [0u8; 256];
     let n = stderr.read(&mut buf).await?;
@@ -97,22 +98,30 @@ cargo run --example m0_hello_adapter
 Expected output (something like):
 
 ```
-first stderr chunk: "Listening on port 53274\n"
+first stderr chunk: "[INFO  codelldb] Loaded \"/Users/.../liblldb.dylib\", version=\"lldb version 20.1.4-codelldb\"\n"
 ```
 
-Different port number every run. The point is: codelldb spoke to us.
+A single tracing log line from codelldb, captured as the first chunk of stderr bytes. The point is: codelldb spoke to us.
 
-### Step 4 — Notice the surprise
+You may *not* see the "Listening on port N" debug line in this same chunk — codelldb writes the load-info and listening-info lines as separate `tracing` events, and a single `read` returns whatever was buffered when called. This is the partial-read truth of stream I/O — never assume "one read = one message." M1 handles framing properly.
 
-codelldb is **not** stdio-DAP. It's a TCP server. `--port 0` means "pick a free port, tell me what it was on stderr." The actual DAP traffic happens on TCP after we connect to that port.
+### Step 4 — Notice the surprises
 
-This is the first adapter quirk. Encode it later in `crates/adapter-codelldb/`.
+Two non-obvious behaviours, both worth pocketing:
+
+1. **codelldb is not stdio-DAP.** It's a TCP server. `--port 0` means "pick a free port." The actual DAP traffic happens on TCP after we connect to that port. We discover the port via the listening log line (in M1).
+
+2. **codelldb is silent without `RUST_LOG=debug`.** Modern codelldb (≥ v1.10) gates all log output behind the `RUST_LOG` env var. Without it, the spawn would hang because there's nothing to read on stderr.
+
+Both quirks are the first hits of what will accumulate into a multi-row table. Encoded long-form in [`docs/reference/codelldb-quirks.md`](../../reference/codelldb-quirks.md). Apply consistently in `crates/adapter-codelldb/` when M5+ lands (and reference the quirks doc inline in adapter source).
 
 ## Success criteria
 
-- `cargo run --example m0_hello_adapter` runs, prints a "Listening on port N" line, exits cleanly.
-- Run it 3 times: port number changes each time.
-- Comment in the source explains why we read stderr, not stdout.
+- `cargo run --example m0_hello_adapter` runs, prints a non-empty `first stderr chunk: "..."` line containing real codelldb log output (typically the lldb-load message), and exits cleanly.
+- The example uses `Stdio::piped()`, `kill_on_drop(true)`, and `.env("RUST_LOG", "debug")`.
+- Comment in the source explains why we read stderr (it's where codelldb's tracing output lands), and why `RUST_LOG=debug` is required.
+
+(Old criterion "run 3 times, port number changes each time" — removed. Modern codelldb gates the listening line behind `DEBUG`, and our single-read approach often misses it due to the partial-read gotcha. Verifying port-changes is a job for M1 once we have proper framing.)
 
 ## Files
 

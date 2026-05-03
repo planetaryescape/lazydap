@@ -33,10 +33,15 @@ See [docs/blueprint/00-overview.md](docs/blueprint/00-overview.md) for the full 
 | "Isn't this just a wrapper on DAP?" | [`docs/articles/yes-its-a-wrapper.md`](docs/articles/yes-its-a-wrapper.md) |
 | For agents (Claude/Cursor/etc) | [`AGENTS.md`](AGENTS.md) |
 | For Claude Code specifically | [`CLAUDE.md`](CLAUDE.md) |
+| Setting up a dev environment | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 
-## Install
+## Install (as a user)
 
-Not yet. M0 is "spawn an adapter, read its output." Public release is targeted around milestone [M15](docs/implementation/tasks/M15-config-file.md).
+Not yet. M0 is "spawn an adapter, read its output." Public release is targeted around milestone [M15](docs/implementation/tasks/M15-config-file.md). When it ships, this section will cover installing the `lazydap` binary and pointing it at a DAP adapter on your system.
+
+## Develop (working on lazydap itself)
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for toolchain prereqs, build / test / lint commands, and how to install the DAP adapters (codelldb, debugpy, js-debug) that the integration tests run against.
 
 ## License
 

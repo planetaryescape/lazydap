@@ -1,0 +1,20 @@
+# Chain registry for lazydap. Auto-generated; edit as needed.
+chain = "planetaryescape"
+description = "lazydap → mxr-book → life-coach-os-book — Rust + iOS + DAP deep-fundamentals chain"
+
+# Anchor codebase for drift detection (path relative to this book repo,
+# or an absolute path). Lives ABOVE [[siblings]] because TOML parsers
+# treat any key=value lines after [[table]] as belonging to that table.
+anchor_repo = "."
+
+[[siblings]]
+name = "lazydap"
+path = "../lazydap"
+
+[[siblings]]
+name = "mxr-book"
+path = "../mxr-book"
+
+[[siblings]]
+name = "life-coach-os-book"
+path = "../life-coach-os-book"

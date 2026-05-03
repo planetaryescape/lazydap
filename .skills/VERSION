@@ -1,0 +1,11 @@
+Vendored: 2026-05-02T21:35:15Z
+Mode: tour
+Target language: rust
+Anchor repo: .
+Previous vendored: 2026-05-02T21:10:04Z
+
+Source skill versions:
+  teaching:  version:1.0.0 (from /Users/bhekanik/.dotfiles/.skills/teaching)
+  humanizer: snapshot (from /Users/bhekanik/.claude/skills/humanizer)
+
+To refresh: re-run bookgen/scripts/update.sh --book-repo <this-repo>

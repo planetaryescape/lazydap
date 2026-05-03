@@ -6,18 +6,19 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 > **Project is in teaching mode** (see [`/AGENTS.md`](AGENTS.md) for the protocol). Sessions are smaller than milestones — each session covers one new concept.
 
-**Next session: `M0-1` — Hello, adapter.** First real milestone.
+**Next session: `M2-1` — serde + typed protocols.** First proper Rust↔JSON mapping for DAP.
 
-- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M0-1`
-- Underlying milestone: [`docs/implementation/tasks/M00-hello-adapter.md`](docs/implementation/tasks/M00-hello-adapter.md)
-- Last session: `WS-3` — Convention as code (2026-05-01). Obsidian: `Lazydap Session 2026-05-01 WS-3.md`. Atomic concept: `Rust Project Conventions.md`.
+- Book chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md) (stub — to be filled in-session)
+- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M2-1`
+- Underlying milestone: [`docs/implementation/tasks/M02-initialize-handshake.md`](docs/implementation/tasks/M02-initialize-handshake.md)
+- Last session: `M1-1` — Read one message (2026-05-03). Obsidian: `Lazydap Session 2026-05-03 M1-1.md`. Atomic concept: `Rust BufReader.md`. Public chapter: [`docs/book/05-read-one-message.md`](docs/book/05-read-one-message.md).
 - Obsidian hub: `Lazydap Teaching Sessions.md` (vault root) — log goes here
 
-WS-3 deliverable: lazydap is conventions-complete. `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`, dual licenses, `.github/workflows/ci.yml` (fmt/clippy/check/test) all in place. First commit landed: `6a06e68 chore: initial workspace scaffold`.
+**M1-1 deliverable** (shipped): `cargo run --example m1_read_one_message` connects to codelldb, sends an `initialize` request, and pretty-prints a real Content-Length-framed DAP response with full capability flags. Verified end-to-end against codelldb v20.1.4.
 
-**All WS-* sessions complete. Next is M0.** Pre-session todo: install codelldb if not already present (do this in-session, not before).
+**Side learning that propagated up the stack from M1-1**: teaching skill rule 16 added (verify-before-publishing), bookgen skill updated to enforce it on generated chapters, global CLAUDE.md `VERIFY BEFORE TEACHING` framework added. Originated from a real version-drift hang in this session (milestone matcher expected `"Listening on port N"`, live codelldb v20 emits `"Listening on HOST:PORT"`).
 
-When all WS-* sessions are done, check the workspace setup box below.
+**Pre-session todo for M2-1**: none. `serde_json` already wired from M1-1.
 
 If the user says "drop teaching mode," skip the teaching column and pick milestones directly from the lists below.
 
@@ -29,12 +30,13 @@ If the user says "drop teaching mode," skip the teaching column and pick milesto
 ## Now
 
 - Decisions to confirm with user (see `docs/blueprint/15-decision-log.md` for in-flight items)
-- Begin teaching session `WS-1`
+- Continue teaching session `M2-1` (next)
+- Fill in the book chapter stubs for chapters 06-39 as the corresponding sessions land
 
 ## Phase A — see the protocol (M0–M4)
 
-- [ ] [M0 — Hello, adapter](docs/implementation/tasks/M00-hello-adapter.md)
-- [ ] [M1 — Read one message](docs/implementation/tasks/M01-read-one-message.md)
+- [x] [M0 — Hello, adapter](docs/implementation/tasks/M00-hello-adapter.md) — completed 2026-05-02 (session `M0-1`). Public chapter: [`docs/book/04-hello-adapter.md`](docs/book/04-hello-adapter.md). Two follow-up issues filed: [docs/issues/0001](docs/issues/0001-codelldb-symlink-install-broken.md), [docs/issues/0002](docs/issues/0002-codelldb-version-drift-rust-log.md). New reference: [docs/reference/codelldb-quirks.md](docs/reference/codelldb-quirks.md).
+- [x] [M1 — Read one message](docs/implementation/tasks/M01-read-one-message.md) — completed 2026-05-03 (session `M1-1`). Public chapter: [`docs/book/05-read-one-message.md`](docs/book/05-read-one-message.md). Side win: `verify-before-publishing` framework propagated to teaching/bookgen skills + global CLAUDE.md after live version-drift hang surfaced the principle.
 - [ ] [M2 — Initialize handshake](docs/implementation/tasks/M02-initialize-handshake.md)
 - [ ] [M3 — Launch and observe](docs/implementation/tasks/M03-launch-and-observe.md)
 - [ ] [M4 — Pause on breakpoint](docs/implementation/tasks/M04-pause-on-breakpoint.md)

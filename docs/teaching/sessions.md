@@ -2,7 +2,18 @@
 
 Per-milestone session cuts for teaching mode. The underlying milestones live in [`docs/implementation/tasks/`](../implementation/tasks/) — those stay clean and ship-mode-ready. This doc is the parallel teaching plan.
 
-Cognitive load discipline: one new concept per session. Some milestones are 1 session; dense ones are several. Each session ends with a teach-back captured in the Obsidian session note.
+Cognitive load discipline: one new concept per session. Some milestones are 1 session; dense ones are several. Each session produces three artifacts: a teach-back captured in the Obsidian session note (private), a public **book chapter** at `docs/book/<NN>-<title>.md`, and a teacher's-eye **teaching-notes** file at `docs/teaching/notes/<NN>-<title>.md`. See `~/.dotfiles/.skills/teaching/SKILL.md` rules 14 and 15.
+
+Quick map from session ID → book chapter:
+
+| Session | Chapter | Status |
+|---|---|---|
+| WS-1 | [`docs/book/01-cargo-workspaces.md`](../book/01-cargo-workspaces.md) | ✅ taught |
+| WS-2 | [`docs/book/02-tokio-main-clap.md`](../book/02-tokio-main-clap.md) | ✅ taught |
+| WS-3 | [`docs/book/03-conventions-as-code.md`](../book/03-conventions-as-code.md) | ✅ taught |
+| M0-1 | [`docs/book/04-hello-adapter.md`](../book/04-hello-adapter.md) | ✅ taught |
+| M1-1 | [`docs/book/05-read-one-message.md`](../book/05-read-one-message.md) | ✅ taught |
+| M2-1 onwards | `docs/book/06-*` and onwards | stub — fill during the live session |
 
 ## Workspace setup → 3 sessions
 
@@ -88,7 +99,8 @@ This is the biggest milestone. Five sessions minimum.
 | Session | Concept | What we do |
 |---|---|---|
 | **M5-1** | The protocol crate + IpcMessage envelope | Create `crates/protocol`, define `IpcMessage`, `IpcPayload`, `Request`, `Response` (just `Ping`/`Pong` for now). Concept focus: enum-as-message-type pattern, serde tagging strategies, why a dedicated protocol crate (boundary discipline). |
-| **M5-2** | Length-prefixed JSON codec | Build `read_message` / `write_message` in `crates/protocol/src/codec.rs`. Concept focus: `read_exact` vs `read`, big-endian vs little-endian, the cancellation-safety footgun in async reads. |
+| **TDD-1** | Test-driven development (the dedicated meta-session) | The retroactive explanation. Up to this point smoke tests have been teacher-written and treated as deferred-load (rule 8). This session walks the existing tests for chapters 05+ together, explains `#[tokio::test]`, fixture data, the Implementation Swap Test, and behaviour-vs-implementation testing. Concept focus: tests as a design tool *and* a verification tool, lifted from the project's `tdd` skill. After this session, M5-2 onward is test-driven by default. |
+| **M5-2** | Length-prefixed JSON codec | Build `read_message` / `write_message` in `crates/protocol/src/codec.rs` **test-first** (now that TDD-1 has landed). Concept focus: `read_exact` vs `read`, big-endian vs little-endian, the cancellation-safety footgun in async reads. The codec is a perfect TDD candidate — pure functions, fixture bytes in / typed message out. |
 | **M5-3** | Unix sockets + accept loop | `crates/daemon/src/server.rs` with `UnixListener::bind`, accept loop, `tokio::spawn` per client. Concept focus: how Unix sockets differ from TCP, file permissions on sockets, why we spawn a task per connection. |
 | **M5-4** | Auto-spawning daemon | The `ensure_daemon_running` dance: probe socket → fork daemon → poll for socket. Concept focus: re-execing the binary, detaching from parent, the PID-file + flock pattern, the "client probes before doing anything" workflow. |
 | **M5-5** | Wire `lazydap launch` end-to-end | The first real subcommand. CLI side (`crates/daemon/src/cli/launch.rs`) → IPC client → daemon handler → DAP transport from Phase A → response back. Concept focus: this is the moment the architecture from blueprint becomes real code. |

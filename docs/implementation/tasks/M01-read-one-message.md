@@ -31,6 +31,7 @@ use tokio::process::Command;
 async fn spawn_codelldb_and_get_port() -> anyhow::Result<(tokio::process::Child, u16)> {
     let mut child = Command::new("codelldb")
         .arg("--port").arg("0")
+        .env("RUST_LOG", "debug")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -40,16 +41,22 @@ async fn spawn_codelldb_and_get_port() -> anyhow::Result<(tokio::process::Child,
     let mut lines = BufReader::new(stderr).lines();
 
     while let Some(line) = lines.next_line().await? {
-        if let Some(rest) = line.strip_prefix("Listening on port ") {
-            let port: u16 = rest.trim().parse()?;
-            // Spawn a task to drain the rest of stderr so codelldb doesn't block.
-            tokio::spawn(async move {
-                while let Ok(Some(_)) = lines.next_line().await {}
-            });
-            return Ok((child, port));
-        }
+        // Modern codelldb (20.x): "Listening on HOST:PORT". Older: "Listening on port NNNNN".
+        // See docs/issues/0002-codelldb-version-drift-rust-log.md.
+        let Some((_, rest)) = line.split_once("Listening on ") else {
+            continue;
+        };
+        let port_str = rest
+            .strip_prefix("port ")
+            .unwrap_or_else(|| rest.rsplit(':').next().unwrap_or(rest));
+        let port: u16 = port_str.trim().parse()?;
+        // Drain the rest of stderr in the background so codelldb doesn't block on a full pipe.
+        tokio::spawn(async move {
+            while let Ok(Some(_)) = lines.next_line().await {}
+        });
+        return Ok((child, port));
     }
-    anyhow::bail!("codelldb didn't print port");
+    anyhow::bail!("codelldb didn't print 'Listening on' line");
 }
 ```
 
