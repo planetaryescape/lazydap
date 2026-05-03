@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Compose release notes
         env:
@@ -24,6 +25,10 @@ jobs:
           set -euo pipefail
           NUM="${TAG_NAME#chapter-}"
 
+          # Always look for the chapter file on main. The tag itself may
+          # point at an earlier commit (start-state semantics) where the
+          # chapter file isn't present yet; the release notes describe
+          # chapter NN regardless of the tag's checkout state.
           CHAPTER_FILE=$(ls "docs/book/${NUM}-"*.md 2>/dev/null | head -1 || true)
 
           {
@@ -52,9 +57,9 @@ jobs:
                 echo ""
               fi
               REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
-              echo "**Read the chapter:** [${CHAPTER_FILE}](${REPO_URL}/blob/${TAG_NAME}/${CHAPTER_FILE})"
+              echo "**Read the chapter:** [${CHAPTER_FILE}](${REPO_URL}/blob/main/${CHAPTER_FILE})"
             else
-              echo "_Chapter file is still a stub. See \`docs/book/README.md\` for the table of contents._"
+              echo "_Chapter file not found in \`docs/book/\`. See \`docs/book/README.md\` for the table of contents._"
             fi
             echo ""
             echo "---"
