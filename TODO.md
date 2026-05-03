@@ -20,6 +20,28 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 **Pre-session todo for M2-1**: none. `serde_json` already wired from M1-1.
 
+### Repo state notes (for cold-start agent)
+
+The lazydap repo is now on GitHub at [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), publicly available. Three chapter releases live: [chapter-04](https://github.com/planetaryescape/lazydap/releases/tag/chapter-04), [chapter-05](https://github.com/planetaryescape/lazydap/releases/tag/chapter-05), [chapter-06](https://github.com/planetaryescape/lazydap/releases/tag/chapter-06). Each represents the *start state* of that chapter (rule 18 of the teaching skill). Workflow at [.github/workflows/release.yml](.github/workflows/release.yml) auto-creates a release on every `chapter-*` tag push.
+
+### Per-session ship checklist
+
+After M2-1 (or any future session) finishes its artifact and teach-back, before the session is "done":
+
+- [ ] Smoke test written (rule 17) and passing locally with `cargo test --workspace --all-targets`
+- [ ] Public book chapter (`docs/book/NN-*.md`) filled per `references/chapter-template.md`
+- [ ] Teaching notes companion (`docs/teaching/notes/NN-*.md`) filled per `references/teaching-notes-template.md`
+- [ ] Private session note (`Lazydap Session YYYY-MM-DD.md`) in Obsidian + hub updated
+- [ ] Atomic concept notes created/extended for keepers
+- [ ] **Two-commit dance for chapter tag** (rule 18):
+    1. Commit lesson content (chapter file + notes + supporting docs), push main
+    2. Tag `chapter-(NN+1)` at that commit, `git push origin chapter-(NN+1)` — workflow auto-creates release
+    3. Verify: `gh release view chapter-(NN+1)`
+    4. Commit artifact code (example file + smoke test), push main
+- [ ] CONTRIBUTING.md and AGENTS.md still match reality after changes
+
+**Note for cold-start me**: The chapter-04 release was manually patched once because its tag's commit predated the release workflow's main-fallback fix. If chapter-04 tag is force-updated later, the workflow will overwrite the manual notes — that's fine since the workflow now generates the right notes from the chapter file on main.
+
 If the user says "drop teaching mode," skip the teaching column and pick milestones directly from the lists below.
 
 ## Workspace setup (prerequisite to M0)
