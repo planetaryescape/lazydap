@@ -1,0 +1,82 @@
+name: Chapter Release
+
+on:
+  push:
+    tags:
+      - 'chapter-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create release for chapter tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compose release notes
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          NUM="${TAG_NAME#chapter-}"
+
+          CHAPTER_FILE=$(ls "docs/book/${NUM}-"*.md 2>/dev/null | head -1 || true)
+
+          {
+            echo "## Chapter ${NUM} — start state"
+            echo ""
+            echo "Checkout this tag to begin chapter ${NUM} from the right starting point:"
+            echo ""
+            echo '```bash'
+            echo "git checkout ${TAG_NAME}"
+            echo '```'
+            echo ""
+            if [ -n "$CHAPTER_FILE" ] && [ -f "$CHAPTER_FILE" ]; then
+              TITLE=$(awk '/^title:/ { sub(/^title:[[:space:]]*/, "", $0); print; exit }' "$CHAPTER_FILE")
+              ARTIFACT=$(awk '/^artifact:/ { sub(/^artifact:[[:space:]]*/, "", $0); print; exit }' "$CHAPTER_FILE")
+              SESSION_ID=$(awk '/^session_id:/ { sub(/^session_id:[[:space:]]*/, "", $0); print; exit }' "$CHAPTER_FILE")
+              if [ -n "$TITLE" ]; then
+                echo "### ${TITLE}"
+                echo ""
+              fi
+              if [ -n "$ARTIFACT" ]; then
+                echo "**Artifact:** ${ARTIFACT}"
+                echo ""
+              fi
+              if [ -n "$SESSION_ID" ]; then
+                echo "**Session ID:** \`${SESSION_ID}\`"
+                echo ""
+              fi
+              REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+              echo "**Read the chapter:** [${CHAPTER_FILE}](${REPO_URL}/blob/${TAG_NAME}/${CHAPTER_FILE})"
+            else
+              echo "_Chapter file is still a stub. See \`docs/book/README.md\` for the table of contents._"
+            fi
+            echo ""
+            echo "---"
+            echo ""
+            echo "**About these tags:** every chapter has a tag named \`chapter-NN\` that points at the state of \`main\` you should checkout to *begin* that chapter. The end of chapter NN is the start of chapter NN+1, so to see the state after a chapter is complete, checkout the next chapter's tag (or \`main\` for the latest)."
+            echo ""
+            echo "Tags are moved forward when retroactive fixes apply, so each tag always points at the best-current version of that chapter's start state. See [CONTRIBUTING.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CONTRIBUTING.md#chapter-tags-and-releases) for the full convention."
+          } > release-notes.md
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          NUM="${TAG_NAME#chapter-}"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release ${TAG_NAME} already exists; updating notes."
+            gh release edit "$TAG_NAME" --notes-file release-notes.md
+          else
+            echo "Creating release ${TAG_NAME}."
+            gh release create "$TAG_NAME" \
+              --title "Chapter ${NUM}" \
+              --notes-file release-notes.md
+          fi
