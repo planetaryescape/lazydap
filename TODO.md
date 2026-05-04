@@ -6,21 +6,21 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 > **Project is in teaching mode** (see [`/AGENTS.md`](AGENTS.md) for the protocol). Sessions are smaller than milestones — each session covers one new concept.
 
-**Next session: `M2-2` — DAP transport + atomic seq.** Generic methods, `AtomicI64` for sequence numbers, `thiserror` error type, real codelldb wire-up.
+**Next session: `M3-1` — event streaming + tagged enums.** Add `Incoming` enum, `read_incoming` method, the response/event distinction at the type level. Concept focus: Rust enums vs TS unions, pattern matching as a control-flow primitive, `Box<dyn Future>` if it comes up.
 
-- Book chapter: [`docs/book/07-dap-transport-and-seq.md`](docs/book/07-dap-transport-and-seq.md) (stub — to be filled in-session)
-- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M2-2`
-- Underlying milestone: [`docs/implementation/tasks/M02-initialize-handshake.md`](docs/implementation/tasks/M02-initialize-handshake.md) (M2-1 covered the type definitions; M2-2 adds the transport struct + generic request method)
-- Last session: `M2-1` — Serde and typed protocols (2026-05-03). Obsidian: `Lazydap Session 2026-05-03 M2-1.md`. Atomic concept: `Rust Serde.md`. Public chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md).
+- Book chapter: [`docs/book/08-event-streaming.md`](docs/book/08-event-streaming.md) (stub — to be filled in-session)
+- Plan: [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — search for `M3-1`
+- Underlying milestone: [`docs/implementation/tasks/M03-launch-and-observe.md`](docs/implementation/tasks/M03-launch-and-observe.md)
+- Last session: `M2-2` — DAP transport + atomic seq (2026-05-04). Obsidian: `Lazydap Session 2026-05-04 M2-2.md`. Atomic concepts: `Rust Atomics.md`, `Rust thiserror.md`. Public chapter: [`docs/book/07-dap-transport-and-seq.md`](docs/book/07-dap-transport-and-seq.md).
 - Obsidian hub: `Lazydap Teaching Sessions.md` (vault root) — log goes here
 
-**M2-1 deliverable** (shipped): `cargo test -p lazydap-dap` passes three tests round-tripping `Capabilities`, `DapResponse<Capabilities>`, and `InitializeArgs` against real DAP wire shapes. New crate `crates/dap` with `types.rs` housing the typed structs. Call-site diff demonstrated: chapter 05's `value["body"]["foo"].as_bool().unwrap_or(false)` becomes chapter 06's `resp.body.unwrap().foo: bool` — compile-time-checked field access replacing runtime hash-map walks.
+**M2-2 deliverable** (shipped): `cargo run --example m2_initialize` spawns real codelldb, sends a typed `InitializeArgs`, and prints a typed `Capabilities` struct from the wire. New `crates/dap/src/transport.rs` with `DapTransport` (child + stream + AtomicI64 seq), `TransportError` enum (`thiserror::Error`), and a generic `request<T: Serialize, R: DeserializeOwned>` method that handles every DAP command. Full-duplex demux loop in place (events log-and-skipped today; M3 will deliver them).
 
-**Pre-session todo for M2-2**: none. `crates/dap` exists with type definitions; M2-2 adds `crates/dap/src/transport.rs` and the generic `request<T, R>` method. `thiserror` and `tracing` will need to be added to workspace deps (mechanical).
+**Pre-session todo for M3-1**: none. The transport exists; M3-1 augments the read loop to deliver events to the caller via a typed enum + channel. Concept focus is *enums-as-tagged-unions* (the inbound message can be either Response or Event; today we discriminate by string; M3-1 makes it a typed enum the caller pattern-matches on).
 
 ### Repo state notes (for cold-start agent)
 
-The lazydap repo is now on GitHub at [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), publicly available. Four chapter releases live: [chapter-04](https://github.com/planetaryescape/lazydap/releases/tag/chapter-04), [chapter-05](https://github.com/planetaryescape/lazydap/releases/tag/chapter-05), [chapter-06](https://github.com/planetaryescape/lazydap/releases/tag/chapter-06), [chapter-07](https://github.com/planetaryescape/lazydap/releases/tag/chapter-07). Each represents the *start state* of that chapter (rule 18 of the teaching skill). Workflow at [.github/workflows/release.yml](.github/workflows/release.yml) auto-creates a release on every `chapter-*` tag push.
+The lazydap repo is now on GitHub at [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), publicly available. Five chapter releases live: [chapter-04](https://github.com/planetaryescape/lazydap/releases/tag/chapter-04), [chapter-05](https://github.com/planetaryescape/lazydap/releases/tag/chapter-05), [chapter-06](https://github.com/planetaryescape/lazydap/releases/tag/chapter-06), [chapter-07](https://github.com/planetaryescape/lazydap/releases/tag/chapter-07), [chapter-08](https://github.com/planetaryescape/lazydap/releases/tag/chapter-08). Each represents the *start state* of that chapter (rule 18 of the teaching skill). Workflow at [.github/workflows/release.yml](.github/workflows/release.yml) auto-creates a release on every `chapter-*` tag push.
 
 ### Per-session ship checklist
 
@@ -57,7 +57,7 @@ If the user says "drop teaching mode," skip the teaching column and pick milesto
 
 - [x] [M0 — Hello, adapter](docs/implementation/tasks/M00-hello-adapter.md) — completed 2026-05-02 (session `M0-1`). Public chapter: [`docs/book/04-hello-adapter.md`](docs/book/04-hello-adapter.md). Two follow-up issues filed: [docs/issues/0001](docs/issues/0001-codelldb-symlink-install-broken.md), [docs/issues/0002](docs/issues/0002-codelldb-version-drift-rust-log.md). New reference: [docs/reference/codelldb-quirks.md](docs/reference/codelldb-quirks.md).
 - [x] [M1 — Read one message](docs/implementation/tasks/M01-read-one-message.md) — completed 2026-05-03 (session `M1-1`). Public chapter: [`docs/book/05-read-one-message.md`](docs/book/05-read-one-message.md). Side win: `verify-before-publishing` framework propagated to teaching/bookgen skills + global CLAUDE.md after live version-drift hang surfaced the principle.
-- [ ] [M2 — Initialize handshake](docs/implementation/tasks/M02-initialize-handshake.md) — session `M2-1` completed 2026-05-03 (typed structs in new `crates/dap`). Public chapter: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md). Session `M2-2` next (transport struct + generic request method).
+- [x] [M2 — Initialize handshake](docs/implementation/tasks/M02-initialize-handshake.md) — completed across two sessions: `M2-1` (typed structs, 2026-05-03) and `M2-2` (transport + atomic seq + thiserror, 2026-05-04). Public chapters: [`docs/book/06-serde-typed-protocols.md`](docs/book/06-serde-typed-protocols.md), [`docs/book/07-dap-transport-and-seq.md`](docs/book/07-dap-transport-and-seq.md). End-state: `cargo run --example m2_initialize` round-trips a typed initialize against real codelldb.
 - [ ] [M3 — Launch and observe](docs/implementation/tasks/M03-launch-and-observe.md)
 - [ ] [M4 — Pause on breakpoint](docs/implementation/tasks/M04-pause-on-breakpoint.md)
 
