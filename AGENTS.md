@@ -4,6 +4,8 @@ Read this when you (an AI agent — Claude, Cursor, Copilot, etc.) are asked to 
 
 ## ⚠️ Teaching mode is the default for this project
 
+**Teaching skill version:** 19 (rule 19 — varied practice for transfer — adopted 2026-05-04, session M3-1). When the skill version bumps, run `/update-teaching` to apply pending migrations to this repo. Migration mechanism scaffolds in a follow-up session; until then, sync conventions manually from `~/.dotfiles/.agents/skills/teaching/SKILL.md`.
+
 **lazydap is being built as a deliberate Rust learning project.** The build pace is intentionally slow. The goal is **the user's understanding**, not throughput.
 
 ### User profile (the learner)
