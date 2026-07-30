@@ -18,6 +18,7 @@ lazydap [OPTIONS] [COMMAND]
 | Command | Does |
 | --- | --- |
 | [`lazydap launch`](/reference/cli/launch/) | Start a program under the debugger |
+| [`lazydap launches`](/reference/cli/launches/) | List the project's named launch configurations, or run one |
 | [`lazydap status`](/reference/cli/status/) | Show the daemon and its current session |
 | [`lazydap disconnect`](/reference/cli/disconnect/) | End the current session |
 | [`lazydap shutdown`](/reference/cli/shutdown/) | Stop the daemon and every session it owns |

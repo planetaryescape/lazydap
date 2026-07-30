@@ -60,7 +60,7 @@ well-formed frame; there is nothing to recover on the old connection.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 1,
   "payload": {
     "Request": "Ping"
@@ -87,7 +87,7 @@ A request that does have fields looks like this:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 5,
   "payload": {
     "Request": {
@@ -150,7 +150,7 @@ scroll offsets — not a request variant. Nothing sends it and the daemon has no
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 6,
   "payload": {
     "Request": {
@@ -160,7 +160,8 @@ scroll offsets — not a request variant. Nothing sends it and the daemon has no
         "args": [],
         "cwd": "/Users/you/lazydap-demo",
         "env": {},
-        "stop_on_entry": true
+        "stop_on_entry": true,
+        "adapter_command": null
       }
     }
   }
@@ -175,7 +176,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 7,
   "payload": {
     "Request": {
@@ -199,7 +200,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 8,
   "payload": {
     "Request": {
@@ -233,7 +234,7 @@ wire**, even though the Rust variants are not:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 9,
   "payload": {
     "Request": {
@@ -268,7 +269,7 @@ requests. A client must be able to read a frame it did not ask for at any point.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 0,
   "payload": {
     "Event": {
@@ -288,7 +289,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 0,
   "payload": {
     "Event": {
@@ -309,7 +310,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "id": 0,
   "payload": {
     "Event": {

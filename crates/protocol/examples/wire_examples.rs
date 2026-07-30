@@ -63,6 +63,9 @@ fn main() {
                 cwd: PathBuf::from("/Users/you/lazydap-demo"),
                 env: BTreeMap::new(),
                 stop_on_entry: true,
+                // Resolved client-side per D050; None lets the daemon fall
+                // back to its own discovery (old-client behaviour).
+                adapter_command: None,
             }),
         ),
     );
