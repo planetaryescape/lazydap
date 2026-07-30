@@ -266,3 +266,66 @@ pgrep codelldb || echo "(none)"
 - **No `configurationDone` yet.** Some adapters require it after `initialized` event before they finish the launch. codelldb tolerates not sending it for simple programs. M4 will add it.
 - **`request: "launch"`** is the DAP request shape for codelldb. It's what `launch.json` puts in the `request` field. Keep this in mind for `launch.json` import in M15.
 - **Don't rely on event order.** Different adapters emit events in different orders. Code defensively — the daemon should react to events when they arrive, not assume a sequence.
+
+---
+
+## Completion — 2026-07-30
+
+Shipped. `cargo run --example m3_launch_and_observe` initializes codelldb, launches
+`examples/c-hello/build/hello`, streams every message in receipt order until `terminated`,
+disconnects, and asserts both debuggee lines arrived as DAP `output` events.
+
+**Live verification run by orchestrator 2026-07-30, both examples pass against codelldb 1.12.2**
+(full event stream, both program lines captured as stdout output events, `[ok] debuggee exit code:
+Some(0)`, disconnect acknowledged, no zombie codelldb). The worker's own shell is sandboxed and
+cannot run a debuggee — `debugserver` does not operate under that seatbelt profile, which presents
+as a launch that stalls right after the adapter's `Launching: …` console output. Not a codelldb
+quirk; do not chase it in the environment.
+
+### API decisions
+
+- **Typed requests keep one shape.** `DapTransport::request<T, R>` stays the only typed
+  request/response helper — no `request_typed`/`request_with_value` pair. `R = serde_json::Value`
+  is the untyped variant; `R = ()` is the empty-body variant.
+- **`send_request` + `read_incoming` alongside it.** `send_request` writes a request and returns
+  its `seq`; `read_incoming` returns the next `Incoming::{Response,Event}` in receipt order. That
+  split is what makes the concurrent launch/`initialized` tracks expressible.
+- **Empty-body success.** `request()` falls back to deserialising `R` from JSON null when the
+  response has no `body`, so `configurationDone`/`disconnect`/`continue` succeed while a response
+  type with required fields still errors.
+- **`InitializeArgs::new(adapter_id)` + a hand-written `Default`.** The derived `Default` sent
+  `linesStartAt1: false`, i.e. 0-based lines and silently off-by-one breakpoints. `Default` now
+  encodes the DAP convention (1-based, `pathFormat: "path"`), and all `Option` fields across
+  `InitializeArgs`/`LaunchArgs`/`SetBreakpoints*` use `skip_serializing_if` rather than sending nulls.
+- **`main.c` line layout is a contract with M4.** Written once here with distinct lines for both
+  printfs; the `goodbye` printf sits on line 19 and carries M4's breakpoint, so the `hello from m3`
+  output event lands before the pause. `fflush(stdout)` is load-bearing — under the adapter stdout
+  is a pipe, so without it nothing is flushed before the breakpoint pause.
+
+### Deviations from the task file
+
+- **`configurationDone` is sent here, not deferred to M4** (task Notes said "no configurationDone
+  yet"). `launch` and the `initialized` event are concurrent tracks: the launch response may
+  legitimately arrive only after `configurationDone`, so serialising initialize → launch(await) →
+  … deadlocks on spec-conforming adapters. M3 sends it in reaction to `initialized`.
+- **`console: "internalConsole"` replaced by `terminal: "console"`.** codelldb's launch config has
+  no `console` key; it defaults to the integrated terminal, which needs a `runInTerminal` reverse
+  request we deliberately do not advertise. Verified live: without `terminal: "console"` the launch
+  never produces a `process` event.
+- **Step 2's `spawn_with_events`/channel sketch not implemented** — the task file's own fallback
+  (`Incoming` + `read_incoming`) is what shipped, per its "actually, the simplest M3-shape is" note.
+- **No `[[example]]` block in `Cargo.toml`** — examples stay discovered by convention from
+  `crates/daemon/examples/`.
+
+### Follow-ups discovered
+
+- `request()` now returns `TransportError::UnexpectedResponse` instead of dropping a response whose
+  `request_seq` does not match. Safe because nothing pipelines requests (non-negotiable 6), but the
+  daemon (M5) needs a real correlation map when it multiplexes.
+- `LaunchArgs` is codelldb-shaped and lives in `crates/dap`. That is adapter-specific detail in a
+  protocol crate; M5's `DebugAdapter` trait should move it behind an adapter crate.
+- A reverse request (`type: "request"` from the adapter, e.g. `runInTerminal`) is currently an
+  error in `read_incoming`. Fine while we never advertise support for one; the daemon will need to
+  answer them.
+- `read_incoming` is not cancellation-safe; M5's read pump must own all reads (never timeout-wrap a
+  shared transport read).

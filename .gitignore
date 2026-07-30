@@ -1,4 +1,5 @@
 /target
+/examples/c-hello/build
 .env
 .env.*
 !.env.example

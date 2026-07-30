@@ -285,3 +285,57 @@ Should see `stopped on thread Some(1)` and `terminated` event.
 - **`stopped` reasons:** `breakpoint`, `step`, `exception`, `pause`, `entry`. Same enum lazydap will use later in `PauseReason`.
 - **Think about the daemon already.** This logic — wait-for-initialized, set-breakpoints, config-done, react-to-stopped — is what the daemon will own. The example is a single-purpose script; the daemon will be a re-entrant version of the same.
 - **After M4, Phase A is done.** You've seen the protocol, set a breakpoint, hit it, observed events. Move to Phase B.
+
+---
+
+## Completion — 2026-07-30
+
+Shipped. `cargo run --example m4_pause_on_breakpoint` runs the full sequence: initialize → launch
+(not awaited) → `initialized` → `setBreakpoints` → `configurationDone` → `stopped` → `continue` →
+`terminated` → `disconnect`.
+
+**Live verification run by orchestrator 2026-07-30, both examples pass against codelldb 1.12.2**:
+`setBreakpoints` verified line 19; the **launch response arrived after `configurationDone`**, so the
+concurrent-track handling is observably exercised, not just theoretically correct; `stopped` with
+reason `breakpoint` and `hitBreakpointIds: [1]`; hello-before-pause and goodbye-after-resume both
+asserted; clean exit, no zombie codelldb.
+
+### Resolved line-number inconsistency
+
+The task file was internally inconsistent: its *What* said the `printf("goodbye")` line, its steps
+used line 6, and its own expected-output block flagged that a breakpoint before the first printf
+means no output before the pause ("adjust to bp at line 8"). Resolved by writing
+`examples/c-hello/main.c` **once in M3** with the layout M4 needs and breakpointing the `goodbye`
+printf at **line 19**, so `hello from m3` is flushed and observed as an `output` event before the
+pause. The example asserts exactly that ordering.
+
+### API decisions
+
+- **No `request_typed`.** Step 3 left the shape open; the answer is that M4 needs no new typed
+  helper. Both `setBreakpoints` and `configurationDone` go out through `send_request`, and the
+  `setBreakpoints` response is decoded from the `Incoming::Response` body with
+  `serde_json::from_value::<SetBreakpointsResponse>`. Using `request()` here would have been wrong:
+  the launch response is still in flight, and `request()` correctly refuses to consume a response
+  that is not its own.
+- **`ContinueArgs` carries `#[serde(rename_all = "camelCase")]`**, which the task file's sketch
+  omitted — without it the field goes out as `thread_id` and the adapter ignores it.
+- **Breakpoint verification is asserted on the `stopped` event, not on `verified: true`.** codelldb
+  verifies lazily after target load; the `setBreakpoints` response can say `verified: false` and a
+  later `breakpoint` event flips it (and may move the line), so `breakpoint` events are reconciled
+  by `id`.
+
+### Deviations from the task file
+
+- Breakpoint line 19, not 6 (see above).
+- Success criterion "the breakpoint is `verified: true`" is deliberately not asserted in the
+  immediate response, for the lazy-verification reason above.
+- The single receipt-ordered loop replaces the sketch's sequential await-per-step flow.
+
+### Follow-ups discovered
+
+- The `breakpoint`-event arm skips an update that arrives *before* the `setBreakpoints` response
+  (nothing to reconcile against yet). Harmless in this example; the daemon owns proper breakpoint
+  state at M5.
+- The two examples duplicate small helpers (`next_message`, `drain_until_disconnected`,
+  `debuggee_stdout`). Self-contained examples are the repo's style, so this stays until the daemon
+  owns the logic.
