@@ -17,3 +17,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Only to prove the persisted shapes survive a hand-edited `.lazydap/state.toml`
+# (D006). `lazydap-store` owns the actual file.
+toml = { workspace = true }

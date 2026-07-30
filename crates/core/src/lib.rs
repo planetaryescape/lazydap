@@ -6,8 +6,17 @@
 //! and the daemon talk live in `lazydap-protocol`; types that describe *what*
 //! they are talking about live here.
 
+mod breakpoint;
+mod inspect;
 mod session;
 
+pub use breakpoint::{
+    AdapterBreakpoint, BadLocation, Breakpoint, BreakpointId, BreakpointStatus, Location,
+};
+pub use inspect::{
+    EvalContext, EvalResult, Scope, SourceRef, StackFrame, StepKind, ThreadInfo, ThreadUpdate,
+    ThreadUpdateKind, Variable, VariableFilter, WaitOutcome,
+};
 pub use session::{
     AdapterKind, EndReason, OutputCategory, OutputChunk, PauseReason, SessionId, SessionState,
     UnknownAdapter, now_ms,
