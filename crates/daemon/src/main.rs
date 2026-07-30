@@ -1,23 +1,7 @@
-use clap::Parser;
+use std::process::ExitCode;
 
-/// lazydap daemon (placeholder — real one lands in M5).
-#[derive(Parser, Debug)]
-#[command(name = "lazydap-daemon", version, about)]
-struct Args {
-    /// Greeting message to print.
-    #[arg(long, default_value = "hello from lazydap-daemon")]
-    message: String,
-
-    /// Number of times to repeat the greeting.
-    #[arg(long, default_value_t = 1)]
-    count: u32,
-}
-
+/// Thin entrypoint. Everything worth testing lives in the library.
 #[tokio::main]
-async fn main() {
-    let args = Args::parse();
-
-    for _ in 0..args.count {
-        println!("{}", args.message);
-    }
+async fn main() -> ExitCode {
+    lazydap_daemon::run_cli(std::env::args().collect()).await
 }
