@@ -7,11 +7,13 @@
 - **[M12 — Stack pane](tasks/M12-stack-pane.md)** — TUI stack pane. `<CR>` jumps to frame.
 - **[M13 — Scopes pane](tasks/M13-scopes-pane.md)** — scopes pane with expand-on-`<CR>`.
 - **[M14 — Toggle breakpoint](tasks/M14-toggle-breakpoint.md)** — `b` toggles breakpoint at cursor line. Sign in gutter.
+- **[M19 — TUI reconnect](tasks/M19-tui-reconnect.md)** — the TUI starts a daemon and reconnects on its own when the one it was talking to goes away.
 - **[M15 — Config file + launch.json import](tasks/M15-config-file.md)** — config file, launch.json. **Tag v0.1. `cargo install lazydap`.**
 
 ## What you'll have at the end
 
 - TUI with stack pane, scopes pane, breakpoint toggling, gutter signs.
+- A TUI that survives `lazydap shutdown` instead of needing a restart.
 - Persistent breakpoints across sessions (saved in `.lazydap/state.toml`).
 - `.vscode/launch.json` parsed and surfaced as launch configs.
 - Config file at `~/.config/lazydap/config.toml`.
@@ -20,7 +22,7 @@
 
 ## v0.1 release checklist
 
-When M12–M15 land, before tagging:
+When M12–M14, M19 and M15 land, before tagging:
 
 - [ ] `cargo install --path crates/daemon` works on a fresh machine
 - [ ] README updated with v0.1 quick-start
@@ -64,7 +66,7 @@ That's a coherent product. Watches and REPL (M16, M17) are real features, but th
 
 ## Phase D is done when
 
-- All M12–M15 boxes ticked.
+- All M12–M14, M19 and M15 boxes ticked.
 - v0.1.0 tag on git, crates.io published, README has the quick-start.
 - A new user can `cargo install lazydap`, run on a CMake project with `.vscode/launch.json`, and have a working debug session.
 

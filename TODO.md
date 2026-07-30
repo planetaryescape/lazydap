@@ -11,10 +11,14 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Next milestone: [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)** — Phase C is
-  done. The TUI is real: it connects to the daemon as a client, subscribes to events, shows the
-  source with a marker that follows the debuggee, and drives the program with F5/F10/F11/S-F11
-  through the same requests the CLI sends. Phase D adds the panes that make it useful.
+- **Next milestone: [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md)**,
+  which is the **v0.1 gate**. M12, M13, M14 and M19 are done: the TUI now has a stack pane, a
+  lazily-expanded scopes pane, `b` to toggle a breakpoint with a gutter sign, and it survives the
+  daemon going away. Release artifacts (README, CHANGELOG, workflows) are being pre-staged in
+  parallel — check for that work before editing them.
+- New decisions from Phase D's TUI lane: **D040** (the reducer numbers its own requests and drops
+  answers that have been overtaken), **D041** (`Cmd::Batch`), **D042** (the TUI reconnects by
+  calling back into the CLI rather than learning to spawn).
 - Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
   [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
   D029 (adapter seam), D030 (`SessionId` form), D031–D036 from M6/M7 (breakpoint ids, protocol
@@ -58,9 +62,10 @@ workflow at M15.
 
 ## Phase D — useful features (M12–M15) → v0.1
 
-- [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
-- [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
-- [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
+- [x] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md) — completed 2026-07-30. `crates/tui/src/panes/stack.rs`. Tab cycles source → stack → scopes, `j`/`k` move the selection in the focused pane, `<CR>` jumps the source pane to the frame *and* fetches that frame's scopes. `Cmd::Batch` (D041) and reducer-allocated request ids (D040) landed here.
+- [x] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md) — completed 2026-07-30. `crates/tui/src/panes/scopes.rs`. Lazily-expanded tree; `<CR>` fetches a row's children once and toggles it thereafter. Replies are matched to the node that asked by request id, and a handle already open above a row is refused rather than followed into a cycle.
+- [x] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md) — completed 2026-07-30. `b` adds or removes through the same `BreakpointAdd`/`BreakpointRemove` the CLI sends; `●`/`◯`/`⊘` in a gutter column of its own, on the line the adapter actually used. No daemon-side handler was needed and `crates/store` was untouched — both already did the job.
+- [x] [M19 — TUI reconnect](docs/implementation/tasks/M19-tui-reconnect.md) — completed 2026-07-30. `lazydap shutdown` from another terminal now leaves the TUI reconnecting rather than frozen: reducer-owned backoff, a daemon started through the CLI's own `ensure_daemon_running` behind an `EnsureDaemon` callback (D042), and a screen made true again by the `Subscribe` snapshot rather than reconstructed.
 - [ ] [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md) → **tag v0.1**
 
 ## Beyond v0.1 (M16–M18+)

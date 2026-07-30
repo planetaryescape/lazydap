@@ -127,3 +127,59 @@ lazydap break --list --format json | jq '.breakpoints[] | select(.line == 6)'
 - **Adapter `setBreakpoints` replaces all breakpoints in a source file.** When toggling one, send the full list.
 - **Verification is async.** When you toggle a bp, the response is a `SourceBreakpoint` (stored locally) AND an `AdapterBreakpoint` event (later). Show unverified initially, update to verified when event arrives.
 - **`B` (capital)** for conditional breakpoint with prompt — defer to post-v0.1 unless it's trivial.
+
+
+## Completed 2026-07-30
+
+`b` on the cursor line adds a breakpoint or takes away the one already there, through the
+same `BreakpointAdd`/`BreakpointRemove` requests `lazydap break` and `lazydap break
+--remove` send. Gutter signs in a column of their own: `●` verified, `◯` unverified,
+`⊘` disabled, drawn on the line the *adapter* used rather than the one that was typed.
+
+Verified in a pseudo-terminal against real codelldb. `gg`, 14×`j`, `b` — a second
+breakpoint appears on line 15 beside the original on 19:
+
+```
+│   14     int x = 5;                                           ││▾ Local                          │
+│●  15     printf("hello from m3\n");                           ││    x = 5 : int                  │
+│   16     fflush(stdout); /* stdout is a pipe under the adapter││    y = 10 : int                 │
+│   17                        event arrives before the breakpoin││▸ Static                         │
+│   18     int y = x * 2;                                       ││▸ Global                         │
+│●▶ 19     printf("goodbye y=%d\n", y); /* line 19 — M4 breakpoi││▸ Registers                      │
+```
+
+`lazydap break --list --format json` agrees, immediately:
+
+```json
+"breakpoints": [
+  { "enabled": true, "id": 1, "line": 19, "verified": true, "message": "Resolved locations: 1" },
+  { "enabled": true, "id": 2, "line": 15, "verified": true, "message": "Resolved locations: 1" }
+]
+```
+
+Pressing `b` again on line 15 removes it, and the list drops back to `[(1, 19)]`.
+
+### Deviations from the plan
+
+- **No daemon-side handler was added.** The task file sketched a
+  `handle_breakpoint_toggle(source, line, session_id)`. It is not needed and would have
+  been a second way to do what `BreakpointAdd` and `BreakpointRemove` already do — both of
+  which already persist, already `setBreakpoints` the whole file, and are already what the
+  CLI sends. The reducer decides which of the two `b` means from its own view of the list.
+  `crates/store` needed nothing either: `select`, `add` and `remove` were already there.
+- **`b` is add-or-remove, not the daemon's `BreakpointToggle`,** which flips enabled and
+  disabled. Both are useful and they are different things; `b` is the one a gutter does.
+- **The gutter updates optimistically**, which is the only way `b` pressed twice quickly
+  toggles rather than piling up two adds — the second press has to see what the first
+  asked for. It is bounded: the answer overwrites it (matched by *place*, since the
+  optimistic entry has no id yet), a refusal re-reads the whole list, and an added
+  breakpoint shows as `◯`, which is exactly what it is until the adapter says otherwise.
+- **`BreakpointUpdated` is now subscribed to**, and is applied regardless of which session
+  it came from: a breakpoint is the project's, and refusing an update because the session
+  ids had rolled would leave the gutter saying `◯` for one the adapter had confirmed.
+
+### Noticed, not changed
+
+- **`B` for a conditional breakpoint** is still deferred, as the task file allows.
+- **Persistence across a TUI restart** is the store's existing behaviour (D006) and was
+  not re-verified here beyond `break --list` agreeing; M6 covers it.

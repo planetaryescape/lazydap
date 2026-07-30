@@ -459,6 +459,60 @@ The PTY driver is a throwaway script rather than part of the suite (it needs a t
 
 ---
 
+## D040 — the TUI's reducer numbers its own requests, and drops answers that have been overtaken
+
+**Status:** decided (2026-07-30, with M12–M13).
+
+**Why:** Until Phase D the TUI could get away with not correlating a reply to the request that caused it. `ipc_client` said so in as many words: a `Response` says what it is, the daemon answers one request at a time in order, so the last answer of a given kind is the freshest. The scopes pane breaks that in two places.
+
+`Response::Variables` is a bare `Vec<Variable>`. Nothing in it says which node was being expanded — not even the `variables_reference` that was asked for. With two expansions in flight there is no way to tell which is which, and the pane would fill the wrong row.
+
+The second is sharper and applies to the stack too. A stack trace names **frame ids**, and the adapter only keeps those valid until the program moves. An answer for the stop before last is not merely out of date: every id in it addresses nothing, so the pane would populate, look right, and fail on the next expansion. "The last answer wins" is exactly wrong here — the last answer to *arrive* may be the older one.
+
+So `Cmd::SendIpc` carries an `id` chosen by [`AppState::next_request_id`], and the write pump sends that rather than one of its own. Ids are monotonic because every request goes through one function, which is what makes "this has been overtaken" decidable at all.
+
+**How staleness is decided.** One rule per kind of answer, keyed on the id:
+
+- `latest_stack` and `latest_scopes` hold the newest request of each kind. An answer whose id is not the latest is logged and dropped.
+- `pending_variables` maps a request id to the *index path* of the node that asked. A reply with no entry is dropped; a new frame's `Scopes` request clears the map, because the handles the old entries name belong to a frame the program has left.
+- `pending_breakpoints` holds ids for the mutations `b` sends. It is not about staleness — breakpoints outlive stops — but about failure: a refused mutation leaves the gutter showing an intention the daemon did not carry out, and nothing in the error says which way it went, so the answer is to ask for the whole list again.
+
+This is the same discipline M11 already used for file reads (`latest_load`), generalised. The reserved-id floor (`RESERVED_IDS`) keeps the reducer's numbering clear of the handshake's, so a `Pong` can never be mistaken for an answer to something the reducer asked.
+
+**Consequences:** `IpcClient::send` takes an id. `Msg::Connected` exists so that *initialisation* is a reducer decision rather than something the loop hard-codes — which is what lets M19's reconnection replay the opening moves (`Subscribe` + `BreakpointList`) instead of keeping a second copy of them.
+
+---
+
+## D041 — `Cmd::Batch`, sequential and dumb
+
+**Status:** decided (2026-07-30, with M12).
+
+**Why:** One message can genuinely need two things done. A stop needs the stack *and* the scopes; `<CR>` on a stack frame needs the frame's file *and* its variables. Before Phase D every `Msg` produced at most one `Cmd`, and the two ways out of that were both worse than a list: a `Cmd` variant per pair (which grows quadratically and puts the pairing in the wrong place), or asking for the second thing only after the first answer arrives (which adds a round trip to every step of every debug session).
+
+`Cmd::Batch(Vec<Cmd>)` is deliberately the least clever option available. The loop runs the commands in order, one after another, and that is all it does — no parallelism, no dependency between elements, no result threading. Anything a batch could express that a `Vec` cannot is something that belongs in the reducer, where it is testable.
+
+Asking for two things at once does not pipeline anything at the adapter (non-negotiable 6): the daemon queues requests to one adapter regardless, so this shortens the TUI's latency without changing what the adapter sees.
+
+**Consequences:** a batch of one is never constructed — the reducer returns the bare `Cmd` instead — so a test that asserts on a single request does not have to know whether it happens to be wrapped. M16's task file already anticipated this; watches will use it.
+
+---
+
+## D042 — the TUI reconnects by calling back into the CLI, not by learning to spawn
+
+**Status:** decided (2026-07-30, with M19).
+
+**Why:** A TUI left open across `lazydap shutdown` — or across a daemon crash — used to be a dead screen with no way back. Reconnecting needs two things the TUI cannot do: start a daemon process, and take the spawn lock that stops two clients racing to start two.
+
+Neither can move into `lazydap-tui`. It may depend on `core`, `protocol` and `config` and nothing else (D037), and that boundary is the thing making non-negotiable #2 true. So `run` takes an `EnsureDaemon` callback and `crates/daemon/src/commands/tui.rs` supplies one that calls the same `ensure_daemon_running` every subcommand takes (D003) — spawn lock, stale-socket removal, version-mismatch replacement and all. A TUI reviving a daemon does it by exactly the path a CLI command would.
+
+**What the reducer owns.** The retry curve, so it is testable without waiting for it: 250 ms doubling to a 4 s ceiling, six attempts, then `Connection::Lost` and a status row that says so. Finite on purpose — a TUI retrying for ever behind a row nobody is reading looks alive while showing a screen that stopped being true. The delay is a `Cmd::Reconnect { delay_ms }` the loop sleeps on *in a task*, never inline: four seconds of a blocked loop is four seconds in which `q` does not work.
+
+**How the screen becomes true again.** Nothing is reconstructed. A reconnection replays the opening moves of the first connection (`Msg::Connected` → `Subscribe` + `BreakpointList`), and the `Subscribe` reply is a state snapshot taken at the moment the stream attaches (D038). A session started from another terminal while the daemon was down is therefore picked up rather than waited for.
+
+**What survives and what does not.** Everything about the session goes the moment the daemon does — marker, stack, scopes, pending fetches — because none of it can be checked any more. The breakpoints stay: they are the project's, recorded in `.lazydap/state.toml`, and clearing the gutter would suggest they had been lost when they had not. The `BreakpointList` that follows the reconnection refreshes their verification state, which correctly drops back to unverified when the new daemon has no session.
+
+---
+
 ## Open decisions
 
 These need user input.
