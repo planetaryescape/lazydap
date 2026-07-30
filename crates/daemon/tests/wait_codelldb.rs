@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const LAZYDAP: &str = env!("CARGO_BIN_EXE_lazydap");
 
 /// Skip the rest of a test, saying why, when the machine cannot run it.
+///
+/// The thread name is the test's own name under the default harness, which is
+/// what makes the skip line say which test went quiet.
 macro_rules! require_toolchain {
     () => {
         match Toolchain::find() {
@@ -27,7 +30,7 @@ macro_rules! require_toolchain {
             None => {
                 eprintln!(
                     "skipping {}: needs codelldb on PATH and a C compiler",
-                    stringify!($crate),
+                    std::thread::current().name().unwrap_or("this test"),
                 );
                 return;
             }
@@ -303,6 +306,21 @@ fn a_program_that_never_stops_times_out_and_keeps_running() {
     // is still running, and a `pause` is how you would stop it.
     let status = sandbox.json(&["--format", "json", "status"]);
     assert_eq!(status["session"]["state"], "running", "got: {status}");
+}
+
+#[test]
+fn waiting_with_no_timeout_at_all_blocks_rather_than_falling_over() {
+    // `--timeout 0` is documented as "wait forever". Expressing that as a very
+    // large `Duration` panicked the client: `Instant + Duration` overflows.
+    let toolchain = require_toolchain!();
+    let sandbox = Sandbox::new("forever");
+    let program = toolchain.build("exits.c", &sandbox.root);
+
+    sandbox.launch(&program);
+    let blob = sandbox.json(&["--format", "json", "continue", "--wait", "--timeout", "0"]);
+
+    assert_eq!(blob["state"], "exited", "got: {blob}");
+    assert_eq!(blob["exit_code"], 0, "got: {blob}");
 }
 
 #[test]

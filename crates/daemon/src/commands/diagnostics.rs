@@ -84,14 +84,16 @@ fn view(report: &DoctorReport) -> View {
     let rows = report
         .checks
         .iter()
-        .map(|check| Row {
-            id: check.name.clone(),
-            cells: vec![
+        .map(|check| {
+            Row::new(
                 check.name.clone(),
-                if check.ok { "ok" } else { "FAILED" }.to_string(),
-                check.detail.clone(),
-            ],
-            json: serde_json::to_value(check).unwrap_or(serde_json::Value::Null),
+                vec![
+                    check.name.clone(),
+                    if check.ok { "ok" } else { "FAILED" }.to_string(),
+                    check.detail.clone(),
+                ],
+                check,
+            )
         })
         .collect();
 

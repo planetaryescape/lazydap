@@ -62,18 +62,19 @@ pub fn wait_mode(args: &WaitArgs) -> WaitMode {
     }
 }
 
-/// How long the client should be prepared to wait for the daemon's answer.
-pub fn client_timeout(wait: WaitMode) -> Duration {
+/// How long the client should be prepared to wait for the daemon's answer, or
+/// `None` for as long as it takes.
+pub fn client_timeout(wait: WaitMode) -> Option<Duration> {
     match wait {
-        WaitMode::NoWait | WaitMode::Wait { timeout_ms: None } => Duration::from_secs(60),
+        WaitMode::NoWait | WaitMode::Wait { timeout_ms: None } => Some(Duration::from_secs(60)),
         // No timeout on the daemon's side means none on ours either; the
         // caller asked to block until something happens.
         WaitMode::Wait {
             timeout_ms: Some(0),
-        } => Duration::from_secs(u64::MAX / 2),
+        } => None,
         WaitMode::Wait {
             timeout_ms: Some(ms),
-        } => Duration::from_millis(ms as u64) + WAIT_SLACK,
+        } => Some(Duration::from_millis(ms as u64) + WAIT_SLACK),
     }
 }
 
@@ -193,7 +194,7 @@ mod tests {
             timeout_ms: Some(30_000),
         };
         assert!(
-            client_timeout(wait) > Duration::from_secs(30),
+            client_timeout(wait) > Some(Duration::from_secs(30)),
             "got: {:?}",
             client_timeout(wait),
         );
@@ -201,10 +202,12 @@ mod tests {
 
     #[test]
     fn a_wait_with_no_timeout_does_not_get_one_from_the_client_either() {
+        // Not "a very large one": `Instant + Duration` panics on overflow, so
+        // a sentinel big enough to mean never is big enough to crash.
         let wait = WaitMode::Wait {
             timeout_ms: Some(0),
         };
-        assert!(client_timeout(wait) > Duration::from_secs(60 * 60 * 24 * 365));
+        assert_eq!(client_timeout(wait), None);
     }
 
     #[test]

@@ -38,16 +38,16 @@ pub async fn stack(
                 .as_ref()
                 .map(|source| source.label())
                 .unwrap_or_else(|| "-".to_string());
-            Row {
-                id: frame.id.to_string(),
-                cells: vec![
+            Row::new(
+                frame.id.to_string(),
+                vec![
                     frame.id.to_string(),
                     frame.name.clone(),
                     source,
                     frame.line.to_string(),
                 ],
-                json: serde_json::to_value(frame).unwrap_or(serde_json::Value::Null),
-            }
+                frame,
+            )
         })
         .collect();
 
@@ -75,15 +75,18 @@ pub async fn scopes(instance: &Instance, frame: Option<i64>, format: OutputForma
 
     let rows = scopes
         .iter()
-        .map(|scope| Row {
-            // The reference, not the name: it is what the next command needs.
-            id: scope.variables_reference.to_string(),
-            cells: vec![
-                scope.name.clone(),
+        .map(|scope| {
+            Row::new(
+                // The reference, not the name: it is what the next command
+                // needs.
                 scope.variables_reference.to_string(),
-                scope.expensive.to_string(),
-            ],
-            json: serde_json::to_value(scope).unwrap_or(serde_json::Value::Null),
+                vec![
+                    scope.name.clone(),
+                    scope.variables_reference.to_string(),
+                    scope.expensive.to_string(),
+                ],
+                scope,
+            )
         })
         .collect();
 
@@ -121,17 +124,20 @@ pub async fn variables(
 
     let rows = variables
         .iter()
-        .map(|variable| Row {
-            // A variable's own reference, so `--format ids` feeds the next
-            // `lazydap variables`. Scalars have `0`, which expands to nothing.
-            id: variable.variables_reference.to_string(),
-            cells: vec![
-                variable.name.clone(),
-                variable.value.clone(),
-                or_dash(variable.type_name.as_ref()),
+        .map(|variable| {
+            Row::new(
+                // A variable's own reference, so `--format ids` feeds the next
+                // `lazydap variables`. Scalars have `0`, which expands to
+                // nothing.
                 variable.variables_reference.to_string(),
-            ],
-            json: serde_json::to_value(variable).unwrap_or(serde_json::Value::Null),
+                vec![
+                    variable.name.clone(),
+                    variable.value.clone(),
+                    or_dash(variable.type_name.as_ref()),
+                    variable.variables_reference.to_string(),
+                ],
+                variable,
+            )
         })
         .collect();
 
@@ -186,10 +192,12 @@ pub async fn threads(instance: &Instance, format: OutputFormat) -> Result<()> {
 
     let rows = threads
         .iter()
-        .map(|thread| Row {
-            id: thread.id.to_string(),
-            cells: vec![thread.id.to_string(), thread.name.clone()],
-            json: serde_json::to_value(thread).unwrap_or(serde_json::Value::Null),
+        .map(|thread| {
+            Row::new(
+                thread.id.to_string(),
+                vec![thread.id.to_string(), thread.name.clone()],
+                thread,
+            )
         })
         .collect();
 
@@ -217,14 +225,16 @@ pub async fn output(instance: &Instance, since: Option<u64>, format: OutputForma
 
     let rows = chunks
         .iter()
-        .map(|chunk| Row {
-            id: chunk.timestamp_ms.to_string(),
-            cells: vec![
+        .map(|chunk| {
+            Row::new(
                 chunk.timestamp_ms.to_string(),
-                chunk.category.to_string(),
-                chunk.output.trim_end().to_string(),
-            ],
-            json: serde_json::to_value(chunk).unwrap_or(serde_json::Value::Null),
+                vec![
+                    chunk.timestamp_ms.to_string(),
+                    chunk.category.to_string(),
+                    chunk.output.trim_end().to_string(),
+                ],
+                chunk,
+            )
         })
         .collect();
 

@@ -149,17 +149,17 @@ fn view(report: &BreakpointReport) -> View {
                 short(&status.breakpoint.source),
                 status.effective_line(),
             );
-            Row {
-                id: status.breakpoint.id.to_string(),
-                cells: vec![
+            Row::new(
+                status.breakpoint.id.to_string(),
+                vec![
                     status.breakpoint.id.to_string(),
                     location,
                     status.breakpoint.enabled.to_string(),
                     status.verified.to_string(),
                     or_dash(status.breakpoint.condition.as_ref()),
                 ],
-                json: serde_json::to_value(status).unwrap_or(serde_json::Value::Null),
-            }
+                status,
+            )
         })
         .collect();
 

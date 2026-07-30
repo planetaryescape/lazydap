@@ -75,10 +75,29 @@ pub struct View {
 pub struct Row {
     /// What `--format ids` prints for this item.
     pub id: String,
-    /// Cells, in the order [`View::headers`] names them.
+    /// Cells, in the order the view's headers name them.
     pub cells: Vec<String>,
     /// What `--format jsonl` prints for this item.
     pub json: serde_json::Value,
+}
+
+impl Row {
+    /// Build a row from the value it describes.
+    ///
+    /// The serialisation happens here rather than at each of the callers,
+    /// which otherwise all need an opinion about a failure that cannot happen:
+    /// every one of these is a plain `serde` struct of owned strings and
+    /// numbers. Left to themselves, callers reach for `unwrap_or(Null)` and a
+    /// `--format jsonl` stream quietly grows a `null` where a variable should
+    /// be.
+    pub fn new<T: serde::Serialize>(id: impl Into<String>, cells: Vec<String>, value: &T) -> Self {
+        Self {
+            id: id.into(),
+            cells,
+            json: serde_json::to_value(value)
+                .expect("lazydap's own output types are always serialisable"),
+        }
+    }
 }
 
 impl View {
@@ -224,12 +243,6 @@ fn csv_line(cells: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// Print a value as pretty JSON on stdout.
-pub fn print_json(value: &serde_json::Value) -> std::io::Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
 }
 
 /// Render `rows` as an aligned two-column label/value block.
