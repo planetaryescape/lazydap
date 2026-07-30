@@ -13,12 +13,14 @@
 pub mod breakpoints;
 pub mod diagnostics;
 pub mod inspect;
+pub mod launches;
 pub mod session;
 pub mod tui;
 
 use crate::cli::WaitArgs;
 use crate::client::DaemonClient;
 use crate::error::{CliError, Result};
+use lazydap_config::Config;
 use lazydap_core::SessionId;
 use lazydap_protocol::{ErrorCode, IpcError, Request, Response, StatusReport, WaitMode};
 use std::path::{Path, PathBuf};
@@ -41,7 +43,13 @@ const WAIT_SLACK: Duration = Duration::from_secs(15);
 ///
 /// `--timeout 0` means "no timeout", which is the caller taking responsibility
 /// for a program that may never stop. Anything else is seconds.
-pub fn wait_mode(args: &WaitArgs) -> WaitMode {
+///
+/// Three places can set the default, in the order of how specific they are:
+/// the flag on this invocation, `LAZYDAP_TIMEOUT` in this shell, then
+/// `[general] wait_timeout_seconds` in the user's config. The environment
+/// beats the config deliberately — a variable set for one command is a more
+/// specific statement than a file written once.
+pub fn wait_mode(args: &WaitArgs, config: &Config) -> WaitMode {
     if !args.wait {
         return WaitMode::NoWait;
     }
@@ -53,6 +61,7 @@ pub fn wait_mode(args: &WaitArgs) -> WaitMode {
                 .ok()
                 .and_then(|value| value.trim().parse().ok())
         })
+        .or_else(|| config.wait_timeout_seconds())
         .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
 
     WaitMode::Wait {
@@ -151,15 +160,19 @@ mod tests {
         WaitArgs { wait, timeout }
     }
 
+    fn mode(wait: bool, timeout: Option<u64>) -> WaitMode {
+        wait_mode(&args(wait, timeout), &Config::default())
+    }
+
     #[test]
     fn without_the_flag_nothing_waits() {
-        assert_eq!(wait_mode(&args(false, None)), WaitMode::NoWait);
+        assert_eq!(mode(false, None), WaitMode::NoWait);
     }
 
     #[test]
     fn a_timeout_is_given_in_seconds_and_sent_in_milliseconds() {
         assert_eq!(
-            wait_mode(&args(true, Some(5))),
+            mode(true, Some(5)),
             WaitMode::Wait {
                 timeout_ms: Some(5_000)
             },
@@ -169,7 +182,7 @@ mod tests {
     #[test]
     fn zero_seconds_is_the_documented_spelling_of_waiting_forever() {
         assert_eq!(
-            wait_mode(&args(true, Some(0))),
+            mode(true, Some(0)),
             WaitMode::Wait {
                 timeout_ms: Some(0)
             },
@@ -178,9 +191,9 @@ mod tests {
 
     #[test]
     fn an_absurd_timeout_saturates_rather_than_wrapping_round_to_a_short_one() {
-        let mode = wait_mode(&args(true, Some(u64::MAX)));
+        let saturated = mode(true, Some(u64::MAX));
         assert_eq!(
-            mode,
+            saturated,
             WaitMode::Wait {
                 timeout_ms: Some(u32::MAX)
             },
@@ -210,6 +223,29 @@ mod tests {
             timeout_ms: Some(0),
         };
         assert_eq!(client_timeout(wait), None);
+    }
+
+    #[test]
+    fn the_config_file_sets_the_default_timeout_when_nothing_more_specific_does() {
+        let path =
+            std::env::temp_dir().join(format!("lazydap-timeout-{}.toml", std::process::id()));
+        std::fs::write(&path, "[general]\nwait_timeout_seconds = 90\n").expect("write");
+        let config = lazydap_config::load_config_from(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            wait_mode(&args(true, None), &config),
+            WaitMode::Wait {
+                timeout_ms: Some(90_000)
+            },
+        );
+        assert_eq!(
+            wait_mode(&args(true, Some(5)), &config),
+            WaitMode::Wait {
+                timeout_ms: Some(5_000)
+            },
+            "the flag on this invocation is more specific than a file written once",
+        );
     }
 
     #[test]

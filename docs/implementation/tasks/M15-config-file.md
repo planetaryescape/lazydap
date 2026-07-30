@@ -246,3 +246,59 @@ complete and its box in `/TODO.md` stays unticked.**
    there, so this is a blocking step rather than a nicety: drop the unreleased preamble and date
    the heading (`## [0.1.0] — 2026-MM-DD`) in the same commit that precedes the tag.
 5. Tag `v0.1.0` — only after M12–M14 land, since the README's roadmap says those panes are next.
+
+## Completion note — 2026-07-30 (W6, the code half)
+
+**Done.** `crates/config` grew a config loader and a `launch.json` importer, `crates/core` grew the
+`LaunchConfig` vocabulary, `crates/store` reads `[[launch_configs]]`, and the CLI grew
+`lazydap launches list` / `run`. Quirk 8 — the `/tmp` breakpoint failure the milestone inherited —
+is fixed rather than documented. Four gates green, boundary script green, 474 tests (415 baseline
+plus 59), verified live against real codelldb.
+
+### Deviations from the plan above
+
+- **`AdapterKind` gained no variants.** The sketch mapped `python`/`node`/`go` onto
+  `AdapterKind::DebugPy`/`JsDebug`/`Delve` and unknown types onto `Custom { name }`. Those variants
+  do not exist and inventing them would have been four dead arms and a `Custom` nothing consumes.
+  A configuration for another debugger keeps its `type` string in `LaunchConfig::adapter_type` with
+  `adapter: None`, and is **listed** with the reason it cannot run. `cppdbg` maps to codelldb with a
+  warning saying its `MIMode` and `setupCommands` are ignored.
+- **No `LaunchConfigId`.** Lookup is by name, which is what the CLI takes and what both files
+  carry. An id nothing indexes by is a field to keep unique for no reason.
+- **The config schema is smaller than `08-state-and-config.md`.** Implemented: `[adapter.<name>]
+  command` and `[general] wait_timeout_seconds`, both because something consumes them. Not
+  implemented: themes, keymaps, log rotation, socket directories, output defaults, and
+  `default_adapter` — which with one adapter kind can only ever hold `"codelldb"`. Unknown keys are
+  ignored rather than rejected, and there is a test that the blueprint's own example parses.
+- **D026's middle tier is still absent.** Discovery is config, then `PATH`. The managed
+  `{data_dir}/adapters/` directory is skipped for the reason M5 skipped it: nothing installs an
+  adapter into it, so a lookup there is dead code dressed as policy. A pinned path that is not
+  executable is now an *error* rather than a fall-through to `PATH`.
+- **`launches` is client-side and adds no protocol request** (D047), so the protocol stays at v3.
+- **`[[launch_configs]]` are read-only**, out of the store's `unknown` table. Modelling them as a
+  typed field would have deleted hand-written ones on the next breakpoint write — the round-trip
+  that already protects them is what makes the read safe.
+- **The skill generator now recurses.** `launches` is the first nested subcommand, and
+  `gen_skill_commands` documented only the top level — so `launches list` and `launches run` were
+  absent from the file whose whole purpose is that it cannot omit what the parser accepts. It now
+  walks children and skips clap's own `help`, which also removed a meaningless `### lazydap help`
+  section.
+- **`TODO.md` had unresolved merge-conflict markers** in its Phase D block, committed by the Phase D
+  merge. Resolved here in favour of the completed entries, which is what the rest of the file and
+  `main`'s history already say.
+
+### New decisions
+
+- **D046** — the JSONC dialect is read by a hand-rolled, string-aware scanner rather than a
+  dependency, and only VS Code's dialect (comments, trailing commas), not JSON5's.
+- **D047** — launch configurations are resolved by the client, and `run` sends an ordinary `Launch`.
+- **D048** — an unbound breakpoint is re-sent under the path the adapter names, once, only when
+  nothing in that file bound and only when the suggestion resolves to the same file.
+
+### Still to do at tag time (not code)
+
+1. Answer the crates.io question and record it as a D-entry. `publish = false` on all seven crates
+   is the standing default and the workflow has no publish job.
+2. Re-date `## [0.1.0] — 2026-07-30` in `CHANGELOG.md` if the tag is cut on another day.
+3. `git tag v0.1.0 && git push origin v0.1.0`. Everything downstream of that is automated.
+4. The demo GIF (step 4 above) is still unmade. Not a blocker.

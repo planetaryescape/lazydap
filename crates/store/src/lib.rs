@@ -34,7 +34,7 @@
 
 mod file;
 
-use lazydap_core::{Breakpoint, BreakpointId, BreakpointSelector, NewBreakpoint};
+use lazydap_core::{Breakpoint, BreakpointId, BreakpointSelector, LaunchConfig, NewBreakpoint};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -138,6 +138,18 @@ impl ProjectStore {
     /// Where this store persists to. `lazydap doctor` prints it.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The `[[launch_configs]]` in this project's state file, and anything
+    /// that could not be read.
+    ///
+    /// Read-only. Nothing writes launch configs yet — they arrive by being
+    /// typed into `state.toml` — so there is no `add` to go with this. They
+    /// survive a rewrite because they are carried through `unknown` (see
+    /// [`file::launch_configs`]).
+    pub fn launch_configs(&self) -> (Vec<LaunchConfig>, Vec<String>) {
+        let state = lock(&self.state);
+        file::launch_configs(&state.unknown, &self.root)
     }
 
     pub fn breakpoints(&self) -> Vec<Breakpoint> {

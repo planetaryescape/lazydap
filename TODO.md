@@ -11,11 +11,30 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Next milestone: [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md)**,
-  which is the **v0.1 gate**. M12, M13, M14 and M19 are done: the TUI now has a stack pane, a
-  lazily-expanded scopes pane, `b` to toggle a breakpoint with a gutter sign, and it survives the
-  daemon going away. Release artifacts (README, CHANGELOG, workflows) are being pre-staged in
-  parallel — check for that work before editing them.
+- **Every milestone through v0.1 is done. The next move is a decision, not a milestone: cut
+  `v0.1.0`, or hold.** M15 landed the config file, `launch.json` import, `lazydap launches`, and
+  quirk 8's fix; the `[0.1.0]` CHANGELOG section is dated and finalised, which is precisely what
+  `.github/workflows/product-release.yml` refuses to publish without. Everything below is what a
+  tag needs, and none of it is code:
+  1. **Decide the crates.io question** (see "Open decisions" in
+     [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md)). Default is no —
+     `publish = false` stays on all seven crates, and the workflow has no publish job. Deciding it
+     is a D-entry, not a change of plan.
+  2. **Confirm the CHANGELOG date.** It reads `## [0.1.0] — 2026-07-30`. If the tag is cut on a
+     different day, change that line in the same commit that precedes the tag.
+  3. **Tag and push:** `git tag v0.1.0 && git push origin v0.1.0`. The workflow re-runs every gate
+     against the tagged commit, checks the tag matches the workspace version, builds macOS
+     arm64/x86_64 and Linux x86_64, and publishes a GitHub Release with tarballs, SHA-256 sums and
+     `lazydap.skill` attached, with notes taken from the CHANGELOG section. A `v0.*` tag goes out
+     as a prerelease.
+  4. **Rehearse first if you want to**: `workflow_dispatch` runs the gates and the builds and stops
+     before publishing, deliberately.
+  5. **The demo GIF** is still missing (M15's step 4). It is not a release blocker; the README
+     works without it.
+- **Wave 7 candidates, once the tag is out:** M16 (watches), M17 (REPL pane), M20 (docs site, in
+  flight in parallel), then M18 (debugpy) which is the first real test of the adapter seam (D029).
+  Smaller items worth folding in: conditional breakpoints from the TUI, and the config schema
+  fields the blueprint documents that nothing reads yet.
 - New decisions from Phase D's TUI lane: **D040** (the reducer numbers its own requests and drops
   answers that have been overtaken), **D041** (`Cmd::Batch`), **D042** (the TUI reconnects by
   calling back into the CLI rather than learning to spawn), **D043** (a breakpoint change is either
@@ -41,8 +60,9 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 Repo: [github.com/planetaryescape/lazydap](https://github.com/planetaryescape/lazydap), public.
 The `chapter-*` tags/releases and [.github/workflows/release.yml](.github/workflows/release.yml)
 are teaching-era machinery: tags mark the *start state* of book chapters. Leave them alone; new
-chapter tags are cut from `lazydap-learn`, not here. Product releases (v0.1+) will get their own
-workflow at M15.
+chapter tags are cut from `lazydap-learn`, not here. Product releases (v0.1+) have their own
+workflow, [.github/workflows/product-release.yml](.github/workflows/product-release.yml), which
+runs on `v*` tags and has never fired.
 
 ## Workspace setup (prerequisite to M0)
 
@@ -72,22 +92,11 @@ workflow at M15.
 
 ## Phase D — useful features (M12–M15) → v0.1
 
-<<<<<<< HEAD
-- [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
-- [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
-- [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
-- [ ] [M19 — TUI reconnects when the daemon goes away](docs/implementation/tasks/M19-tui-reconnect.md) — added 2026-07-30; M11 recorded reconnection as mandatory pre-v0.1
-||||||| 287e108
-- [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
-- [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
-- [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
-=======
 - [x] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md) — completed 2026-07-30. `crates/tui/src/panes/stack.rs`. Tab cycles source → stack → scopes, `j`/`k` move the selection in the focused pane, `<CR>` jumps the source pane to the frame *and* fetches that frame's scopes. `Cmd::Batch` (D041) and reducer-allocated request ids (D040) landed here.
 - [x] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md) — completed 2026-07-30. `crates/tui/src/panes/scopes.rs`. Lazily-expanded tree; `<CR>` fetches a row's children once and toggles it thereafter. Replies are matched to the node that asked by request id, and a handle already open above a row is refused rather than followed into a cycle.
 - [x] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md) — completed 2026-07-30. `b` adds or removes through the same `BreakpointAdd`/`BreakpointRemove` the CLI sends; `●`/`◯`/`⊘` in a gutter column of its own, on the line the adapter actually used. No daemon-side handler was needed and `crates/store` was untouched — both already did the job.
 - [x] [M19 — TUI reconnect](docs/implementation/tasks/M19-tui-reconnect.md) — completed 2026-07-30. `lazydap shutdown` from another terminal now leaves the TUI reconnecting rather than frozen: reducer-owned backoff, a daemon started through the CLI's own `ensure_daemon_running` behind an `EnsureDaemon` callback (D042), and a screen made true again by the `Subscribe` snapshot rather than reconstructed.
->>>>>>> worktree-agent-a7ed36397136c6daf
-- [ ] [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md) → **tag v0.1**
+- [x] [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md) — completed 2026-07-30. `~/.config/lazydap/config.toml` (adapter pin, `--wait` default), `.vscode/launch.json` import with a hand-rolled JSONC scanner (D046) and `${...}` expansion that warns rather than substitutes, `lazydap launches list`/`run` resolved client-side (D047), and quirk 8's real fix — an unbound breakpoint re-sent under the path the adapter names (D048). Release artifacts had been pre-staged by W5b; the `[0.1.0]` CHANGELOG section is now finalised, which is what lets the release workflow publish. **Phase D complete.**
 
 ## Beyond v0.1 (M16–M18+)
 
@@ -111,5 +120,6 @@ workflow at M15.
 ## Open decisions awaiting input
 
 Tracked in [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md) under "Open" status.
-O01–O04 answered 2026-07-30; remaining open question for M15: whether to publish crates to crates.io
-(default: no — `publish = false` stays, matching mxr's stance).
+O01–O04 answered 2026-07-30. One question remains, and it now blocks nothing but the tag: whether
+to publish the crates to crates.io (default: no — `publish = false` stays, matching mxr's stance).
+Decide it before tagging, because crates.io versions are immutable and names are permanent.

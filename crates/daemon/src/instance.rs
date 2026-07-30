@@ -1,5 +1,5 @@
 use crate::error::{CliError, Result};
-use lazydap_config::paths;
+use lazydap_config::{Config, paths};
 use std::path::PathBuf;
 
 /// The four files that belong to one project's daemon, resolved once so the
@@ -18,6 +18,12 @@ pub struct Instance {
     pub lock: PathBuf,
     pub pid: PathBuf,
     pub log: PathBuf,
+    /// `~/.config/lazydap/config.toml`, read once per invocation.
+    ///
+    /// Here rather than at each point of use so a malformed config is one
+    /// error at the start of the command, not a different one depending on
+    /// which subcommand happened to reach for a setting.
+    pub config: Config,
 }
 
 impl Instance {
@@ -27,6 +33,7 @@ impl Instance {
         let cwd = std::env::current_dir().map_err(CliError::general)?;
         let name = paths::instance_name(&cwd, explicit);
         Ok(Self {
+            config: lazydap_config::load_config()?,
             project_root: paths::project_root(&cwd),
             socket: paths::socket_path(&name)?,
             lock: paths::lock_path(&name)?,

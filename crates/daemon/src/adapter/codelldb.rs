@@ -10,7 +10,7 @@
 //! 2. Nothing here uses a shared read loop. The handshake owns the whole
 //!    transport, and hands it to the pump only once the session is live.
 
-use super::{AdapterError, AdapterHandle, Pending, Result, discover, translate};
+use super::{AdapterError, AdapterHandle, Pending, Result, discover, rebind_source, translate};
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, Breakpoint, OutputCategory, OutputChunk, PauseReason,
     SessionState,
@@ -20,7 +20,7 @@ use lazydap_dap::{
     InitializeArgs, LaunchArgs, SetBreakpointsArgs, SetBreakpointsResponse, Source,
 };
 use lazydap_protocol::{AdapterCapabilities, LaunchRequest};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -145,6 +145,10 @@ async fn handshake(
     // Which source each outstanding `setBreakpoints` was for, so its response
     // can be paired back up with what we asked for.
     let mut breakpoint_seqs: HashMap<i64, usize> = HashMap::new();
+    // Sources already re-sent under the adapter's own spelling (quirk 8). One
+    // retry each: the second answer is taken as final however it reads, so two
+    // components disagreeing about a path cannot loop here.
+    let mut rebound: HashSet<usize> = HashSet::new();
     let mut launch_answered = false;
     let mut outcome = Outcome {
         capabilities: translate_capabilities(&capabilities),
@@ -237,9 +241,31 @@ async fn handshake(
                     launch_answered = true;
                 }
                 if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
-                    outcome
-                        .breakpoints
-                        .extend(applied_breakpoints(&breakpoints[index].1, response.body));
+                    let (source, in_source) = &breakpoints[index];
+                    let applied = applied_breakpoints(in_source, response.body);
+
+                    // Quirk 8: the adapter would not bind the path we sent but
+                    // named one it could. Ask again under that name, and let
+                    // the retry's answer replace this one rather than join it
+                    // — the caller would otherwise see each breakpoint twice.
+                    match rebind_source(source, &applied).filter(|_| rebound.insert(index)) {
+                        Some(path) => {
+                            tracing::debug!(
+                                target: "daemon.session",
+                                requested = %source.display(),
+                                rebound = %path.display(),
+                                "re-sending breakpoints under the path the adapter named (quirk 8)",
+                            );
+                            let seq = transport
+                                .send_request(
+                                    "setBreakpoints",
+                                    &set_breakpoints_args(&path, in_source),
+                                )
+                                .await?;
+                            breakpoint_seqs.insert(seq, index);
+                        }
+                        None => outcome.breakpoints.extend(applied),
+                    }
                 }
             }
         }

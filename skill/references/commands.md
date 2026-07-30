@@ -35,6 +35,39 @@ Usage: lazydap launch [OPTIONS] <PROGRAM> [-- <ARGS>...]
 | `--adapter <ADAPTER>` | no | `codelldb` | Which debug adapter to use |
 | `<ARGS>` | no | - | Arguments for the debuggee, after a `--` separator. They are kept separate so a debuggee flag can never be mistaken for a lazydap one |
 
+### `lazydap launches`
+
+List the project's named launch configurations, or run one.
+
+They come from `.lazydap/state.toml` and from `.vscode/launch.json`, which lazydap reads and never writes.
+
+```
+Usage: lazydap launches [OPTIONS] <COMMAND>
+```
+
+
+#### `lazydap launches list`
+
+Show every launch configuration, and whether lazydap can run it
+
+```
+Usage: lazydap launches list [OPTIONS]
+```
+
+
+#### `lazydap launches run`
+
+Start the configuration with this name
+
+```
+Usage: lazydap launches run [OPTIONS] <NAME>
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `<NAME>` | yes | - | Its `name` in `launch.json` or `state.toml` |
+| `--stop-on-entry` | no | `false` | Stop at the program's entry point, whatever the configuration says |
+
 ### `lazydap status`
 
 Show the daemon and its current session
@@ -318,13 +351,4 @@ Usage: lazydap daemon [OPTIONS]
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--foreground` | no | `false` | Stay in the terminal and log to stderr, for debugging |
-
-### `lazydap help`
-
-Print this message or the help of the given subcommand(s)
-
-```
-Usage: lazydap help [COMMAND]
-```
-
 

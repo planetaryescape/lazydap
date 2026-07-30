@@ -455,39 +455,54 @@ This is not specific to `/tmp`. Any symlinked directory on the path to a source 
 
 ### Fix
 
-**Keep debuggees out of `/tmp`.** A directory under `$HOME` has no symlink on the way to it and
-the problem does not arise. This is the whole fix for scratch work and what `CONTRIBUTING.md`
-tells contributors.
+**lazydap handles this itself since M15** (D048). When a `setBreakpoints` response comes back
+with nothing bound and the adapter's message names a location it *could* have used, lazydap
+re-sends that file's breakpoints under the name the adapter offered, and takes the second answer
+as final. Both places that talk to `setBreakpoints` do it: the configuration phase of a launch
+(`crates/daemon/src/adapter/codelldb.rs`) and a breakpoint set during a live session
+(`AdapterHandle::set_breakpoints`). What a caller sees under `/tmp` now:
 
-**If you must work under a symlinked path**, make the two spellings agree by compiling with the
-resolved path, so the debug info matches what lazydap will send:
+```json
+{
+  "breakpoints": [
+    { "enabled": true, "id": 1, "line": 6, "message": "Resolved locations: 1",
+      "source": "/private/tmp/lzdemo/hello.c", "verified": true }
+  ]
+}
+```
+
+and `continue --wait` returns `"reason": "breakpoint"` with `"hit_breakpoint_ids": [1]`. The
+stored source stays canonical — only the spelling on the wire changes — so ids, `break --list`
+and the state file are unaffected.
+
+Two guards, both deliberate. The retry happens **only when nothing in that file bound**, because
+re-sending a whole list under a second path while the first is still live would leave the adapter
+holding two breakpoints for one of ours. And the suggested path is accepted **only if it resolves
+to the same file**, checked through the filesystem rather than compared as text: an adapter
+pointing somewhere else is offering to break in code nobody asked about.
+
+codelldb's original complaint still appears in the session's console output, because it is what
+codelldb said. It is now followed by a breakpoint that works.
+
+**On an older build**, or if the retry does not apply: keep debuggees out of `/tmp` — a directory
+under `$HOME` has no symlink on the way to it. Or make the two spellings agree by compiling with
+the resolved path:
 
 ```bash
 gcc -g -O0 /private/tmp/scratch/hello.c -o /private/tmp/scratch/hello
 ```
 
-**Check `verified` rather than assuming.** `lazydap break --list` shows the column, and the
-`breakpoints` array in `launch`'s response carries both `verified` and the adapter's `message`. A
-script or an agent that reads `verified: false` and stops is spared the confusion; one that
-ignores it debugs a program that never pauses.
-
-### The real fix, not yet made
-
-lazydap knows both spellings at the moment it matters and could reconcile them: when a
-breakpoint comes back `verified: false` with a resolved location that differs from the requested
-source only by symlink resolution, re-send it under the path the adapter found. That is a change
-to how the store and the launch configuration phase handle source paths, which is
-**[M15](../implementation/tasks/M15-config-file.md)'s code half** — the same milestone that owns
-`launch.json` import and its `${workspaceFolder}` substitution, and therefore the place where
-path handling gets thought about properly rather than patched here.
-
-Until then this is documented rather than fixed, which is the honest trade: the workaround is one
-directory move.
+**Check `verified` rather than assuming**, either way. `lazydap break --list` shows the column,
+and the `breakpoints` array in `launch`'s response carries both `verified` and the adapter's
+`message`. A script or an agent that reads `verified: false` and stops is spared the confusion;
+one that ignores it debugs a program that never pauses.
 
 ### Cross-references
 
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — the warning where somebody about to do this will see it
-- Milestone: [`M15-config-file.md`](../implementation/tasks/M15-config-file.md) — where source-path handling belongs
+- D048 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md) — the retry, and what bounds it
+- `crates/daemon/src/adapter/mod.rs::rebind_source` — the two guards, in code
+- Milestone: [`M15-config-file.md`](../implementation/tasks/M15-config-file.md) — where source-path handling landed
 - Quirk 1 — the other way a breakpoint silently fails to do anything
 
 ---

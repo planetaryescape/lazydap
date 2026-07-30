@@ -72,7 +72,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
     }
 
     let instance = Instance::resolve(cli.instance.as_deref())?;
-    use commands::{breakpoints, diagnostics, inspect, session};
+    use commands::{breakpoints, diagnostics, inspect, launches, session};
 
     match command {
         Command::Version | Command::Completions { .. } => unreachable!("handled above"),
@@ -93,7 +93,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                     program,
                     args,
                     cwd,
-                    env,
+                    env: session::parse_env(&env)?,
                     adapter,
                     stop_on_entry,
                 },
@@ -101,6 +101,13 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             )
             .await
         }
+        Command::Launches { command } => match command {
+            cli::LaunchesCommand::List => launches::list(&instance, format).await,
+            cli::LaunchesCommand::Run {
+                name,
+                stop_on_entry,
+            } => launches::run(&instance, &name, stop_on_entry, format).await,
+        },
         Command::Status => session::status(&instance, format).await,
         Command::Disconnect {
             session_id,

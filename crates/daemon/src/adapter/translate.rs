@@ -95,6 +95,35 @@ pub fn source_breakpoint(breakpoint: &Breakpoint) -> SourceBreakpoint {
     }
 }
 
+/// The location an adapter says it *could* have bound, out of the message it
+/// sent when it declined to bind the one we asked for (quirk 8).
+///
+/// codelldb writes exactly this when the path we sent and the path in the
+/// debug info are two spellings of one file:
+///
+/// ```text
+/// Breakpoint at /private/tmp/demo/hello.c:6 could not be resolved, but a
+/// valid location was found at /tmp/demo/hello.c:6
+/// ```
+///
+/// Reading a human-readable message is as brittle as it looks, so the parse is
+/// deliberately narrow: the text after the *last* `found at`, split at the
+/// last colon, and only if what follows that colon is a line number and
+/// nothing else. Anything the shape does not fit yields `None`, which costs
+/// only the retry — the breakpoint is left exactly as unverified as it already
+/// was. The caller then has to prove the suggestion names the same file before
+/// acting on it.
+pub fn suggested_location(message: &str) -> Option<PathBuf> {
+    let (_, rest) = message.rsplit_once("found at ")?;
+    let (path, line) = rest.rsplit_once(':')?;
+    let line = line.trim();
+    if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
 /// Pair a `setBreakpoints` response with what we asked for.
 ///
 /// DAP requires the response array to match the request array element for
@@ -173,6 +202,42 @@ mod tests {
             "guessing would attach a stranger's id"
         );
         assert_eq!(reconciled[1].adapter_id, Some(2), "and it is still legible");
+    }
+
+    #[test]
+    fn the_location_codelldb_suggests_is_read_out_of_its_message() {
+        // Captured verbatim from a real run under /tmp on macOS (quirk 8).
+        let suggested = suggested_location(
+            "Breakpoint at /private/tmp/lazydap-demo/hello.c:6 could not be resolved, \
+             but a valid location was found at /tmp/lazydap-demo/hello.c:6",
+        );
+        assert_eq!(
+            suggested,
+            Some(PathBuf::from("/tmp/lazydap-demo/hello.c")),
+            "the two paths differ only by /private, which is easy to read past",
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_suggestion_in_it_yields_nothing() {
+        assert_eq!(
+            suggested_location("Breakpoint at main.c:6 could not be resolved"),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_suggestion_without_a_line_number_is_not_a_location() {
+        // The parse is narrow on purpose: reading a human-readable message is
+        // brittle, and a wrong answer here re-sends breakpoints somewhere.
+        assert_eq!(
+            suggested_location("a valid location was found at /tmp/x"),
+            None
+        );
+        assert_eq!(
+            suggested_location("a valid location was found at /tmp/x:somewhere"),
+            None,
+        );
     }
 
     #[test]

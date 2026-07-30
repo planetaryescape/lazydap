@@ -118,6 +118,27 @@ impl From<serde_json::Error> for CliError {
     }
 }
 
+impl From<lazydap_config::ConfigError> for CliError {
+    fn from(source: lazydap_config::ConfigError) -> Self {
+        Self::from(lazydap_protocol::IpcError::new(
+            lazydap_protocol::ErrorCode::InvalidLaunchConfig,
+            source.to_string(),
+        ))
+    }
+}
+
+/// A `.vscode/launch.json` that cannot be read is the user's file being wrong,
+/// not this process failing. `general` would label it `DaemonInternalError`,
+/// which is a lie about whose problem it is — and no daemon was involved.
+impl From<lazydap_config::LaunchJsonError> for CliError {
+    fn from(source: lazydap_config::LaunchJsonError) -> Self {
+        Self::from(lazydap_protocol::IpcError::new(
+            lazydap_protocol::ErrorCode::InvalidLaunchConfig,
+            source.to_string(),
+        ))
+    }
+}
+
 impl From<lazydap_config::PathsError> for CliError {
     fn from(source: lazydap_config::PathsError) -> Self {
         Self {

@@ -55,6 +55,15 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// List the project's named launch configurations, or run one.
+    ///
+    /// They come from `.lazydap/state.toml` and from `.vscode/launch.json`,
+    /// which lazydap reads and never writes.
+    Launches {
+        #[command(subcommand)]
+        command: LaunchesCommand,
+    },
+
     /// Show the daemon and its current session.
     Status,
 
@@ -300,6 +309,22 @@ pub enum Command {
         /// Stay in the terminal and log to stderr, for debugging.
         #[arg(long)]
         foreground: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LaunchesCommand {
+    /// Show every launch configuration, and whether lazydap can run it.
+    List,
+
+    /// Start the configuration with this name.
+    Run {
+        /// Its `name` in `launch.json` or `state.toml`.
+        name: String,
+
+        /// Stop at the program's entry point, whatever the configuration says.
+        #[arg(long)]
+        stop_on_entry: bool,
     },
 }
 

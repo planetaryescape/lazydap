@@ -7,7 +7,7 @@
 //! adapter.
 
 use super::{Result, StoreError};
-use lazydap_core::Breakpoint;
+use lazydap_core::{Breakpoint, LaunchConfig, LaunchConfigSource, LaunchKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -170,6 +170,98 @@ fn relativise(source: &Path, root: &Path) -> PathBuf {
         .unwrap_or_else(|_| source.to_path_buf())
 }
 
+/// The `[[launch_configs]]` a hand-written state file may carry.
+///
+/// Read-only, and read out of [`Document::unknown`] rather than modelled as a
+/// field. Nothing in lazydap *writes* launch configs yet, and a typed field
+/// that serialises as empty would delete the ones somebody typed by hand the
+/// first time a breakpoint was added. Leaving them in `unknown` keeps the
+/// round-trip that already protects them, and this function reads a copy.
+///
+/// An entry that does not parse costs only itself, and says so: a state file
+/// is hand-edited, and one typo should not hide the four configurations
+/// underneath it.
+pub fn launch_configs(unknown: &toml::Table, root: &Path) -> (Vec<LaunchConfig>, Vec<String>) {
+    let Some(entries) = unknown
+        .get("launch_configs")
+        .and_then(toml::Value::as_array)
+    else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut configs = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match entry.clone().try_into::<StoredLaunchConfig>() {
+            Ok(stored) => configs.push(stored.into_memory(root)),
+            Err(error) => warnings.push(format!(
+                "launch config {index} in state.toml could not be read: {error}",
+            )),
+        }
+    }
+    (configs, warnings)
+}
+
+/// One `[[launch_configs]]` entry, exactly as TOML sees it.
+///
+/// `id` is accepted and ignored: the blueprint's schema has one, and lookup
+/// here is by name.
+#[derive(Debug, Deserialize)]
+struct StoredLaunchConfig {
+    name: String,
+    #[serde(default = "default_adapter")]
+    adapter: String,
+    /// Typed, unlike `adapter`: an adapter this build does not ship is a
+    /// configuration lazydap cannot run, and a `kind` that is neither of these
+    /// is a typo. Reading it as `launch` would start something the file did
+    /// not ask for.
+    #[serde(default)]
+    kind: StoredLaunchKind,
+    program: Option<PathBuf>,
+    #[serde(default)]
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    stop_on_entry: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredLaunchKind {
+    #[default]
+    Launch,
+    Attach,
+}
+
+fn default_adapter() -> String {
+    lazydap_core::AdapterKind::default().as_str().to_string()
+}
+
+impl StoredLaunchConfig {
+    fn into_memory(self, root: &Path) -> LaunchConfig {
+        LaunchConfig {
+            name: self.name,
+            adapter: self.adapter.parse().ok(),
+            adapter_type: self.adapter,
+            kind: match self.kind {
+                StoredLaunchKind::Launch => LaunchKind::Launch,
+                StoredLaunchKind::Attach => LaunchKind::Attach,
+            },
+            program: self.program.map(|program| absolutise(&program, root)),
+            args: self.args,
+            cwd: self.cwd.map(|cwd| absolutise(&cwd, root)),
+            env: self.env,
+            stop_on_entry: self.stop_on_entry,
+            source: LaunchConfigSource::ProjectState,
+            // Nothing substitutes variables in lazydap's own file: it is
+            // lazydap's, so a path in it means what it says.
+            unresolved: Vec::new(),
+        }
+    }
+}
+
 fn absolutise(source: &Path, root: &Path) -> PathBuf {
     if source.is_absolute() {
         source.to_path_buf()
@@ -256,6 +348,92 @@ mod tests {
 
         let round_tripped = toml::to_string_pretty(&document).expect("serialise");
         assert!(round_tripped.contains("watches"), "got: {round_tripped}");
+    }
+
+    #[test]
+    fn a_hand_written_launch_config_is_read_with_its_paths_made_absolute() {
+        let document: Document = toml::from_str(
+            r#"
+            version = 1
+
+            [[launch_configs]]
+            id = "lc-01"
+            name = "main"
+            adapter = "codelldb"
+            kind = "launch"
+            program = "build/hello"
+            args = ["--verbose"]
+            cwd = "."
+            stop_on_entry = true
+
+            [launch_configs.env]
+            RUST_LOG = "debug"
+            "#,
+        )
+        .expect("parse");
+
+        let (configs, warnings) = launch_configs(&document.unknown, Path::new("/p"));
+
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        let config = &configs[0];
+        assert_eq!(config.name, "main");
+        assert_eq!(config.adapter, Some(lazydap_core::AdapterKind::Codelldb));
+        assert_eq!(config.program, Some(PathBuf::from("/p/build/hello")));
+        assert_eq!(config.cwd, Some(PathBuf::from("/p/.")));
+        assert_eq!(config.env["RUST_LOG"], "debug");
+        assert!(config.stop_on_entry);
+        assert_eq!(config.source, LaunchConfigSource::ProjectState);
+        assert_eq!(config.not_runnable(), None);
+    }
+
+    #[test]
+    fn a_launch_config_this_build_cannot_run_is_still_read() {
+        let document: Document = toml::from_str(
+            "[[launch_configs]]\nname = \"api\"\nadapter = \"debugpy\"\nprogram = \"app.py\"\n",
+        )
+        .expect("parse");
+
+        let (configs, _) = launch_configs(&document.unknown, Path::new("/p"));
+        assert_eq!(configs[0].adapter, None);
+        assert_eq!(configs[0].adapter_type, "debugpy");
+        assert!(configs[0].not_runnable().is_some());
+    }
+
+    #[test]
+    fn one_unreadable_launch_config_does_not_hide_the_others() {
+        // A hand-edited file. One typo should cost one entry.
+        let document: Document = toml::from_str(
+            "[[launch_configs]]\nname = \"bad\"\nkind = \"lunch\"\n\
+             \n[[launch_configs]]\nname = \"good\"\nprogram = \"app\"\n",
+        )
+        .expect("parse");
+
+        let (configs, warnings) = launch_configs(&document.unknown, Path::new("/p"));
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "good");
+        assert_eq!(warnings.len(), 1, "and the typo is reported: {warnings:?}");
+    }
+
+    #[test]
+    fn launch_configs_survive_a_rewrite_that_only_touched_breakpoints() {
+        // The reason they are read out of `unknown` rather than modelled: a
+        // typed field that serialises as empty would delete them the first
+        // time somebody set a breakpoint.
+        let document: Document =
+            toml::from_str("[[launch_configs]]\nname = \"main\"\nprogram = \"app\"\n")
+                .expect("parse");
+        let (_, next_id, unknown) = document.into_memory(Path::new("/p"));
+
+        let rewritten = toml::to_string_pretty(&Document::from_memory(
+            &[],
+            next_id,
+            Path::new("/p"),
+            unknown,
+        ))
+        .expect("serialise");
+
+        assert!(rewritten.contains("launch_configs"), "got: {rewritten}");
+        assert!(rewritten.contains("main"), "got: {rewritten}");
     }
 
     #[test]

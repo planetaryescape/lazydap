@@ -20,7 +20,7 @@ pub struct LaunchOptions {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
-    pub env: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub adapter: AdapterKind,
     pub stop_on_entry: bool,
 }
@@ -66,7 +66,6 @@ pub async fn launch(
                 .with_details(serde_json::json!({ "program": options.program })),
             )
         })?;
-    let env = parse_env(&options.env)?;
 
     let mut client = ensure_daemon_running(instance).await?;
     let response = client
@@ -75,7 +74,7 @@ pub async fn launch(
             program,
             args: options.args,
             cwd,
-            env,
+            env: options.env,
             stop_on_entry: options.stop_on_entry,
         }))
         .await?;
@@ -290,7 +289,7 @@ pub async fn step(
 ) -> Result<()> {
     let mut client = ensure_daemon_running(instance).await?;
     let session_id = active_session_id(&mut client).await?;
-    let wait = wait_mode(wait);
+    let wait = wait_mode(wait, &instance.config);
 
     let request = match movement {
         Movement::Continue { all_threads } => Request::Continue {
@@ -423,7 +422,7 @@ fn render_status(report: &StatusReport) -> String {
 /// A pair with no `=` is refused rather than guessed at: `--env DEBUG` could
 /// plausibly mean "pass DEBUG through from my shell" or "set DEBUG to empty",
 /// and picking one silently would eventually be the wrong one.
-fn parse_env(pairs: &[String]) -> Result<BTreeMap<String, String>> {
+pub fn parse_env(pairs: &[String]) -> Result<BTreeMap<String, String>> {
     pairs
         .iter()
         .map(|pair| {
