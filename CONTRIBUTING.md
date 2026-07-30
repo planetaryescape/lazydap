@@ -1,27 +1,69 @@
 # Contributing to lazydap
 
-How to set up a working dev environment for this repo. For project conventions (commit style, testing rules, teaching mode) see [`AGENTS.md`](AGENTS.md). For architecture see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+How to get a working dev environment, what has to be green before you push, and the handful of rules that aren't negotiable. Architecture lives in [`ARCHITECTURE.md`](ARCHITECTURE.md); the working conventions agents follow are in [`AGENTS.md`](AGENTS.md).
 
 ## Prerequisites
 
-- **Rust toolchain** — pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (stable channel, `rustfmt` + `clippy`). Install via [rustup](https://rustup.rs/); the toolchain file makes `cargo` auto-select the right version on first invocation in this directory.
-- **macOS or Linux** — Windows is not currently a target.
-- **A DAP adapter or two** — see below. Not strictly required for the earliest milestones (M0–M2 lean on an in-process `FakeAdapter`), but you'll need real adapters from M3 onwards and to run the canonical integration tests.
+- **Rust toolchain** — pinned in [`rust-toolchain.toml`](rust-toolchain.toml) (stable, with `rustfmt` and `clippy`). Install [rustup](https://rustup.rs/) and `cargo` picks the right version on its first run in this directory. The workspace is edition 2024 with `rust-version = "1.85"`.
+- **macOS or Linux.** Windows is not a target.
+- **codelldb on `PATH`.** Required for the integration suite; see below. The tests skip loudly without it rather than failing, so you can work on protocol or TUI code without one, but don't claim a green run you didn't get.
+- **A C compiler.** `gcc` or `clang`. The integration tests compile their own fixtures at runtime and skip when they can't.
 
 ## Build, test, lint
 
 ```bash
-cargo build --workspace
-cargo test --workspace                          # or: cargo nextest run --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
 ```
 
-CI runs all four. Run them locally before pushing.
+Two more gates that CI runs and `cargo` doesn't:
+
+```bash
+bash scripts/check_architecture_boundaries.sh     # crate graph matches the rules
+bash scripts/build-skill.sh && git diff --exit-code -- skill/ lazydap.skill
+```
+
+The boundary script reads `Cargo.toml` files and fails if a crate grew a dependency it isn't allowed. It doesn't compile anything, so it's cheap enough to run constantly.
+
+The skill check rebuilds `lazydap.skill` and its generated command reference from `skill/`, then diffs. The build is byte-for-byte reproducible (fixed timestamps, sorted entries), so a clean diff proves the committed artifact matches its sources rather than merely that somebody rebuilt it. Add a CLI flag and forget this step and CI will tell you, because an agent reading a stale reference is a bug you can't see.
+
+CI additionally sets `RUSTFLAGS: -Dwarnings`; locally you'll want the same before you push.
+
+## Test layout
+
+| Where | What it is |
+|---|---|
+| `crates/*/src/**` unit tests | Anything decidable without a real process. The `--wait` event arithmetic (watermarks, coalescing, output caps) is unit-tested deterministically in `crates/daemon/src/wait.rs`. |
+| `crates/daemon/tests/ipc_server.rs` | The socket contract, driven in-process. |
+| `crates/daemon/tests/cli_lifecycle.rs` | Daemon auto-spawn, staying up, and shutting down, through the real binary. Each test gets its own instance name plus its own `LAZYDAP_RUNTIME_DIR` and `LAZYDAP_DATA_DIR`, so it never touches your actual daemon. No debuggee is launched. |
+| `crates/daemon/tests/wait_codelldb.rs` | `--wait` against real codelldb and real debuggees. The case list comes from [`docs/blueprint/10-async-to-sync.md`](docs/blueprint/10-async-to-sync.md). |
+
+**Why `wait_codelldb.rs` serialises itself.** Every test there spawns a codelldb, which loads LLDB, maps a debuggee and opens a TCP socket. `cargo test` runs a file's tests in parallel, so a dozen of those start at once and fight over the machine — and the launch handshake has a 15-second deadline. Under that contention the deadline lands before the adapter is ready, and the suite fails for reasons that have nothing to do with lazydap: 12 of 13 timed out on a reviewer's machine while every one passed in isolation. A file-level mutex makes them take turns. It costs a few seconds of wall clock and buys a suite whose failures mean something. If you add a test there, take the same lock.
+
+**What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. A `FakeAdapter` exists for speed where the thing under test genuinely isn't adapter behaviour; anything that is a claim about what an adapter does belongs in `wait_codelldb.rs` against the real one.
+
+## Sanity-checking a change by hand
+
+A quick end-to-end loop from the workspace root, using the fixture in this repo:
+
+```bash
+gcc -g -O0 examples/c-hello/main.c -o examples/c-hello/build/hello
+./target/debug/lazydap break examples/c-hello/main.c:19
+./target/debug/lazydap launch ./examples/c-hello/build/hello --stop-on-entry
+./target/debug/lazydap continue --wait
+./target/debug/lazydap stack
+./target/debug/lazydap shutdown
+```
+
+> **Don't put a debuggee under `/tmp` on macOS.** `/tmp` is a symlink to `/private/tmp`, codelldb resolves the two differently, and your breakpoint silently fails to bind: it reports `verified: false` with `"could not be resolved, but a valid location was found at ..."` and the program runs straight through. Use a directory under `$HOME`.
+
+`lazydap logs` shows the daemon's log; `LAZYDAP_LOG` takes `tracing` filter directives (`LAZYDAP_LOG=dap.recv.event=debug` to watch raw adapter events), falling back to `RUST_LOG`. `lazydap daemon --foreground` keeps it in your terminal instead.
 
 ## DAP adapters
 
-lazydap is a wrapper around external DAP adapter processes. To exercise the real code paths (and run the canonical integration tests once they exist), you need at least one adapter installed and on `PATH`. The three primary targets:
+lazydap wraps external DAP adapter processes. codelldb is the only one wired up today; debugpy and js-debug are on the roadmap, and the install notes are here because you'll want them when that lands.
 
 | Adapter | Languages | Source |
 |---|---|---|
@@ -29,107 +71,81 @@ lazydap is a wrapper around external DAP adapter processes. To exercise the real
 | **debugpy** | Python | [microsoft/debugpy](https://github.com/microsoft/debugpy) (PyPI) |
 | **js-debug** | Node.js, Chrome, Edge | [microsoft/vscode-js-debug](https://github.com/microsoft/vscode-js-debug) |
 
-All three speak DAP over TCP. lazydap will spawn them as child processes and connect to a port they print on startup.
+The convention below: third-party prebuilt blobs go in `~/.local/opt/<name>/`, executables get exposed on `PATH` via `~/.local/bin/`. Make sure `~/.local/bin` is on your `PATH`. Nothing in lazydap depends on these locations.
 
-The convention used below: third-party prebuilt blobs go in `~/.local/opt/<name>/`, executables get exposed on `PATH` via `~/.local/bin/`. Make sure `~/.local/bin` is on your `PATH` (`echo $PATH | tr ':' '\n' | grep .local/bin`). Adjust paths if you prefer a different layout — nothing in lazydap depends on these specific locations.
+### codelldb (C / C++ / Rust)
 
-### codelldb (native: Rust / C / C++)
-
-Upstream releases ship platform-specific `.vsix` bundles that contain the prebuilt `codelldb` binary plus its `liblldb.dylib` / `liblldb.so`. A `.vsix` is just a renamed zip — VS Code is **not** required to use the contents.
-
-Pick the asset matching your platform from the [latest release](https://github.com/vadimcn/codelldb/releases/latest). The Apple Silicon flow:
+Upstream ships platform-specific `.vsix` bundles containing the prebuilt `codelldb` binary and its `liblldb`. A `.vsix` is a renamed zip; VS Code is not required.
 
 ```bash
-# 1. Download the platform-specific bundle
+# 1. Download the bundle for your platform.
 curl -sL -o /tmp/codelldb.vsix \
   https://github.com/vadimcn/codelldb/releases/latest/download/codelldb-darwin-arm64.vsix
 
-# 2. Extract
+# 2. Extract.
 mkdir -p ~/.local/opt/codelldb
 unzip -q -o /tmp/codelldb.vsix -d ~/.local/opt/codelldb
 #    binary  → ~/.local/opt/codelldb/extension/adapter/codelldb
 #    liblldb → ~/.local/opt/codelldb/extension/lldb/lib/liblldb.dylib
 
-# 3. Expose on PATH via a wrapper script (NOT a symlink — see note below).
+# 3. Expose on PATH with a wrapper script. NOT a symlink.
 cat > ~/.local/bin/codelldb <<'WRAPPER_EOF'
 #!/usr/bin/env bash
 exec "$HOME/.local/opt/codelldb/extension/adapter/codelldb" "$@"
 WRAPPER_EOF
 chmod +x ~/.local/bin/codelldb
 
-# 4. Verify
-codelldb --help            # NOTE: --version is not a recognised flag
+# 4. Verify.
+codelldb --help            # --version is not a flag it recognises
 ```
 
-> **⚠️ Don't use `ln -sf` here.** codelldb computes the `liblldb.dylib` path at runtime relative to `argv[0]`. When invoked through a symlink at `~/.local/bin/codelldb`, the relative path computation goes wrong and codelldb panics with a `dlopen` failure. The wrapper-script approach above invokes the real binary with an absolute path, so the relative computation lands correctly. Full forensic write-up: [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md) (quirk #1).
+Other platforms: `codelldb-linux-x64.vsix`, `codelldb-linux-arm64.vsix`, `codelldb-darwin-x64.vsix`.
 
-Asset names for other platforms: `codelldb-linux-x64.vsix`, `codelldb-linux-arm64.vsix`, `codelldb-darwin-x64.vsix`.
+Two failure modes worth knowing before you lose an afternoon to either:
 
-> **Don't use `code --install-extension vadimcn.vscode-lldb` and expect a CLI binary.** That marketplace package is a thin shim that lazy-downloads the platform binary on first activation *inside VS Code*. Useful for in-IDE debugging, useless for standalone CLI use.
+> **A symlink on `PATH` breaks it.** codelldb finds `liblldb` by walking up from `argv[0]`, so through a symlink at `~/.local/bin/codelldb` it looks one directory too high and panics in `dlopen`. The wrapper above hands it an absolute path. [Quirk 1](docs/reference/codelldb-quirks.md#1-symlink-install-breaks-liblldb-resolution).
+
+> **After a macOS update, every invocation may hang at `_dyld_start`** — including `codelldb --help` — with no output at all, because the OS is holding a stale per-inode security record. Copying the install to fresh inodes fixes it: `rm -rf ~/.local/opt/codelldb`, re-extract, re-verify. [Quirk 5](docs/reference/codelldb-quirks.md#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache).
+
+> **Don't `code --install-extension vadimcn.vscode-lldb` and expect a CLI binary.** That marketplace package lazy-downloads the platform binary on first activation inside VS Code. Fine in the IDE, useless standalone.
+
+Every codelldb behaviour that has cost this project time is written up in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md). Read it before filing a bug against lazydap for something the adapter did.
 
 ### debugpy (Python)
 
-Microsoft's official Python debug adapter. Same package VS Code's Python extension uses under the hood. Easiest install is via [`pipx`](https://pipx.pypa.io/) (isolated venv per tool, console scripts auto-symlinked to `~/.local/bin`):
-
 ```bash
 pipx install debugpy
-#    → venv at ~/.local/pipx/venvs/debugpy/
-#    → ~/.local/bin/debugpy           (for `python -m debugpy`-style use)
-#    → ~/.local/bin/debugpy-adapter   (this is the DAP-over-TCP entrypoint)
+#    → ~/.local/bin/debugpy-adapter   (the DAP-over-TCP entrypoint)
 
 debugpy-adapter --help
 ```
 
-If you don't want pipx: `pip install --user debugpy` works too, but you'll need to make sure the user-site `bin/` is on `PATH`.
+`pip install --user debugpy` works too; you'll need the user-site `bin/` on `PATH`.
 
 ### js-debug (Node.js / Chrome)
 
-Microsoft's official JS/TS debugger, same one bundled into VS Code. They publish a standalone-friendly tarball on each release exactly for out-of-IDE use.
-
 ```bash
-# 1. Download (replace v1.117.0 with current latest)
-TAG=v1.117.0
+TAG=v1.117.0     # check the latest release
 curl -sL -o /tmp/js-debug-dap.tar.gz \
   https://github.com/microsoft/vscode-js-debug/releases/download/$TAG/js-debug-dap-$TAG.tar.gz
 
-# 2. Extract (the --strip-components=1 drops the top-level js-debug/ dir)
 mkdir -p ~/.local/opt/js-debug
 tar -xzf /tmp/js-debug-dap.tar.gz -C ~/.local/opt/js-debug --strip-components=1
 #    DAP entrypoint → ~/.local/opt/js-debug/src/dapDebugServer.js
 
-# 3. The entrypoint is a Node script, not an executable. Wrap it:
+# The entrypoint is a Node script, not an executable. Wrap it:
 cat > ~/.local/bin/js-debug-dap <<'EOF'
 #!/usr/bin/env bash
 exec node "$HOME/.local/opt/js-debug/src/dapDebugServer.js" "$@"
 EOF
 chmod +x ~/.local/bin/js-debug-dap
 
-# 4. Smoke-test (port 0 = pick any free port; prints "Debug server listening at ::1:<port>")
-js-debug-dap 0
-# Ctrl-C to stop.
+js-debug-dap 0     # port 0 = pick any free port; Ctrl-C to stop
 ```
 
-Requires a working `node` on `PATH` (any recent LTS).
+### Invocation conventions
 
-### Filesystem layout summary
-
-```
-~/.local/bin/
-├── codelldb            → ~/.local/opt/codelldb/extension/adapter/codelldb   (symlink)
-├── debugpy             → ~/.local/pipx/venvs/debugpy/...                    (pipx)
-├── debugpy-adapter     → ~/.local/pipx/venvs/debugpy/...                    (pipx)
-└── js-debug-dap                                                             (wrapper script)
-
-~/.local/opt/
-├── codelldb/           # full bundle: codelldb binary + liblldb
-└── js-debug/           # Node DAP server
-
-~/.local/pipx/venvs/debugpy/   # debugpy's isolated Python env
-```
-
-### Invocation conventions (read this once, save yourself confusion later)
-
-The three adapters take **different** invocation conventions for the same conceptual operation ("listen on a port for DAP traffic"):
+The three adapters spell the same idea differently:
 
 | Adapter | "Listen on port N" |
 |---|---|
@@ -137,58 +153,51 @@ The three adapters take **different** invocation conventions for the same concep
 | debugpy-adapter | `debugpy-adapter --port N` |
 | js-debug-dap | `js-debug-dap N` (positional) |
 
-This variance is intrinsic to the adapter ecosystem, not a wart lazydap should iron out. lazydap's adapter spec config carries the right invocation per adapter; don't normalise it away in your own scripts either — when you script against an adapter directly, use whatever convention that adapter actually accepts.
+That variance is intrinsic to the ecosystem. lazydap's per-adapter config carries the right invocation; don't normalise it away in your own scripts either.
 
 ### Uninstall
 
 ```bash
-# codelldb
-rm ~/.local/bin/codelldb
-rm -rf ~/.local/opt/codelldb
-
-# debugpy
+rm ~/.local/bin/codelldb && rm -rf ~/.local/opt/codelldb
 pipx uninstall debugpy
-
-# js-debug
-rm ~/.local/bin/js-debug-dap
-rm -rf ~/.local/opt/js-debug
+rm ~/.local/bin/js-debug-dap && rm -rf ~/.local/opt/js-debug
 ```
 
-## Chapter tags and releases
+## The non-negotiables
 
-This repo is also a **learn-by-LLM book** (see [`docs/book/`](docs/book/)). Every chapter has a git tag named `chapter-NN` that points at the state of `main` you should checkout to **begin** that chapter. Each tag has a corresponding GitHub Release.
+Eight of them, listed with their reasoning in [`AGENTS.md`](AGENTS.md#the-non-negotiables). The two that catch people most often:
 
-### How the convention works
+- **Every TUI action has a CLI equivalent.** Both wired or neither. This is enforced structurally: `lazydap-tui` cannot depend on `lazydap-daemon`, so a TUI feature that skips the protocol won't compile.
+- **JSON output is a product feature.** The schema is a contract other people's tools depend on. Changing one costs an entry in [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md).
 
-- **Naming**: `chapter-NN` is the *start state* of chapter NN. To start chapter 04, run `git checkout chapter-04`. The end of chapter NN is the start of chapter NN+1, so to see the state *after* a chapter ships, checkout the next chapter's tag (or `main` for the latest taught chapter).
-- **What it points at**: the commit on `main` that represents "everything taught up to and including chapter NN-1, ready to start chapter NN."
-- **When to create**: at the end of a session that completes chapter NN-1, tag the resulting commit as `chapter-NN`. Don't tag the commit being authored — tag the state it produces, which is the starting point for the *next* chapter.
-- **Releases auto-create**: pushing a `chapter-*` tag fires [`.github/workflows/release.yml`](.github/workflows/release.yml), which generates release notes from the chapter file's frontmatter and creates the GitHub Release.
+## Commits and pull requests
 
-### Best-current semantics (tags move forward)
+Conventional commits, with an optional milestone scope:
 
-When a retroactive fix lands on `main` that affects an earlier chapter (e.g., a milestone file gets rewritten because of version drift in a tool), **move the affected chapter tags forward**:
-
-```bash
-git tag -fa chapter-04 <new-commit>
-git push --force-with-lease origin chapter-04
+```
+feat(m11): the TUI becomes a client of the daemon
+fix: five defects found in review of Phase C
+docs: record Phase C — TODO ticks, completion notes, D037–D039
 ```
 
-The release workflow handles updates idempotently — if the release already exists, its notes are refreshed; if not, it's created.
+No attribution footers, no co-author trailers. The body is for why, not what — the diff already says what.
 
-This means `chapter-NN` tags always point at the *best-current* version of that chapter's start state, not the historical "as-shipped" version. The chapter narrative still tells the story of any pedagogically valuable bugs we hit live; the code at the tagged checkout point reflects the corrected state so future learners don't re-encounter accidents that don't teach anything.
+For a pull request:
 
-### Workspace-setup wart
+- **Keep the diff to the change.** Don't refactor adjacent code, delete code that looks unused, or reformat untouched files. Note what you spotted in the PR description instead and let the maintainer decide.
+- **All six gates green**, including the boundary script and the skill diff.
+- **Architectural change means a decision-log entry.** New `D0NN` in [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), with the alternatives you rejected and why.
+- **A new feature needs a milestone file.** `docs/implementation/tasks/MNN-name.md`, indexed in [`TODO.md`](TODO.md) and the relevant phase doc. Finishing a milestone means ticking its box and adding a completion note to the task file.
+- **Say how you verified it**, and against what. "Tests pass" is weaker than "ran the loop against codelldb 1.12.2 on Darwin 25.5.0, output below."
 
-Chapters 01-03 (cargo workspaces, async main + clap, conventions as code) ended up folded into a single workspace-setup commit during initial scaffolding, so they don't have individual `chapter-01`, `chapter-02`, `chapter-03` tags — there's no separate commit for each. The first separately-tagged checkout point is `chapter-04`. To start at chapter 01, work from a fresh `git init` instead. Going forward, each session ships in its own commit so this won't recur.
+## A note on the book
 
-### Why this exists
-
-A book is built linearly across many sessions, but learners don't always want to read it linearly. Chapter tags let someone arrive cold at chapter 09, checkout the corresponding tag, and have the codebase in exactly the right shape to follow the chapter. Same affordance for the LLM-as-teacher mode: an agent picking up a session can verify it's at the right starting state by `git checkout chapter-NN`.
+lazydap is also the subject of a learn-by-LLM Rust book. The chapters under `docs/book/`, the session plan under `docs/teaching/`, the `chapter-*` git tags, and [`.github/workflows/release.yml`](.github/workflows/release.yml) that builds releases from them all belong to [`lazydap-learn`](https://github.com/planetaryescape/lazydap-learn) — edit them there, not here. In this repo they're reference: when you need to know why a piece of code is shaped the way it is, the chapter covering that milestone often explains it better than the blueprint. Product releases use [`.github/workflows/product-release.yml`](.github/workflows/product-release.yml) and `v*` tags, which are unrelated.
 
 ## Where to look next
 
-- [`AGENTS.md`](AGENTS.md) — non-negotiables, commit style, teaching mode, docs structure
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — crate layout, IPC contract, the core tenet
-- [`docs/implementation/`](docs/implementation/) — phased build plan; [`/TODO.md`](TODO.md) tracks current state
-- [`docs/reference/dap-protocol-cheatsheet.md`](docs/reference/dap-protocol-cheatsheet.md) — DAP wire format quick reference
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — crate layout, the IPC contract, the core tenet
+- [`AGENTS.md`](AGENTS.md) — non-negotiables, docs structure, how agents work here
+- [`docs/implementation/`](docs/implementation/) — the phased build plan; [`TODO.md`](TODO.md) tracks where it's up to
+- [`docs/reference/dap-protocol-cheatsheet.md`](docs/reference/dap-protocol-cheatsheet.md) — DAP wire format, quickly
+- [`SECURITY.md`](SECURITY.md) — what counts as a vulnerability here, and how to report one
