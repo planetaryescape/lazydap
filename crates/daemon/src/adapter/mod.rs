@@ -94,11 +94,23 @@ pub type Result<T> = std::result::Result<T, AdapterError>;
 
 /// The live end of an adapter: send it requests, or pull the plug.
 pub struct AdapterHandle {
-    /// `None` once the adapter has been killed. Also the request queue:
-    /// holding this lock for a whole request/response cycle is how D021's
-    /// "queue, don't pipeline" is enforced — one in-flight request per
-    /// session, no exceptions to get subtly wrong.
+    /// `None` once the adapter has been killed. Held only for the write
+    /// itself, so writes are serialised but waiting for a response is not.
     writer: Mutex<Option<DapWriter>>,
+    /// The execution queue (D021, non-negotiable #6).
+    ///
+    /// Some adapters serialise execution requests internally and can deadlock
+    /// if a second arrives while the first is outstanding (ptvsd #1502), so an
+    /// execution request holds this permit across the write *and* the wait for
+    /// its response — serialising the writer alone would still let two be in
+    /// flight at once.
+    ///
+    /// M5's only adapter request is `disconnect`, which is execution-class, so
+    /// every request takes the permit today. M6 adds `continue`/`step`/`pause`
+    /// (execution, keep the permit) alongside `eval`/`scopes`/`stackTrace`
+    /// (not execution, and safe to run concurrently — they should take the
+    /// writer and skip this).
+    execution: Mutex<()>,
     pending: Pending,
 }
 
@@ -106,12 +118,32 @@ impl AdapterHandle {
     pub(crate) fn new(writer: DapWriter, pending: Pending) -> Self {
         Self {
             writer: Mutex::new(Some(writer)),
+            execution: Mutex::new(()),
             pending,
         }
     }
 
-    /// Send one request and wait for its response.
+    /// A handle whose adapter has already gone.
+    ///
+    /// Not a fake adapter — it is the real state an `AdapterHandle` reaches
+    /// once [`kill`](Self::kill) has run, which is what lets session-lifecycle
+    /// tests exercise a `Session` without a live codelldb behind it.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            writer: Mutex::new(None),
+            execution: Mutex::new(()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Send one execution request and wait for its response.
+    ///
+    /// The permit is taken first and held for the whole cycle; see the field
+    /// comment on `execution` for why the writer lock alone is not enough.
     async fn request(&self, command: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+        let _permit = self.execution.lock().await;
+
         let receiver = {
             let mut writer = self.writer.lock().await;
             let writer = writer.as_mut().ok_or(AdapterError::Gone)?;
