@@ -36,6 +36,8 @@ pub struct Launched {
     pub state: SessionState,
     pub reason: Option<PauseReason>,
     pub thread_id: Option<i64>,
+    /// Set when the debuggee finished during its own launch.
+    pub exit_code: Option<i32>,
     /// Debuggee output produced before the pump took over. Seeded into the
     /// session buffer so a `stop_on_entry` launch does not silently lose the
     /// first lines.
@@ -65,6 +67,7 @@ pub async fn launch(request: &LaunchRequest) -> Result<Launched> {
                 state: outcome.state,
                 reason: outcome.reason,
                 thread_id: outcome.thread_id,
+                exit_code: outcome.exit_code,
                 output: outcome.output,
             })
         }
@@ -83,6 +86,7 @@ struct Outcome {
     state: SessionState,
     reason: Option<PauseReason>,
     thread_id: Option<i64>,
+    exit_code: Option<i32>,
     output: Vec<OutputChunk>,
 }
 
@@ -108,6 +112,7 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
         state: SessionState::Running,
         reason: None,
         thread_id: None,
+        exit_code: None,
         output: Vec::new(),
     };
 
@@ -140,7 +145,17 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
                     outcome.thread_id = body["threadId"].as_i64();
                 }
                 // A program short enough to finish during its own launch is
-                // unusual but not an error; report it as it happened.
+                // unusual but not an error; report it as it happened. The exit
+                // code arrives on its own event, and losing it here would mean
+                // a debuggee that finished this fast could never report how it
+                // went.
+                "exited" => {
+                    outcome.exit_code = event
+                        .body
+                        .as_ref()
+                        .and_then(|body| body["exitCode"].as_i64())
+                        .map(|code| code as i32);
+                }
                 "terminated" => outcome.state = SessionState::Terminated,
                 _ => {}
             },

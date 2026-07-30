@@ -6,7 +6,7 @@
 
 use crate::adapter::{self, codelldb};
 use crate::state::{DaemonState, Session};
-use lazydap_core::{EndReason, SessionId, SessionState};
+use lazydap_core::{EndReason, SessionId};
 use lazydap_protocol::{ErrorCode, Event, IpcError, LAZYDAP_PROTOCOL_VERSION, Request, Response};
 use std::sync::Arc;
 
@@ -79,20 +79,38 @@ async fn launch(
         adapter: request.adapter,
     });
 
+    // A debuggee quick enough to finish during its own launch has already
+    // ended, and the pump will never see the events that say so. End it here,
+    // before the pump starts: `end_once` then makes the socket closing behind
+    // the dead adapter a no-op, rather than rewriting this ending as
+    // `adapter_died`.
+    if !launched.state.is_live() {
+        session.set_exit_code(launched.exit_code);
+        session.end_once(match launched.exit_code {
+            Some(exit_code) => EndReason::Exited {
+                exit_code: Some(exit_code),
+            },
+            None => EndReason::Terminated,
+        });
+    }
+
     // The pump takes over reads from here; nothing else may touch them.
     adapter::spawn_pump(launched.pump, Arc::clone(&session));
     reservation.promote(Arc::clone(&session));
 
+    // Read the state back rather than echoing what the handshake saw: ending
+    // the session above may have refined `terminated` into `exited`.
+    let state = session.state();
     tracing::info!(
         target: "daemon.session",
         session_id = %session_id,
-        state = ?launched.state,
+        state = state.as_str(),
         "launched",
     );
 
     Ok(Response::Launched {
         session_id,
-        state: launched.state,
+        state,
         reason: launched.reason,
         thread_id: launched.thread_id,
         capabilities: launched.capabilities,
@@ -104,7 +122,13 @@ async fn disconnect(
     session_id: SessionId,
     terminate: bool,
 ) -> Result<Response> {
-    let session = state.remove_session(session_id).ok_or_else(|| {
+    // Look the session up without removing it. Tearing down can take seconds
+    // — a `disconnect` the adapter ignores waits out its timeout — and a slot
+    // freed at the start of that window lets a concurrent `launch` past the
+    // single-session check (D007) and spawn a second adapter while the first
+    // is still being killed. The slot stays occupied until the adapter is
+    // actually gone.
+    let session = state.session(session_id).ok_or_else(|| {
         IpcError::new(
             ErrorCode::SessionNotFound,
             format!("no session {session_id}"),
@@ -126,8 +150,11 @@ async fn disconnect(
         );
     }
     session.adapter().kill().await;
+    // `end_once` sets the state, and only if this is the first ending: a
+    // session whose debuggee had already exited keeps `exited` and its exit
+    // code, rather than being relabelled `terminated` on the way out.
     session.end_once(EndReason::Disconnected);
-    session.set_state(SessionState::Terminated);
+    state.remove_session(session_id);
 
     tracing::info!(target: "daemon.session", session_id = %session_id, terminate, "disconnected");
     Ok(Response::Disconnected { session_id })

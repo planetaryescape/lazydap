@@ -87,6 +87,19 @@ impl DaemonState {
         })
     }
 
+    /// Look up a live session without giving up its slot.
+    ///
+    /// Teardown uses this rather than [`remove_session`](Self::remove_session):
+    /// the slot has to stay occupied for as long as the adapter is being shut
+    /// down, or a concurrent launch walks straight through the single-session
+    /// check while the previous adapter is still alive.
+    pub fn session(&self, id: SessionId) -> Option<Arc<Session>> {
+        match read(&self.sessions).get(&id) {
+            Some(Slot::Live(session)) => Some(Arc::clone(session)),
+            _ => None,
+        }
+    }
+
     /// Forget a session, handing it back so the caller can shut its adapter
     /// down.
     pub fn remove_session(&self, id: SessionId) -> Option<Arc<Session>> {
@@ -352,6 +365,20 @@ mod tests {
         DaemonState::new("lazydap-test".to_string())
     }
 
+    /// A session whose adapter has already gone — the state every session
+    /// reaches, and the one the ending rules are about.
+    fn ended_session() -> Session {
+        let (event_tx, _keep_open) = tokio::sync::broadcast::channel(16);
+        Session::new(
+            SessionId::new(),
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            crate::adapter::AdapterHandle::detached(),
+            event_tx,
+        )
+    }
+
     #[test]
     fn a_second_launch_is_rejected_while_one_is_already_reserved() {
         let state = state();
@@ -393,6 +420,53 @@ mod tests {
             "a half-launched session must not show up as active",
         );
         assert!(state.status().session.is_none());
+    }
+
+    #[test]
+    fn a_late_exit_code_still_reaches_status_after_the_session_ended() {
+        // DAP does not guarantee `exited` arrives before `terminated`, so a
+        // code recorded after the ending must not be dropped.
+        let session = ended_session();
+        assert!(session.end_once(EndReason::Terminated));
+
+        session.set_exit_code(Some(3));
+
+        assert_eq!(session.exit_code(), Some(3));
+        assert!(
+            !session.end_once(EndReason::Exited { exit_code: Some(3) }),
+            "the session ends once, however many endings arrive",
+        );
+    }
+
+    #[test]
+    fn disconnecting_an_already_finished_session_keeps_how_it_finished() {
+        // `lazydap disconnect` after the debuggee ran to completion must not
+        // relabel a clean exit as a termination.
+        let session = ended_session();
+        session.set_exit_code(Some(0));
+        assert!(session.end_once(EndReason::Exited { exit_code: Some(0) }));
+
+        assert!(!session.end_once(EndReason::Disconnected));
+        assert_eq!(session.state(), SessionState::Exited);
+        assert_eq!(session.summary().exit_code, Some(0));
+    }
+
+    #[test]
+    fn the_first_ending_wins_so_a_dead_adapter_cannot_rewrite_it() {
+        let session = ended_session();
+        assert!(session.end_once(EndReason::Exited { exit_code: Some(0) }));
+        assert_eq!(session.state(), SessionState::Exited);
+
+        // What the pump does when the socket closes behind an adapter that
+        // has already reported the debuggee finishing.
+        assert!(!session.end_once(EndReason::AdapterDied {
+            detail: "eof".to_string(),
+        }));
+        assert_eq!(
+            session.state(),
+            SessionState::Exited,
+            "a clean exit must not be relabelled as a crash",
+        );
     }
 
     #[test]
