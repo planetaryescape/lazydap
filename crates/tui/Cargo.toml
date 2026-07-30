@@ -1,0 +1,17 @@
+[package]
+name = "lazydap-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ratatui = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

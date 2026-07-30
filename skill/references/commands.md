@@ -298,6 +298,15 @@ Usage: lazydap completions [OPTIONS] <SHELL>
 |---|---|---|---|
 | `<SHELL>` | yes | - | Which shell. One of: `bash`, `elvish`, `fish`, `powershell`, `zsh` |
 
+### `lazydap tui`
+
+Open the terminal UI. This is also what bare `lazydap` does on a terminal
+
+```
+Usage: lazydap tui [OPTIONS]
+```
+
+
 ### `lazydap daemon`
 
 Run the daemon. Normally started automatically by the first command that needs it

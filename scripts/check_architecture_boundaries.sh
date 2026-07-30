@@ -34,15 +34,27 @@ ALLOW = {
     # file format, and nothing about sockets, adapters or the daemon — so a
     # future client can read the same state without going through the daemon.
     "lazydap-store": {"lazydap-core"},
-    # The daemon may depend on everything except a client. DAP in particular is
-    # allowed here only because the adapter module is the seam that keeps it
-    # from leaking further (see crates/daemon/src/adapter/mod.rs).
+    # The TUI is a client and nothing more (D037). This is the row that makes
+    # non-negotiable 2 structural rather than aspirational: with no path to the
+    # daemon, the store or DAP, a TUI-only feature is not something that can be
+    # written here at all — it has to become a protocol request, and a protocol
+    # request is something the CLI can send too.
+    "lazydap-tui": {"lazydap-config", "lazydap-core", "lazydap-protocol"},
+    # The daemon may depend on everything, including the TUI — it is also the
+    # `lazydap` binary, and a binary that could not start the TUI would need a
+    # second one (D002 says there is one). The arrow only points this way:
+    # daemon → tui is composition, tui → daemon would be the bypass, and the
+    # row above is what forbids it.
+    #
+    # DAP is allowed here only because the adapter module is the seam that
+    # keeps it from leaking further (see crates/daemon/src/adapter/mod.rs).
     "lazydap-daemon": {
         "lazydap-config",
         "lazydap-core",
         "lazydap-dap",
         "lazydap-protocol",
         "lazydap-store",
+        "lazydap-tui",
     },
 }
 

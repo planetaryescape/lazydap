@@ -97,7 +97,9 @@ lazydap/                                 ← Cargo workspace root
 - `store` depends on `core`.
 - `config` depends on `core`.
 - `tui` depends on `core`, `protocol`, `config`. **NOT** on `daemon`, `store`, `dap`, or any adapter.
-- `daemon` depends on everything except `tui`.
+- `daemon` depends on everything, `tui` included: it is also the `lazydap` binary, so it is what
+  starts the TUI (D037). The arrow only points that way — `tui` → `daemon` is the bypass the rule
+  above forbids.
 
 ## IPC contract
 
