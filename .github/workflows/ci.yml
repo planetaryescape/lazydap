@@ -88,3 +88,49 @@ jobs:
         run: |
           unzip -q -o lazydap.skill -d /tmp/skill-check
           diff -r skill/ /tmp/skill-check
+
+  site:
+    name: Docs site
+    runs-on: ubuntu-latest
+    # Deliberately not gated on `site/**`. The CLI reference is generated from
+    # the clap definitions in crates/daemon, so a pure-Rust PR that renames a
+    # flag is exactly the change that makes the committed reference stale. A
+    # path filter here would let that through. It is a separate job, so the Rust
+    # gates do not wait on it either way.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site
+
+      # Deliberately first, and with no Rust in scope. `npm run build` must work
+      # for someone who has only cloned the repo and installed Node — that is
+      # also all a Vercel deploy gets — so it renders the committed CLI pages
+      # rather than regenerating them.
+      - run: npm run build
+        working-directory: site
+
+      # Regenerating is a separate concern, and it is the only part that needs
+      # cargo. Same toolchain and cache as the Rust jobs.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --bin lazydap
+
+      # The reference is committed so a flag change shows up in review. That
+      # only helps if it is current: regenerate against the binary just built
+      # and let git say whether anything moved. LAZYDAP_BIN is explicit so a
+      # cached release binary cannot answer instead.
+      - name: Check the committed CLI reference matches the binary
+        working-directory: site
+        env:
+          LAZYDAP_BIN: ${{ github.workspace }}/target/debug/lazydap
+        run: |
+          if ! npm run check:generated; then
+            echo "::error::The CLI reference is out of date. Run 'cargo build --bin lazydap' then 'npm run generate' in site/, and commit the result."
+            exit 1
+          fi

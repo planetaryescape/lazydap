@@ -1,5 +1,11 @@
 /target
 /examples/c-hello/build
+
+# Docs site build artefacts. `site/src/content/docs/reference/cli/` is generated
+# too, but it IS committed: CI regenerates it and diffs, so drift fails the build.
+/site/node_modules
+/site/dist
+/site/.astro
 # lazydap's own per-project state, written when someone debugs this repo with
 # the thing this repo builds. Committing it is a supported choice for a team
 # that wants shared breakpoints (D006) — it is just not ours to make here.

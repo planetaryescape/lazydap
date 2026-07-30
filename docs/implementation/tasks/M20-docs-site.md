@@ -79,3 +79,132 @@ cd site && npm ci && npm run build
   website with all the documentation and getting started guides".
 - The `writing-docs` skill governs the prose; load it before writing any page.
 - Deployment/domain decision deliberately excluded — surfaced to the user at completion.
+
+## Completion note
+
+**Completed 2026-07-30.** `cd site && npm ci && npm run build` is green from a clean tree,
+run twice, 39 pages each time with no diff between runs. Zero validation errors, zero dead
+internal links. The four Rust gates and the boundary script were re-run afterwards and are
+green; no Rust was touched.
+
+### Pages
+
+17 hand-written pages plus 22 generated ones.
+
+| Path | Purpose |
+|---|---|
+| `index.mdx` | Splash landing: the loop, what it is, the five trade-offs in brief |
+| `getting-started/install.md` | codelldb via wrapper script, lazydap from source, `doctor` |
+| `getting-started/quickstart.md` | Breakpoint → variable → exit against a real C program |
+| `getting-started/tui.md` | Keys, tty detection, why the TUI is a client |
+| `guides/why-lazydap.md` | Positioning: the five trade-offs, named alternatives, falsifiers |
+| `guides/agents.md` | The skill bundle, `--wait` discipline, mistakes that cost turns |
+| `guides/wait.md` | Stable states, the five outcomes, timeouts, coalescing, queueing |
+| `guides/breakpoints.md` | Persistence, `verified`, conditions, hit counts, log points, dry-run |
+| `guides/output-formats.md` | The five formats, piping, `jq` recipes, errors on stderr |
+| `guides/daemon.md` | Per-project instances, auto-spawn, paths, logs, version mismatch |
+| `guides/architecture.md` | Three stacked protocols, the 7-crate graph, four IPC buckets |
+| `reference/cli/index.md` | Generated: command list plus the options every command takes |
+| `reference/cli/<cmd>.md` | Generated: one page per top-level command (22) |
+| `reference/json-output.md` | Field-by-field schemas, all captured from real runs |
+| `reference/errors.md` | Exit codes 0–4, the error object, every error name |
+| `reference/protocol.md` | Socket wire format for client authors |
+| `reference/codelldb-quirks.md` | The eight quirks, cause and fix each |
+| `troubleshooting.md` | The same failures organised by symptom |
+
+### Build pipeline
+
+`npm run build` = `validate` → `astro build` → `generate-llms-txt`. **It needs Node and
+nothing else** — no cargo, no `lazydap` binary. That is load-bearing: a clean clone and a
+Vercel deploy both have neither. Verified by copying `site/` somewhere with no `target/` and
+building 39 pages there.
+
+Regeneration is separate (`npm run generate`) and is the only part that needs a binary. The
+generated pages are committed; CI regenerates against a binary it just built and fails on any
+diff.
+
+- `scripts/generate-cli-reference.mjs` shells out to the built binary and walks
+  `lazydap --help` → `lazydap <cmd> --help`. Nothing is transcribed by hand. Options common
+  to every command are hoisted to the index rather than repeated 22 times. Binary resolution
+  is `$LAZYDAP_BIN`, else whichever of `target/release` and `target/debug` is newest — not
+  release-first, which would let a stale release binary answer after a clap change and make
+  the freshness check pass against the wrong CLI. Each `--help` gets a 10-second timeout so a
+  wedged binary (quirk 5) fails the build rather than hanging it.
+- `crates/protocol/examples/wire_examples.rs` prints the serialised form of representative
+  protocol messages. `reference/protocol.md` pastes its output rather than describing it.
+- `scripts/validate-docs.mjs` checks internal links resolve, slugs are unique, frontmatter is
+  complete, and that specific stale claims cannot be copied in from the blueprint —
+  CamelCase wire values, the eleven-crate list, the "sixth IPC bucket" line, `xargs -r`, and
+  banned marketing vocabulary. It caught one real mistake during authoring.
+- `scripts/generate-llms-txt.mjs` writes `llms-full.txt` and a `.md` sibling per page. The
+  curated `llms.txt` is hand-written at `public/llms.txt`.
+- `npm run check:generated` regenerates and `git diff --exit-code`s. Verified to exit 1 on a
+  committed-but-stale reference page, and 0 otherwise.
+
+### Deviations from the plan
+
+1. **Spelling.** The brief said `docs/` uses American technical spelling. It does not — the
+   repo is consistently British (`behaviour` 37, `serialis*` 31, `normalis*` 8). Pages follow
+   the repo.
+2. **Dependency pins.** `astro` 7.1.3 / `@astrojs/starlight` 0.41.4, not the current 7.1.6 /
+   0.41.5. The npm registry in this environment refuses anything published after 2026-07-23.
+   Bumping is a one-line change plus a lockfile refresh, and worth doing on a machine without
+   the cutoff.
+3. **`site/.npmrc`.** npm here runs with `--strict-allow-scripts`, so `esbuild` and
+   `fsevents` are allowlisted per-project. Harmless on a default-configured CI runner and
+   keeps `npm ci` non-interactive.
+4. **The CI job is not path-gated.** The brief asked for it to run on `site/**` changes. It
+   runs unconditionally instead: the CLI reference is generated from the clap definitions in
+   `crates/daemon`, so a Rust-only PR renaming a flag is exactly what makes the committed
+   reference stale, and a path filter would let that through. It is a separate job, so the
+   Rust gates never wait on it.
+5. **No `sharp`.** mxr needs it for social-image generation; nothing here generates images.
+6. **`public/og.png` does not exist.** The `og:image` meta tags are wired and point at it, so
+   dropping a 1200×630 PNG at that path is the whole remaining task. Until then social cards
+   degrade to no image. Flagged with a TODO in `astro.config.mjs`.
+7. **`TODO.md` not ticked.** Another worker owns that file in this wave; the orchestrator
+   should add the M20 row when merging.
+
+### Verified transcripts
+
+Every command shown was run against `target/debug/lazydap` at this commit, with codelldb
+1.12.2 on Darwin 25.5.0, against a C program built with `gcc -g -O0`. Home directories are
+rewritten to `/Users/you`; elisions are marked in the prose. Covered: `doctor`, `break`
+(add / list / conditional / dry-run remove / remove), `launch --stop-on-entry`,
+`continue --wait` to a breakpoint, to a timeout, and to exit, `step --wait`, `pause --wait`,
+`stack`, `scopes`, `variables`, `eval` (success and failure), `threads`, `output`, `status`,
+`version`, `logs`, `disconnect`, the `table`/`json`/`jsonl`/`csv`/`ids` formats, and the
+`SessionNotPaused`, `SessionNotFound` and `UsageError` failures.
+
+Two findings worth keeping: `--timeout 3` against a program printing once a second returns
+`"state": "timeout"` with all three lines still in `captured_output`, which is the evidence
+for "output survives a timeout"; and a conditional breakpoint `i == 7` stopped with
+`sum == 21`, which is arithmetically the right iteration.
+
+### Review round: 15 defects fixed
+
+An external review found 14 defects plus one from the orchestrator, concentrated in the pages
+written from a model of the code rather than from the code. `reference/protocol.md` was the
+worst — six of the fifteen. All fixed; the durable lesson is that **wire shapes get verified
+the same way commands do**, by serialising the real types and pasting, which is now what
+`wire_examples.rs` exists for.
+
+The one that would have hurt most: `npm run build` regenerated the CLI reference, so it
+needed a Rust binary, so a clean clone and any Vercel deploy died on it. Split out.
+
+Also corrected: `launch` does not take `--wait` (three pages claimed it did); `adapter_died`
+leaves `exit_code` null; the error list was missing five names; the crate graph had two wrong
+rows against `cargo metadata`; the quickstart's "nothing else is edited" claim was not
+literally true; and a debug-gym citation carried per-model percentages that appear in neither
+the abstract nor the Microsoft Research blog, now replaced with what those sources actually
+say.
+
+### Left open for the user
+
+**Deployment and domain.** No Vercel project was created and nothing was deployed, per the
+milestone. `site/vercel.json` matches mxr's shape (`buildCommand`, `outputDirectory`,
+`framework`) minus mxr's apex-redirect rule, which is domain-specific. `astro.config.mjs`
+reads `SITE_URL` from the environment and falls back to `https://lazydap.sh`, a placeholder
+chosen only for symmetry with `mxr.sh` — it appears in canonical tags, the sitemap,
+`robots.txt` and `llms-full.txt`, so it needs deciding before the first deploy rather than
+after.

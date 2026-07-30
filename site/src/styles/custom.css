@@ -1,0 +1,32 @@
+/* Starlight ships a complete theme. This file only sets the accent ramp and
+   fixes the two places the stock theme reads badly for this content. Resist
+   growing it: every rule here is a rule that has to survive a Starlight
+   upgrade. */
+
+:root {
+  /* Terminal amber against Starlight's slate. Generated from #d98b2b with
+     Starlight's own accent-colour recipe, so contrast holds in both themes. */
+  --sl-color-accent-low: #3a2004;
+  --sl-color-accent: #a35d00;
+  --sl-color-accent-high: #f0c08a;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ffe0bd;
+  --sl-color-accent: #9c5900;
+  --sl-color-accent-high: #4a2a00;
+}
+
+/* Reference pages are long tables of flags. The stock content width wraps a
+   two-column flag table onto three lines on a laptop. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Wire-format snippets (`--wait` blobs, DAP frames) are the main thing readers
+   compare against their own terminal, so they get a little more room. */
+.sl-markdown-content pre {
+  font-size: var(--sl-text-sm);
+}

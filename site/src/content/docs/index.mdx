@@ -1,0 +1,96 @@
+---
+title: Debug from the shell.
+description: Set a breakpoint, run to it, read the JSON that comes back. A scriptable debugger for C, C++ and Rust, driven by shell subcommands.
+template: splash
+hero:
+  tagline: lazydap turns a debugger into shell subcommands that print JSON. Set a breakpoint, run to it, read what came back, decide what to do next — from a script, a Makefile, or an agent that only knows how to run commands.
+  actions:
+    - text: Install
+      link: /getting-started/install/
+      variant: primary
+    - text: Quickstart
+      link: /getting-started/quickstart/
+      variant: secondary
+---
+
+## The loop
+
+```console
+$ lazydap break hello.c:6 --format json
+{
+  "action": "added",
+  "breakpoints": [
+    { "enabled": true, "id": 1, "line": 6,
+      "source": "/Users/you/lazydap-demo/hello.c", "verified": false }
+  ],
+  "dry_run": false
+}
+
+$ lazydap launch ./hello --stop-on-entry --format json
+{
+  "raw_reason": "exception",
+  "reason": "entry",
+  "session_id": "3a2c4335-0af9-4363-bf2e-2dc866c9045b",
+  "state": "paused",
+  "thread_id": 27982711
+}
+
+$ lazydap continue --wait --format json
+{
+  "captured_output": [
+    { "category": "stdout", "output": "starting\r\n", "timestamp_ms": 1785446339847 }
+  ],
+  "elapsed_ms": 95,
+  "frame": {
+    "column": 16, "id": 1001, "line": 6, "name": "total",
+    "source": { "name": "hello.c", "path": "/Users/you/lazydap-demo/hello.c" }
+  },
+  "hit_breakpoint_ids": [1],
+  "reason": "breakpoint",
+  "state": "paused"
+}
+```
+
+One command, one JSON object, one decision. `--wait` is what makes that possible: it blocks
+until the program is somewhere worth looking at, then hands back everything that happened on
+the way, including every line the program printed.
+
+[Run this yourself](/getting-started/quickstart/) — it takes a `gcc` invocation and four
+commands.
+
+## What it is
+
+**A daemon** owns the debug adapter and the live session, so each command can be its own
+process and still find the program where the last one left it.
+
+**A CLI** exposes every debug operation as a subcommand that prints JSON on a stable schema.
+
+**A TUI** ships in the same binary and is a client of the same socket, with no privileged
+path to the daemon's internals. The crate graph enforces that, not a code review.
+
+**An agent skill** points a model at the same commands you would type.
+
+## What it isn't
+
+Five trade-offs, each with a defensible opposite that other tools take:
+
+- **Shell subcommands, not an MCP server.** Anything that can run a command can drive it.
+  The cost is no tool discovery and no typed schema handed to your model by a host.
+- **One blob per command, not an event stream.** Better for a script deciding what to do
+  next; worse for a live dashboard.
+- **The JSON is the contract; the table output is not.** `--format table` gets reflowed
+  whenever it reads badly.
+- **It wraps codelldb rather than being a debugger.** LLDB already does DWARF and ptrace
+  better than a rewrite would. codelldb's quirks become yours.
+- **One session per project at a time.** Debugging four services at once needs a different
+  tool today.
+
+[The long version](/guides/why-lazydap/), with what each trade buys.
+
+## Where to go
+
+- [Install](/getting-started/install/) — codelldb first, then lazydap from source
+- [Quickstart](/getting-started/quickstart/) — a C program, a breakpoint, and a variable
+- [Debug with an agent](/guides/agents/) — the skill and the `--wait` discipline
+- [CLI reference](/reference/cli/) — generated from the binary
+- [Troubleshooting](/troubleshooting/) — when a breakpoint never binds

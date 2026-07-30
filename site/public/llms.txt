@@ -1,0 +1,53 @@
+# lazydap
+
+> A scriptable, terminal-first debugger. Every debug operation is a shell subcommand that
+> prints JSON, so anything that can run a command can inspect a running program. Wraps
+> codelldb, so it debugs C, C++ and Rust. Pre-release: v0.1.0 is not tagged and there are no
+> published binaries.
+
+The one rule for driving it from code: put `--wait` on every command that moves the program
+(`launch`, `continue`, `step`, `step-in`, `step-out`, `pause`). Without it the command returns
+before the program has gone anywhere and you read a stale stack. With it you get one JSON
+object describing the whole trip, including everything the program printed.
+
+Read `state` to learn what happened to the program (`paused`, `exited`, `terminated`,
+`timeout`, `adapter_died`). Read the process exit code to learn whether the command worked.
+They answer different questions.
+
+Any page on this site is available as Markdown by appending `.md` to its path. The whole
+corpus is at /llms-full.txt.
+
+## Start here
+
+- [Install](/getting-started/install.md): codelldb via a wrapper script, then lazydap from source
+- [Quickstart](/getting-started/quickstart.md): a C program, a breakpoint, a variable, verified end to end
+- [The TUI](/getting-started/tui.md): keys, and why it is a client rather than a peer
+
+## Guides
+
+- [Why lazydap](/guides/why-lazydap.md): the five trade-offs and when to use something else
+- [Debug with an agent](/guides/agents.md): the skill bundle and the mistakes that cost turns
+- [The --wait contract](/guides/wait.md): stable states, the five outcomes, timeouts
+- [Breakpoints](/guides/breakpoints.md): conditions, hit counts, log points, persistence, dry-run
+- [Output formats and piping](/guides/output-formats.md): json, jsonl, csv, ids, table
+- [The daemon](/guides/daemon.md): per-project instances, auto-spawn, paths, logs
+- [Architecture](/guides/architecture.md): the three stacked protocols and the crate graph
+
+## Reference
+
+- [CLI](/reference/cli.md): every command, generated from the binary
+- [JSON output](/reference/json-output.md): field-by-field schemas
+- [Errors and exit codes](/reference/errors.md): exit codes 0-4 and every error name
+- [Protocol](/reference/protocol.md): the socket wire format, for client authors
+- [codelldb quirks](/reference/codelldb-quirks.md): eight documented surprises
+
+## Help
+
+- [Troubleshooting](/troubleshooting.md): symptoms to fixes
+
+## Known limitations
+
+codelldb only, so no Python, Go or Node. One session per project at a time. macOS and Linux;
+Windows is not a target. No config file yet, so adapter discovery is PATH-only. No attach,
+watches or restart. Breakpoint conditions, hit counts and log points are CLI-only; the TUI's
+`b` sets a plain one. `variables_reference` values expire whenever the program moves.
