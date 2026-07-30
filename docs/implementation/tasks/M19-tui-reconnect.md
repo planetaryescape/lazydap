@@ -210,3 +210,27 @@ both carry the attempt; the reducer and the loop each check it before acting.
 Verified live: pressing `b` inside the `reconnecting… (attempt 1)` window left the gutter
 untouched and `lazydap break --list` unchanged, and the TUI still brought a v3 daemon back
 on its own.
+
+### Orphaned debuggees, and a correction to what "no strays" meant
+
+Every completion note above claimed "zero strays" on the strength of
+`pgrep -x lazydap` and `pgrep -x codelldb`. Both were true and both were beside the point:
+the thing that was leaking was neither. codelldb spawns the **debuggee** as its own child,
+and a SIGKILLed codelldb never reaps it — so the user's program was reparented to init and
+kept running, invisible to a check that only ever looked for the debugger.
+
+46 of them had accumulated across worktrees before anybody counted. Fixed at the product
+layer (D045): the daemon records the pid of a program it launched and kills it if the
+adapter dies without stopping it, after checking the pid still names that program.
+
+**The check to run from now on** is on the debuggee, not only the tooling:
+
+```bash
+pgrep -x lazydap
+pgrep -x codelldb
+pgrep -f "$PWD/target/debug/c-fixtures"   # the one that was missing
+```
+
+Evidence after the fix: four consecutive full runs of `cargo test --test wait_codelldb`
+(13 tests each), cumulative orphan count `0` after every one. Before it, that suite leaked
+exactly one per run.

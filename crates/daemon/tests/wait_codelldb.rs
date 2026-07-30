@@ -236,7 +236,42 @@ impl Drop for Sandbox {
         let _ = self.run(&["disconnect"]);
         let _ = self.run(&["shutdown"]);
         let _ = std::fs::remove_dir_all(&self.root);
+        assert_no_orphans();
     }
+}
+
+/// Fail if a fixture is still running once a test has finished with it.
+///
+/// A debuggee outlives its test when the adapter dies without stopping it,
+/// which is the bug D045 exists for. It is invisible without this: the suite
+/// goes green, the process is reparented to init, and it busy-loops until
+/// somebody notices. Forty-six of them had accumulated across worktrees before
+/// anybody did — so a leak now fails the test that caused it, loudly, rather
+/// than being left for a future count.
+///
+/// Scoped to *this* build's fixture directory. Several worktrees run this suite
+/// at once and a blanket match on the fixture names would make each of them
+/// fail on the others' processes.
+fn assert_no_orphans() {
+    let fixtures = repo_root().join("target/debug/c-fixtures");
+    let output = Command::new("pgrep")
+        .args(["-f", &fixtures.display().to_string()])
+        .output()
+        .expect("run pgrep");
+
+    let survivors: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    assert!(
+        survivors.is_empty(),
+        "a debuggee outlived its session — pids {} under {}. \
+         The adapter died without stopping it and nothing reaped it; see D045.",
+        survivors.join(", "),
+        fixtures.display(),
+    );
 }
 
 /// Processes named `name` whose parent is `parent`.

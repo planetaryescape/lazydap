@@ -1,4 +1,5 @@
 use crate::adapter::AdapterHandle;
+use crate::debuggee::Debuggee;
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointStatus, EndReason, OutputChunk,
     SessionId, SessionState,
@@ -330,6 +331,13 @@ pub struct Session {
     /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
     /// adapter ids exclusively.
     breakpoints: Mutex<BreakpointMap>,
+    /// The program the adapter started for us, once it has said which pid.
+    ///
+    /// Set only for a program *we launched*. When `attach` lands it must stay
+    /// `None` for those sessions: the whole point of attaching is that the
+    /// process was somebody else's first, and killing it because our adapter
+    /// crashed would be destroying something we were only ever looking at.
+    debuggee: Mutex<Option<Debuggee>>,
 }
 
 impl Session {
@@ -354,6 +362,7 @@ impl Session {
             adapter,
             last_thread_id: RwLock::new(None),
             breakpoints: Mutex::new(BreakpointMap::default()),
+            debuggee: Mutex::new(None),
         }
     }
 
@@ -390,6 +399,35 @@ impl Session {
     /// The adapter's current opinion of one of our breakpoints.
     pub fn breakpoint_status(&self, id: BreakpointId) -> Option<AdapterBreakpoint> {
         lock(&self.breakpoints).status(id)
+    }
+
+    /// Remember the process the adapter started for us, the first time it says.
+    ///
+    /// Only the first: codelldb prints its launch line once, and a later one
+    /// would mean something we have no model for.
+    pub fn set_debuggee(&self, pid: u32) {
+        let mut held = lock(&self.debuggee);
+        if held.is_some() {
+            return;
+        }
+        tracing::debug!(
+            target: "daemon.session",
+            session_id = %self.id,
+            pid,
+            "the adapter told us the debuggee's pid",
+        );
+        *held = Some(Debuggee {
+            pid,
+            program: self.program.clone(),
+        });
+    }
+
+    /// Kill the debuggee if the adapter died without stopping it (D045).
+    ///
+    /// Answers what happened, so the synthesised ending can say so.
+    pub async fn reap_debuggee(&self) -> Option<String> {
+        let debuggee = lock(&self.debuggee).clone()?;
+        debuggee.reap().await
     }
 
     /// Fold in a `breakpoint` event so a later `break --list` reflects it.

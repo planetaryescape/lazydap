@@ -22,7 +22,11 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   an adapter's opinion or the project's, and the event says which — **protocol v2 → v3**), **D044**
   (a reconnecting TUI never gives up, and every attempt is identified).
 - A review round after M12–M14/M19 found eight defects, all fixed; the per-milestone task files
-  carry a "Review round" section describing each. The theme was staleness applied to answers but
+  carry a "Review round" section describing each. A ninth, found by counting processes rather
+  than by reading code, was a **product** bug: a debuggee outlived its debugger whenever the
+  adapter died uncleanly (**D045**). Check for orphans with `pgrep -f target/debug/c-fixtures`,
+  not only `pgrep -x codelldb` — that blind spot is how 46 of them survived five waves of
+  review. The theme was staleness applied to answers but
   not to what stays on screen while one is outstanding, and session-scoped facts treated as
   project-global.
 - Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in

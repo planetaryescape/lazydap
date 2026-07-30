@@ -10,6 +10,7 @@ pub mod auto_spawn;
 pub mod cli;
 pub mod client;
 pub mod commands;
+pub mod debuggee;
 pub mod error;
 pub mod handlers;
 pub mod instance;

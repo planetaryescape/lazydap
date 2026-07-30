@@ -46,7 +46,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
             }
             Ok(Incoming::Event(event)) => handle_event(&session, event),
             Err(error) => {
-                finish(&session, &error);
+                finish(&session, &error).await;
                 break;
             }
         }
@@ -203,8 +203,17 @@ fn adapter_breakpoint(body: &serde_json::Value) -> AdapterBreakpoint {
 /// Adapters do not reliably say goodbye — a crashed one just closes the
 /// socket, and a UI waiting for `terminated` waits forever. So an EOF that
 /// arrives before the session ended properly becomes a synthetic ending.
-fn finish(session: &Arc<Session>, error: &TransportError) {
-    let detail = error.to_string();
+async fn finish(session: &Arc<Session>, error: &TransportError) {
+    let mut detail = error.to_string();
+
+    // Before the ending is announced, so the ending can say what became of the
+    // program. An adapter that was killed never got to stop its debuggee, and a
+    // daemon that killed only the adapter left the user's program running with
+    // nothing left that knew it was being debugged (D045).
+    if let Some(reaped) = session.reap_debuggee().await {
+        detail.push_str("; ");
+        detail.push_str(&reaped);
+    }
 
     if session.end_once(EndReason::AdapterDied {
         detail: detail.clone(),

@@ -52,6 +52,12 @@ pub struct Launched {
     /// session buffer so a `stop_on_entry` launch does not silently lose the
     /// first lines.
     pub output: Vec<OutputChunk>,
+    /// The process the adapter started, when it said which (quirk 8).
+    ///
+    /// Read from the launch output rather than by the pump, because the line
+    /// carrying it arrives *during* the handshake — the pump does not own the
+    /// reads until after this returns, so it never sees it.
+    pub debuggee_pid: Option<u32>,
 }
 
 /// The read half plus the map the pump delivers responses into. Opaque on
@@ -88,6 +94,10 @@ pub async fn launch(
                 thread_id: outcome.thread_id,
                 breakpoints: outcome.breakpoints,
                 exit_code: outcome.exit_code,
+                debuggee_pid: outcome
+                    .output
+                    .iter()
+                    .find_map(|chunk| launched_pid(&chunk.output)),
                 output: outcome.output,
             })
         }
@@ -387,6 +397,28 @@ pub(super) fn output_chunk(event: &DapEvent) -> Option<OutputChunk> {
     let output = body["output"].as_str()?;
     let category = OutputCategory::from(body["category"].as_str().unwrap_or("console"));
     Some(OutputChunk::new(category, output))
+}
+
+/// The debuggee's pid, scraped from the line codelldb prints when it starts one.
+///
+/// DAP has a `process` event carrying `systemProcessId` and this is what it is
+/// for. codelldb does not send it — the string is not in its binary, and a full
+/// launch-to-exit stream carries `output`, `initialized`, `module`, `continued`,
+/// `exited` and `terminated` and nothing else. What it does print, to the
+/// console category, is:
+///
+/// ```text
+/// Launched process 56254 from '/path/to/program'
+/// ```
+///
+/// So that is where the pid comes from (quirk 8). Scraping a human-readable
+/// line is exactly as brittle as it looks, which is why every caller treats a
+/// `None` as "carry on without it": the only thing it costs is the best-effort
+/// cleanup in [`crate::debuggee`].
+pub(super) fn launched_pid(output: &str) -> Option<u32> {
+    let rest = output.strip_prefix("Launched process ")?;
+    let (pid, _) = rest.split_once(char::is_whitespace)?;
+    pid.parse().ok()
 }
 
 /// Bound a step of the handshake by both its own timeout and the overall one.

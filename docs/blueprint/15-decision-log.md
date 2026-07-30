@@ -553,6 +553,26 @@ So the ladder runs for as long as the TUI is open: 250 ms doubling to a 4 s ceil
 
 ---
 
+## D045 — a debuggee we launched dies with its debugger, even when the debugger is killed
+
+**Status:** decided (2026-07-30, review round after M12–M14/M19).
+
+**Why:** codelldb spawns the debuggee as its own child and reaps it on a clean shutdown. On an unclean one — a crash, an OOM kill, a `kill -9` — it never gets the chance: the debuggee is reparented to init and keeps running, with nothing left in the system that knows it is a debuggee. The daemon's adapter-death path (pump EOF → synthesise `AdapterDied` → kill the adapter) killed the adapter process it owns and stopped there, so the debuggee was nobody's problem.
+
+Found by counting, not by reading: 46 orphaned test fixtures had accumulated across worktrees, one per run of the suite that SIGKILLs an adapter mid-wait. The test was only the reproduction. The same thing happens to a real user's program whenever codelldb crashes — a program stopped at a breakpoint stays suspended forever, and one that was running busy-loops forever.
+
+**The daemon now records the debuggee's pid and kills it if the adapter dies without stopping it.** Three details that are not obvious:
+
+- **The pid is scraped from console output, not taken from an event.** DAP defines a `process` event carrying `systemProcessId` and that would be the right source. codelldb does not send it: the string does not appear anywhere in its binary, and a full launch-to-exit stream contains `output`, `initialized`, `module`, `continued`, `exited` and `terminated` and nothing else. What it does print is `Launched process 1234 from '/path'`, so that is where the pid comes from (quirk 8). This is best-effort by design — a parse that fails leaves things exactly as they were, and says so in the log.
+- **The line arrives during the handshake, not on the pump.** The launch's own event loop owns the transport until the session is live, so the pump never sees it — a first attempt hooked the pump's `output` handling and never fired once. The pid is read out of the launch outcome instead.
+- **Identity is checked before anything is killed.** A daemon can outlive many programs, and a recycled pid belongs to a stranger. The recorded pid is only killed when `ps` still reports the program we launched at it; otherwise it is logged and left alone. Leaking the process we were looking for is much better than killing one we were not.
+
+**Only for programs we launched.** When `attach` lands it must not record a pid: the point of attaching is that the process was somebody else's first, and killing it because our adapter crashed would destroy something we were only ever looking at. The record is set on the launch path alone, and both the field and the call site say so.
+
+**Consequences:** the synthesised `AdapterDied` ending now says what became of the program, so a user whose adapter crashed is told whether their debuggee went with it. The codelldb suite asserts in teardown that no fixture outlived its session, scoped to the running build's fixture directory so parallel worktrees do not fail on each other's processes — a leak now fails the test that caused it instead of accumulating silently across five waves of review.
+
+---
+
 ## Open decisions
 
 These need user input.

@@ -15,6 +15,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 5 | [Hangs at `_dyld_start` after a macOS update](#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) | Ship-mode Wave 0 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 6 | [`--stop-on-entry` stops with reason `exception`, not `entry`](#6---stop-on-entry-reports-reason-exception-not-entry-on-macos) | M5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 7 | [`evaluate` with context `repl` runs an LLDB *command*, not an expression](#7-evaluate-with-context-repl-runs-an-lldb-command-not-an-expression) | M6 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 8 | [No `process` event, so the debuggee's pid is only in console text](#8-no-process-event-the-debuggees-pid-is-only-in-console-text) | Review round after M19 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -384,6 +385,60 @@ make `lazydap eval` mean something different per adapter.
 
 - [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md) — D034
 - Milestone: [`docs/implementation/tasks/M06-cli-subcommands.md`](../implementation/tasks/M06-cli-subcommands.md)
+
+---
+
+## 8. No `process` event; the debuggee's pid is only in console text
+
+### Symptom
+
+lazydap needs the debuggee's process id so it can clean the program up if the adapter dies
+without stopping it (D045). DAP defines exactly the event for this — `process`, carrying
+`systemProcessId` — and codelldb never sends it.
+
+### Root cause
+
+It is not implemented. The string does not appear anywhere in the binary:
+
+```console
+$ strings ~/.local/opt/codelldb/extension/adapter/codelldb | grep -c systemProcessId
+0
+```
+
+A full launch-to-exit event stream confirms it. Every event codelldb produced for a trivial
+C program, in order:
+
+```
+output, initialized, output, output, module (x40), continued, output, exited, terminated
+```
+
+No `process`. What it does print, once, to the `console` output category:
+
+```
+Launched process 56254 from '/path/to/program'
+```
+
+### Fix
+
+Scrape it — `crates/daemon/src/adapter/codelldb.rs::launched_pid`. Two things make that
+tolerable:
+
+- **It is best-effort.** A parse that fails costs only the cleanup, and the session behaves
+  exactly as it did before the cleanup existed.
+- **Nothing is killed on the strength of the pid alone.** Before the recorded pid is
+  signalled, `ps` is asked whether it still names the program we launched; a recycled pid
+  belongs to a stranger, and killing one would be far worse than leaking the process we
+  were looking for.
+
+The line arrives *during the launch handshake*, not on the session read pump — the
+handshake owns the transport until the session is live — so it is read out of the launch
+outcome rather than by the pump.
+
+### Cross-references
+
+- D045 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
+- `crates/daemon/src/debuggee.rs` — the identity check and the kill
+- If codelldb ever gains a `process` event, prefer it and delete the scrape.
 
 ---
 
