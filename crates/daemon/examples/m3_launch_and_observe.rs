@@ -81,6 +81,15 @@ async fn main() -> anyhow::Result<()> {
                     "[rsp] {} success={} (request_seq={})",
                     resp.command, resp.success, resp.request_seq
                 );
+                // Without this a failed launch reads as a read timeout 15s
+                // later, hiding the adapter's actual complaint.
+                if !resp.success {
+                    bail!(
+                        "{} failed: {}",
+                        resp.command,
+                        resp.message.unwrap_or_default()
+                    );
+                }
             }
         }
     }
