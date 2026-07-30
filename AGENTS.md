@@ -2,103 +2,49 @@
 
 Read this when you (an AI agent — Claude, Cursor, Copilot, etc.) are asked to work on lazydap or use lazydap to debug code. This file states the project conventions, the non-negotiables, and how lazydap is meant to be used by you specifically.
 
-## ⚠️ Teaching mode is the default for this project
+## ⚠️ This is the shipping repository — teaching mode is OFF
 
-**Teaching skill version:** 19 (rule 19 — varied practice for transfer — adopted 2026-05-04, session M3-1). When the skill version bumps, run `/update-teaching` to apply pending migrations to this repo. Migration mechanism scaffolds in a follow-up session; until then, sync conventions manually from `~/.dotfiles/.agents/skills/teaching/SKILL.md`.
+**Do not teach. Do not slow down for pedagogy. Build.**
 
-**lazydap is being built as a deliberate Rust learning project.** The build pace is intentionally slow. The goal is **the user's understanding**, not throughput.
+lazydap exists in two parallel repositories. This is the shipping one:
 
-### User profile (the learner)
+| | This repo (`lazydap`) | Learning repo (`lazydap-learn`) |
+|---|---|---|
+| Path | `~/code/planetaryescape/lazydap` | `~/code/planetaryescape/lazydap-learn` |
+| Goal | **a shippable debugger** | **the user's understanding of Rust** |
+| Pace | as fast as correctness allows | one new concept per session |
+| Who drives | coding agents, largely autonomous | the user, with an agent teaching |
+| Canonical docs | `docs/implementation/tasks/` | `docs/teaching/` + `docs/book/` |
+| Session logs | none | Obsidian vault |
 
-- **Senior software engineer.** 8 years production experience.
-- **Strong:** TypeScript / JavaScript (web dev, both backend and frontend), Python (backend), infrastructure-as-code, deployment, the modern web ecosystem generally. Don't waste their time explaining what a function or a variable is. Don't patronise.
-- **Currently learning C** (in parallel with Rust through this project). This means they're encountering C's pain points — `char*` ambiguity, manual `malloc`/`free`, dangling pointers, no namespaces, header dance, undefined behaviour — *as live experience right now*. Use this aggressively (see "Anchor on experienced pain" below).
-- **Weak:** classical CS fundamentals. Specifically — lifetimes (no analog in JS/TS or Python; closest is "what would prevent C use-after-free"), low-level type sizes (`u8` vs `u32` vs `usize`), stack vs heap, memory models, pointer semantics. These are the cliffs. Spend extra time, not less.
-- **New to Rust.** No prior production Rust. Has read Rust code (and written mxr — see anchor codebase below). Familiar with high-level Rust syntax but not idioms.
-- **Career transitioner.** Came to programming through web dev rather than a CS degree. Tacit knowledge is rich but uneven; classical CS isn't intuitive.
-- **Learning endurance: high.** 1–2 hour sessions by default. Sometimes longer when flowing — keeps going until they say "I'm tired."
-- **Anchor codebase: [mxr](file:///Users/bhekanik/code/planetaryescape/mxr/).** The user wrote mxr in Rust. Same architectural patterns lazydap uses. Whenever a Rust pattern shows up here, point at where mxr does the same thing. Their own past code is the best teacher.
+If you were asked to teach, explain slowly, ask the user to predict output, or run a
+session from `docs/teaching/sessions.md` — **you are in the wrong repository.** Say so and
+point at `~/code/planetaryescape/lazydap-learn`.
 
-### Anchor on experienced pain (not just on syntactic analogs)
+### How to work here
 
-A specific application of teaching operating rule #7: when teaching a Rust feature, **start with the pain it solves in a language the learner already uses**, not with "here's how it differs from JavaScript."
+1. Read [`/TODO.md`](TODO.md) — the first unchecked milestone is next.
+2. Read that milestone's file in [`docs/implementation/tasks/`](docs/implementation/tasks/) fully. It is self-contained: what / why / how / success criteria / files / verify / depends on.
+3. Confirm its listed dependencies are complete. Don't skip ahead.
+4. Build it. Run `cargo test --workspace` and `cargo clippy --workspace --all-targets` — both must pass before you claim done.
+5. Check the box in `/TODO.md`, add a completion note at the bottom of the task file (date, deviations, follow-ups discovered).
+6. If a milestone reveals work needing its own milestone, add `MNN-name.md` to `docs/implementation/tasks/` and index it in `/TODO.md` + the phase doc.
 
-The framing **"You know how in C, X is painful because Y? Rust fixes that by Z"** lands much deeper than **"In Rust, you have to do Z."** Adults learn solutions to problems they've actually felt.
+Ask when a decision genuinely isn't made — don't fabricate architecture. Everything else,
+just do. The **non-negotiables** further down this file still apply in full; they are the
+one thing shipping speed does not get to trade away.
 
-The user is currently learning C, so C pains are *live and felt*. Use that. JavaScript pains are also live (they've shipped 8 years of JS) but more habituated. C is the gold mine right now.
+### The teaching material that's still in this repo
 
-A non-exhaustive starter table of Rust features and the pains they solve:
+`docs/teaching/`, `docs/book/`, `docs/chain/`, `.skills/teaching/`, and `.bookgen/` are
+retained here as **reference, not instruction**. The chapters are often the clearest
+written explanation of why a given piece is shaped the way it is — read them when you need
+that. Never run them as a session, and don't maintain them here; `lazydap-learn` owns them.
 
-| Rust feature | What pain it fixes |
-|---|---|
-| `String` / `&str` | C's `char*` is just a pointer; no length, hope for `\0`, no UTF-8 guarantee. Rust's `String` owns + tracks length + enforces UTF-8. `&str` is a borrowed view + length, never null-terminated. |
-| Ownership + `Drop` | C's `malloc`/`free` pairing burden — every allocation needs a matching free, leak if you forget, double-free if you do it twice. Rust auto-`Drop`s when ownership ends. RAII without the C++ ceremony. |
-| Borrow checker | C's use-after-free, dangling pointers, iterator invalidation — bugs that crash in production. Rust catches them at compile time. |
-| Lifetimes | C lets you return a pointer to a stack variable; the resulting use-after-free is undefined behaviour. Rust's lifetime annotations make the compiler refuse to compile that. |
-| `Result<T, E>` + `?` operator | C's "return -1, check `errno` separately" + "what does the function actually return on error?" Rust's `Result` makes errors part of the type and `?` makes propagation a single character. Also fixes JS's "exception can be thrown anywhere, no signal in the type." |
-| `Option<T>` | C's NULL pointer dereference (also Java's NullPointerException, JS's "undefined is not a function"). Rust's `Option` makes "may not exist" part of the type; can't use a `T` until you've handled the None case. |
-| `Box<T>` | C's ambiguity about whether a pointer is to stack or heap. `Box<T>` is explicitly a heap allocation with single ownership and auto-cleanup. |
-| `Vec<T>` | C's manual array growth: allocate, realloc when full, copy, free. `Vec<T>` does this. |
-| `match` (exhaustive) | C's `switch` — easy to forget a case; fall-through bugs. Rust's `match` requires exhaustiveness; the compiler refuses to compile if you missed a variant. |
-| Modules + `pub` | C's header-file dance (`.h` declares, `.c` defines, hope nothing diverges). Rust modules are visibility-controlled by `pub`; one source of truth per item. |
-| Cargo | C's "which build system, which package manager, where do dependencies come from, what version" hellscape. Cargo: declare in `Cargo.toml`, runs everywhere. |
-| Traits | C's lack of polymorphism beyond function pointers. Rust's traits give clean polymorphism with compile-time dispatch (`impl Trait`) or runtime (`dyn Trait`), and orphan-rule coherence. (Also a step up from TypeScript interfaces — orphan rule, blanket impls, no inheritance.) |
-| `Send` / `Sync` | C's data races and "I assumed this was thread-safe but actually..." Rust's marker traits make thread safety a compile-time invariant. |
-
-Use this table actively. When you introduce a Rust concept, check if it fits a row above. If it does, lead with the pain story. If it doesn't (e.g., `impl` blocks have no specific pain origin — they're just how Rust does method definitions), use the standard analogy approach.
-
-When the user is in a C learning session and hits one of these pains, **note it** — that's a teaching moment for the corresponding Rust feature next time we hit it. The cross-pollination compounds.
-
-Full per-concept anchor table (with C, JS/TS, Python columns + pain points + where the analogy breaks): [`docs/teaching/rust-anchor-table.md`](docs/teaching/rust-anchor-table.md).
-
-### Teaching mode protocol
-
-When you work on lazydap with the user, you operate in **teaching mode**:
-
-- Drive most of the keyboard, but **stop frequently to explain plans before doing**.
-- **Surface the user's existing mental model** before teaching any new concept (anchor on JS/TS or Python first, flag where the analogy breaks).
-- **Ask the user to predict** what code will do before running it.
-- After teaching a concept, **hand the user the next analogous function to write** themselves.
-- **One new concept per session.** Hard cap. Cognitive-load discipline.
-- **Let the compiler be a co-teacher.** Don't pre-empt errors; read them together.
-- **End each session with a teach-back** + capture as an Obsidian session note.
-
-The full pedagogy lives in the portable **`teaching` skill** (auto-discovered, source at `~/.dotfiles/.agents/skills/teaching/`). Read its `SKILL.md` and `references/operating-rules.md` before starting any session. The skill is project-agnostic; lazydap is the first project using it.
-
-### Session cadence and stop signal
-
-- **Default**: 1–2 hour sessions. The user has good learning endurance.
-- **Sometimes longer**: when the user is flowing. Don't artificially stop.
-- **Stop signal**: the user says "I'm tired" (or equivalent). That's it. When they say it: do the teach-back, capture the session note in Obsidian, end the session. Don't push for one more thing.
-
-### What to do when you arrive at a fresh session (no conversation history)
-
-You may be starting cold — the user has cleared the previous session. Here's how to pick up where we left off:
-
-1. Read this file (`AGENTS.md`).
-2. Read `~/.dotfiles/.agents/skills/teaching/SKILL.md` — the pedagogy.
-3. Read [`/TODO.md`](TODO.md) — the **Current teaching session** section at the top tells you the next session ID (e.g., `WS-1`).
-4. Read the matching row in [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — that's the session plan.
-5. Read the relevant milestone file under [`docs/implementation/tasks/`](docs/implementation/tasks/) — the underlying technical content.
-6. Check the Obsidian hub `Lazydap Teaching Sessions.md` (at the user's vault root, accessed via the `obsidian` skill) for what previous sessions covered. Read the most recent session note's "Open questions" + "Teach-back capture" sections.
-7. **Greet the user, recap the previous session in one sentence, ask for the teach-back** of the previous concept before starting today's.
-8. Start today's session. First move: surface the user's prior model with "How do you think X works?"
-
-**Do not write code or commit anything before step 8.**
-
-### Note capture
-
-Every session generates an Obsidian session note named `Lazydap Session YYYY-MM-DD.md` at the user's vault root, plus atomic concept notes (e.g., `Rust Ownership.md`) for ideas worth long-term retention. Use the **`obsidian` skill** for all vault writes — it encodes the conventions, the linking protocol, and the emergent-synthesis discipline.
-
-The `Lazydap Teaching Sessions.md` hub gets a new row per session.
-
-### Project-portable
-
-Any future project the user opts into teaching mode for copies this same section into its own `AGENTS.md`, points at the same `teaching` skill, and creates its own `<Project> Teaching Sessions.md` hub note. The skill is reusable; per-project setup is just this section + a Sessions hub note.
-
-### Switching out of teaching mode
-
-If the user explicitly says "let's go fast", "just ship it", or "skip teaching today", drop teaching mode for that session. Confirm before resuming teaching mode next session. The `docs/implementation/` task files work directly without the teaching overlay.
+The vendored copy at [`.skills/teaching/`](.skills/teaching/SKILL.md) is a frozen **v1.0.0**
+snapshot (2026-05-02) — deliberately not kept current here. `lazydap-learn` tracks the live
+version. Don't run bookgen's updater against this repo; it would re-vendor teaching
+machinery this repo has no use for.
 
 ## 📁 Project docs: `docs/` is the source of truth
 
@@ -121,9 +67,9 @@ The blueprint is **stable**. Don't edit it without an explicit conversation. New
 
 This is **how we track work**. Source-controlled, portable, agent-readable. No GitHub Issues, no Linear, no separate task tool — the implementation directory IS the task list.
 
-**This directory is intentionally clean of teaching content.** If at any point the user decides they've learned enough Rust and wants to hand the project to a coding agent for fast shipping, the implementation/ directory works as-is. No mode-switching ceremony required.
-
-For the parallel **teaching session breakdowns**, see [`docs/teaching/`](docs/teaching/).
+**This directory is intentionally clean of teaching content** — which is precisely why this
+repo can ship fast. It works as-is for an agent, with no pedagogical overlay to strip out.
+It is the canonical task list here.
 
 Structure:
 
@@ -137,22 +83,22 @@ Structure:
 1. **Pick the next task.** Look at [`/TODO.md`](TODO.md) for current state. The first unchecked milestone is the next one to work on. (Or pick whichever the user names explicitly.)
 2. **Read the task file.** Each milestone file (`docs/implementation/tasks/MNN-*.md`) is self-contained: what / why / how / success criteria / files / verify / depends on. Read it fully before starting.
 3. **Confirm dependencies.** The task file lists what previous milestones must be complete. Don't skip ahead.
-4. **Do the work.** In teaching mode, this means session-by-session through the operating rules.
+4. **Do the work.** End to end, in one pass where you can. `cargo test --workspace` and `cargo clippy --workspace --all-targets` green before you call it done.
 5. **Mark the task done.** Check the box in `/TODO.md`. Add a brief completion note at the bottom of the task file (date completed, any deviations from the plan, any follow-ups discovered).
 6. **Add new tasks.** If a milestone reveals work that needs its own milestone, create a new `MNN-name.md` file in `docs/implementation/tasks/` with the same template. Add it to `/TODO.md` and to the relevant phase doc.
 
 **The implementation directory is the project's working memory.** Treat it that way: write to it, read from it, keep it current.
 
-### `docs/teaching/` — teaching session plan (parallel to implementation)
+### `docs/teaching/` and `docs/book/` — archive in this repo
 
-**Only relevant in teaching mode.** Mirrors `docs/implementation/` but slices each milestone into sessions sized for one-new-concept-per-session discipline. Some milestones are 1 session; the dense ones (M5, M6, M15) are 4–5.
+Read-only here. `docs/teaching/` slices milestones into learning sessions and
+`docs/book/` holds the written chapters. Both are **owned by `lazydap-learn`** — edit them
+there, not here. In this repo they're useful for one thing: when you need to know why a
+piece of already-written code is shaped the way it is, the chapter covering that milestone
+usually explains it better than the blueprint does.
 
-- [`docs/teaching/README.md`](docs/teaching/README.md) — what this directory is, when it applies
-- [`docs/teaching/sessions.md`](docs/teaching/sessions.md) — the per-milestone session breakdown
-
-**Important:** the teaching directory is the **plan**. Session **logs** live in Obsidian (`Lazydap Teaching Sessions.md` hub + per-session children). Plan ≠ log; both are useful, neither replaces the other.
-
-When teaching mode ends (user says "let's go fast" or hands off to a build agent), this directory becomes archive. The `docs/implementation/` tasks remain canonical.
+Do not run a session from `docs/teaching/sessions.md`. Do not update it when you complete a
+milestone — update `/TODO.md` and the task file instead.
 
 ### `docs/articles/` and `docs/reference/`
 
@@ -314,11 +260,23 @@ If your task is "fix a bug in `lazydap continue --wait`":
 - Don't bypass `lazydap.skill`'s CLI surface to call internal APIs. If the agent UX is wrong, fix the CLI.
 - Don't add AI features into the core. AI is an external client — same as the TUI, same as everything else.
 
-## When `lazydap` doesn't exist yet (current state)
+## Current state (verified 2026-07-30)
 
-This repo is in pre-alpha. As of writing, M0 hasn't been started. There's no Cargo workspace, no `lazydap` binary, no daemon. If a user asks you to "use lazydap to debug X", politely point them at [`README.md`](README.md) and the milestone roadmap. Don't pretend the binary exists.
+**Pre-alpha.** The `lazydap` CLI documented above is the *target design*, not the shipped
+surface. Do not assume any of it exists. What actually exists today:
 
-When code starts landing (M0+), this file will gain a "Known good versions" section.
+- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, three crates: `lazydap-core`, `lazydap-dap`, `lazydap-daemon`.
+- **One binary: `lazydap-daemon`.** There is no `lazydap` binary. No subcommands, no Unix socket, no session store, no TUI.
+- **Working DAP plumbing** in `lazydap-dap`: framed message read/write, and a typed `initialize` round-trip against real codelldb.
+- **Three runnable examples:** `cargo run --example m0_hello_adapter`, `m1_read_one_message`, `m2_initialize`.
+- `cargo build --workspace` and `cargo test --workspace` both pass — 3 tests, all in `lazydap-dap`.
+- **Milestones complete:** workspace setup, M0, M1, M2. **Next up: M3 — Launch and observe.**
+
+If a user asks you to "use lazydap to debug X", tell them it isn't built yet and point at
+[`README.md`](README.md) plus the roadmap. Don't pretend the CLI exists.
+
+**This paragraph will go stale.** [`/TODO.md`](TODO.md) is the live source of truth — trust
+its checkboxes over this list, and correct this section when you notice it has drifted.
 
 ## Glossary (so we don't talk past each other)
 
