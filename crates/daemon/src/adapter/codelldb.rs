@@ -27,6 +27,8 @@ use tokio::time::Instant;
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest to wait for any single message during the launch.
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to keep reading after `terminated`, in case `exited` is behind it.
+const POST_TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
 /// A session that is up, plus the read half the pump still has to be given.
 pub struct Launched {
@@ -149,14 +151,19 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
                 // code arrives on its own event, and losing it here would mean
                 // a debuggee that finished this fast could never report how it
                 // went.
-                "exited" => {
-                    outcome.exit_code = event
-                        .body
-                        .as_ref()
-                        .and_then(|body| body["exitCode"].as_i64())
-                        .map(|code| code as i32);
+                "exited" => outcome.exit_code = exit_code_of(&event),
+                "terminated" => {
+                    outcome.state = SessionState::Terminated;
+                    // `exited` may still be behind `terminated` on the wire —
+                    // DAP does not fix their order — and returning the instant
+                    // the session ends would lose the exit code from the
+                    // `Launched` response for good. The pump can record it
+                    // later, but the ending has already been emitted by then.
+                    // Same grace window M6's `--wait` needs, for the same
+                    // reason.
+                    drain_for_exit_code(transport, &mut outcome).await;
+                    return Ok(outcome);
                 }
-                "terminated" => outcome.state = SessionState::Terminated,
                 _ => {}
             },
             Incoming::Response(response) => {
@@ -172,6 +179,43 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
             }
         }
     }
+}
+
+/// Read whatever is already on its way for a moment, hoping for the `exited`
+/// that carries the debuggee's status.
+///
+/// Best-effort by construction: the session is over, so nothing here is worth
+/// waiting long for, and everything is worth having if it turns up.
+///
+/// A timeout leaves the reader mid-frame, which is normally fatal — but not
+/// here. The only consumer left is the pump, whose remaining job is to notice
+/// the adapter is gone and reap it, and a misparse gets it there just as
+/// surely as a clean EOF. The session has already ended, so its `end_once` is
+/// a no-op either way.
+async fn drain_for_exit_code(transport: &mut DapTransport, outcome: &mut Outcome) {
+    let deadline = Instant::now() + POST_TERMINATION_GRACE;
+
+    while outcome.exit_code.is_none() {
+        let Ok(Ok(message)) = tokio::time::timeout_at(deadline, transport.read_incoming()).await
+        else {
+            return;
+        };
+        if let Incoming::Event(event) = message {
+            match event.event.as_str() {
+                "exited" => outcome.exit_code = exit_code_of(&event),
+                "output" => outcome.output.extend(output_chunk(&event)),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn exit_code_of(event: &DapEvent) -> Option<i32> {
+    event
+        .body
+        .as_ref()
+        .and_then(|body| body["exitCode"].as_i64())
+        .map(|code| code as i32)
 }
 
 fn launch_args(request: &LaunchRequest) -> LaunchArgs {

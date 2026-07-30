@@ -122,19 +122,21 @@ async fn disconnect(
     session_id: SessionId,
     terminate: bool,
 ) -> Result<Response> {
-    // Look the session up without removing it. Tearing down can take seconds
-    // — a `disconnect` the adapter ignores waits out its timeout — and a slot
-    // freed at the start of that window lets a concurrent `launch` past the
-    // single-session check (D007) and spawn a second adapter while the first
-    // is still being killed. The slot stays occupied until the adapter is
-    // actually gone.
-    let session = state.session(session_id).ok_or_else(|| {
+    // Claim the session without freeing its slot. Tearing down can take
+    // seconds — a `disconnect` the adapter ignores waits out its timeout — and
+    // a slot freed at the start of that window lets a concurrent `launch` past
+    // the single-session check (D007) and spawn a second adapter while the
+    // first is still being killed. The guard frees the slot when it drops, so
+    // the slot outlives the adapter on every path out of here, including a
+    // panic.
+    let teardown = state.begin_teardown(session_id).ok_or_else(|| {
         IpcError::new(
             ErrorCode::SessionNotFound,
             format!("no session {session_id}"),
         )
         .with_details(serde_json::json!({ "session_id": session_id.to_string() }))
     })?;
+    let session = teardown.session();
 
     // Ask nicely first so the adapter can detach or kill the debuggee as
     // requested, then make sure the process is gone either way. A refused or
@@ -154,7 +156,7 @@ async fn disconnect(
     // session whose debuggee had already exited keeps `exited` and its exit
     // code, rather than being relabelled `terminated` on the way out.
     session.end_once(EndReason::Disconnected);
-    state.remove_session(session_id);
+    drop(teardown);
 
     tracing::info!(target: "daemon.session", session_id = %session_id, terminate, "disconnected");
     Ok(Response::Disconnected { session_id })

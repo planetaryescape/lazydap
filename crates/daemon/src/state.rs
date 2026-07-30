@@ -100,6 +100,22 @@ impl DaemonState {
         }
     }
 
+    /// Claim a session for teardown, freeing its slot when the guard drops.
+    ///
+    /// The slot has to stay occupied while the adapter is being shut down, but
+    /// it must not stay occupied *forever* if that goes wrong: without a
+    /// guard, a panic anywhere in teardown leaves the slot held and every
+    /// later `launch` rejected until the daemon is restarted. Tying the
+    /// removal to a drop covers the normal path and the unwinding one with
+    /// the same line.
+    pub fn begin_teardown(self: &Arc<Self>, id: SessionId) -> Option<SessionTeardown> {
+        let session = self.session(id)?;
+        Some(SessionTeardown {
+            state: Arc::clone(self),
+            session,
+        })
+    }
+
     /// Forget a session, handing it back so the caller can shut its adapter
     /// down.
     pub fn remove_session(&self, id: SessionId) -> Option<Arc<Session>> {
@@ -178,6 +194,25 @@ impl Drop for SessionReservation {
         if !self.promoted {
             write(&self.state.sessions).remove(&self.id);
         }
+    }
+}
+
+/// A session being torn down. Its slot is freed when this drops, whether
+/// teardown finished or panicked.
+pub struct SessionTeardown {
+    state: Arc<DaemonState>,
+    session: Arc<Session>,
+}
+
+impl SessionTeardown {
+    pub fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+}
+
+impl Drop for SessionTeardown {
+    fn drop(&mut self) {
+        self.state.remove_session(self.session.id);
     }
 }
 
