@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
         lines_start_at1: true,
         columns_start_at1: true,
         path_format: Some(String::from("path")),
-        locale: Some(String::from("en-US"))
+        locale: Some(String::from("en-US")),
     };
 
     let caps: Capabilities = transport.request("initialize", &initialize_args).await?;

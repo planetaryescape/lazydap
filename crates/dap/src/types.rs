@@ -59,12 +59,28 @@ mod tests {
             columns_start_at1: true,
             path_format: Some(String::from("something")),
             locale: Some(String::from("en")),
-        }).expect("serialise");
-        assert!(init_args.contains(r#""clientID":"1234""#), "got: {init_args}");
-        assert!(init_args.contains(r#""adapterID":"lazydap-adapter""#), "got: {init_args}");
-        assert!(init_args.contains(r#""linesStartAt1":true"#), "got: {init_args}");
-        assert!(init_args.contains(r#""columnsStartAt1":true"#), "got: {init_args}");
-        assert!(init_args.contains(r#""pathFormat":"something""#), "got: {init_args}");
+        })
+        .expect("serialise");
+        assert!(
+            init_args.contains(r#""clientID":"1234""#),
+            "got: {init_args}"
+        );
+        assert!(
+            init_args.contains(r#""adapterID":"lazydap-adapter""#),
+            "got: {init_args}"
+        );
+        assert!(
+            init_args.contains(r#""linesStartAt1":true"#),
+            "got: {init_args}"
+        );
+        assert!(
+            init_args.contains(r#""columnsStartAt1":true"#),
+            "got: {init_args}"
+        );
+        assert!(
+            init_args.contains(r#""pathFormat":"something""#),
+            "got: {init_args}"
+        );
         assert!(init_args.contains(r#""locale":"en""#), "got: {init_args}");
         assert!(!init_args.contains("client_id"));
         assert!(!init_args.contains(r#""clientId""#));
@@ -84,8 +100,7 @@ mod tests {
                 "supportsConditionalBreakpoints": false
             }
         }"#;
-        let resp: DapResponse<Capabilities> =
-            serde_json::from_str(json).expect("deserialise");
+        let resp: DapResponse<Capabilities> = serde_json::from_str(json).expect("deserialise");
 
         assert_eq!(resp.command, "initialize");
         assert!(resp.success);
@@ -96,5 +111,4 @@ mod tests {
         assert!(body.supports_function_breakpoints);
         assert!(!body.supports_conditional_breakpoints);
     }
-
 }

@@ -158,7 +158,8 @@ impl DapTransport {
                 );
             }
         }
-        let len = content_length.ok_or_else(|| TransportError::Header("no Content-Length".into()))?;
+        let len =
+            content_length.ok_or_else(|| TransportError::Header("no Content-Length".into()))?;
         let mut body = vec![0u8; len];
         self.stream.read_exact(&mut body).await?;
         Ok(body)
