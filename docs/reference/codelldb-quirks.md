@@ -12,6 +12,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 2 | [Silent on stderr without `RUST_LOG=debug`](#2-silent-on-stderr-without-rust_logdebug) | M0-1 / Chapter 04 | codelldb 1.12.2 |
 | 3 | [Speaks DAP only over TCP, not stdio](#3-tcp-only-not-stdio) | M0 milestone doc | codelldb 1.x |
 | 4 | [`--version` flag is not recognised; use `--help`](#4---version-not-supported) | CONTRIBUTING.md authoring | codelldb 1.x |
+| 5 | [Hangs at `_dyld_start` after a macOS update](#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) | Ship-mode Wave 0 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -207,6 +208,50 @@ Or use the lldb version embedded in the load log line under `RUST_LOG=info`:
 ### Cross-references
 
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — install verification step uses `codelldb --help`
+
+---
+
+## 5. Hangs at `_dyld_start` after a macOS update (stale Gatekeeper inode cache)
+
+### Symptom
+
+Every invocation — even `codelldb --help` — hangs forever, producing zero output on stdout
+and stderr. `--port 0` stays alive but never listens (nothing in `lsof -i TCP`) and never
+prints "Listening on". `sample <pid>` shows 100% of samples at `_dyld_start` — the process
+never reaches `main()`. `codesign -v` passes; no `com.apple.quarantine` xattr is present;
+nothing appears in the unified log from `syspolicyd`/`amfid`.
+
+To lazydap's transport this presents as `NoPortFromAdapter` (or an infinite hang in the
+port-scan loop if no timeout wraps it) — indistinguishable from quirk 1's crashed-adapter
+symptom until you run `codelldb --help` by hand.
+
+### Root cause
+
+macOS keeps a per-inode security-evaluation record for launched binaries. An OS update can
+leave that record stale/wedged, after which dyld blocks indefinitely during pre-main launch
+for that specific file. The proof: copying the binary to a new path (new inode) makes the
+copy run instantly, while the original at its old path still hangs — same bytes, same
+signature, same (absent) quarantine state. Hit 2026-07-30 on Darwin 25.5.0 with codelldb
+1.12.2, on **both** the VS Code extension copy and the Mason-managed copy, months after
+both had worked.
+
+### Fix
+
+Re-copy the install so every file gets a fresh inode, then repoint the wrapper:
+
+```bash
+rm -rf ~/.local/opt/codelldb
+cp -R <source>/extension ~/.local/opt/codelldb/extension   # e.g. the Mason package dir
+# wrapper (quirk 1) at ~/.local/bin/codelldb already points at this path
+timeout 8 codelldb --help   # must print usage and exit 0
+```
+
+Verify end-to-end with `cargo run --example m2_initialize`.
+
+### Cross-references
+
+- Quirk 1 — the wrapper-script install this fix rebuilds
+- [`docs/issues/0001-codelldb-symlink-install-broken.md`](../issues/0001-codelldb-symlink-install-broken.md) — the adjacent install footgun
 
 ---
 
