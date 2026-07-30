@@ -187,3 +187,57 @@ cargo publish -p lazydap-core --dry-run
 - **Test `cargo install` on a fresh machine.** Or at least a fresh user. There will be path bugs.
 - **Demo GIF matters.** A 30-second GIF showing "open project, set breakpoint, hit it, inspect, fix" sells lazydap better than any prose.
 - **After M15, Phase D done. v0.1 in the wild. Phase E begins.**
+
+## Release artifacts pre-staged — 2026-07-30 (W5b)
+
+M15's step 4 (release prep) was split off and done ahead of the config code, so the
+config/launch.json half lands into a repo whose front door is already right. **M15 is not
+complete and its box in `/TODO.md` stays unticked.**
+
+### Landed
+
+- **`README.md`** — rewritten for a v0.1 product. Install from source, the codelldb wrapper-script
+  gotcha, a quickstart whose every command and output block was captured from a real run against
+  this commit, the TUI, the agent skill, honest scope, and a docs map. Positioned per
+  `docs/articles/` — five named trade-offs, each with a defensible opposite, rather than adjectives.
+- **`CHANGELOG.md`** — new, Keep a Changelog format. One `[0.1.0] — unreleased` entry describing
+  what has landed as user-visible capabilities, plus a Known limitations list.
+- **`CONTRIBUTING.md`** — refreshed. Six gates (the four cargo commands plus the boundary script and
+  the skill diff), the test layout and why `wait_codelldb.rs` serialises itself, commit and PR
+  expectations, adapter install with quirks 1 and 5 called out inline. The chapter-tag machinery is
+  now one line pointing at `lazydap-learn`.
+- **`SECURITY.md`** — new. Supported versions, private reporting via GitHub advisories, and an
+  explicit "a debugger runs arbitrary code by design" scope section separating what is a
+  vulnerability from what is the product. Known gaps (chmod-after-bind window, the `openat` TOCTOU,
+  no peer-credential check, umask-default `.lazydap/`) stated rather than hidden.
+- **`PRIVACY.md`** — new, short. No telemetry, no network, what is written to disk and where.
+- **`.github/workflows/product-release.yml`** — new, dormant until a `v*` tag exists. Gates →
+  build matrix (macOS arm64 + x86_64, Linux x86_64) → GitHub Release with tarballs, SHA-256 sums and
+  `lazydap.skill` attached, notes generated from the CHANGELOG section for the tag. Verifies the tag
+  matches the workspace version before building anything. `actionlint` clean.
+  **`release.yml` was not touched** — it is the teaching-era `chapter-*` workflow and `lazydap-learn`
+  owns its semantics.
+- **Workspace metadata** — `[workspace.package]` gains `description`, `keywords` and `categories`;
+  every crate inherits those and sets its own `description`. `publish = false` stays on all seven.
+
+### Found while verifying, not fixed (no code changes in this pass)
+
+- **Conditional breakpoints already work from the CLI.** `break --condition 'i == 7'` binds and
+  stops correctly against codelldb, though `TODO.md` and the blueprint still list them as
+  post-v0.1. The TUI cannot set one. Docs now say so; the roadmap wording is stale.
+- **A debuggee under `/tmp` on macOS never binds a breakpoint.** `/tmp` is a symlink to
+  `/private/tmp`; codelldb reports `verified: false` with "could not be resolved, but a valid
+  location was found at /tmp/...", and the program runs straight through. Candidate quirk 8, and a
+  candidate for canonicalising source paths in the store.
+- **`variables_reference` values go stale on every stop**, and a stale one returns
+  `DapProtocolError: Invalid variabes reference` (codelldb's typo). Correct DAP behaviour, but
+  `skill/SKILL.md` does not warn about it and an agent will lose a turn to it.
+
+### Still to do for M15
+
+1. The config-code half: `crates/config` global `config.toml`, `.vscode/launch.json` parsing with
+   `${workspaceFolder}` substitution, `lazydap launches list` / `run`.
+2. `docs/blueprint/15-decision-log.md`: resolve the open crates.io question. The workflow has no
+   publish job and says why in a trailing comment.
+3. The demo GIF.
+4. Tag `v0.1.0` — only after M12–M14 land, since the README's roadmap says those panes are next.
