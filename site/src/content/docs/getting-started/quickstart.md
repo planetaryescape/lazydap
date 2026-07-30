@@ -4,8 +4,10 @@ description: Break on a line in a C program, read its variables, and run it to e
 ---
 
 Build a small C program, stop it inside a loop, read the loop counter, and let it finish.
-Every command and every reply below was run against the current build; home directories are
-rewritten to `/Users/you` and nothing else is edited.
+
+Every command and every reply below was run against the current build. Home directories are
+rewritten to `/Users/you`, and some replies are shown with fields removed to keep the point
+visible — those are marked underneath. Nothing is reworded.
 
 ## 1. A program to debug
 
@@ -222,20 +224,34 @@ $ lazydap eval 'n * 2' --format json
 ```console
 $ lazydap step --wait --format json
 {
-  "elapsed_ms": 56,
+  "additional_stopped_threads": [],
+  "all_threads_stopped": true,
+  "breakpoint_updates": [],
+  "captured_output": [],
+  "elapsed_ms": 57,
+  "exit_code": null,
   "frame": {
     "column": 5,
-    "id": 1005,
+    "id": 1001,
     "line": 7,
     "name": "total",
-    "source": { "name": "hello.c", "path": "/Users/you/lazydap-demo/hello.c" }
+    "source": {
+      "name": "hello.c",
+      "path": "/Users/you/lazydap-demo/hello.c"
+    }
   },
   "hit_breakpoint_ids": [],
+  "output_truncated": false,
+  "raw_reason": null,
   "reason": "step",
   "state": "paused",
-  "thread_id": 27982711
+  "thread_id": 28409651,
+  "thread_updates": []
 }
 ```
+
+That is the whole object. The same fields come back every time, filled in as far as the
+outcome allows — a step that printed nothing still carries an empty `captured_output`.
 
 Line 6 to line 7. The breakpoint is still on line 6, so `continue` would come straight back
 here on the next iteration — nine more times. Take it out first:
@@ -244,10 +260,16 @@ here on the next iteration — nine more times. Take it out first:
 $ lazydap break --remove --all --dry-run --format json
 {
   "action": "removed",
+  "applied_to_session": false,
   "breakpoints": [
-    { "enabled": true, "id": 1, "line": 6,
+    {
+      "enabled": true,
+      "id": 3,
+      "line": 6,
       "message": "Resolved locations: 1",
-      "source": "/Users/you/lazydap-demo/hello.c", "verified": true }
+      "source": "/Users/you/lazydap-demo/hello.c",
+      "verified": true
+    }
   ],
   "dry_run": true,
   "not_found": []
@@ -258,13 +280,22 @@ $ lazydap break --remove --all --format json
   "action": "removed",
   "applied_to_session": true,
   "breakpoints": [
-    { "enabled": true, "id": 1, "line": 6,
-      "source": "/Users/you/lazydap-demo/hello.c", "verified": false }
+    {
+      "enabled": true,
+      "id": 3,
+      "line": 6,
+      "source": "/Users/you/lazydap-demo/hello.c",
+      "verified": false
+    }
   ],
   "dry_run": false,
   "not_found": []
 }
 ```
+
+`applied_to_session` is the difference between the two: the dry run changed nothing, so it
+touched no live session; the real one did. The id is `3` because this was the third
+breakpoint created in this project — ids are not reused.
 
 `--dry-run` reported exactly what the real run then removed. Every lazydap mutation takes it,
 and it uses the same selection logic as the real thing rather than a second implementation
@@ -273,16 +304,31 @@ that might disagree.
 ```console
 $ lazydap continue --wait --format json
 {
+  "additional_stopped_threads": [],
+  "all_threads_stopped": false,
+  "breakpoint_updates": [],
   "captured_output": [
-    { "category": "stdout", "output": "total=55\r\n", "timestamp_ms": 1785446390991 },
-    { "category": "console", "output": "Process exited with code 0.\n", "timestamp_ms": 1785446390992 }
+    {
+      "category": "stdout",
+      "output": "total=55\r\n",
+      "timestamp_ms": 1785448521428
+    },
+    {
+      "category": "console",
+      "output": "Process exited with code 0.\n",
+      "timestamp_ms": 1785448521429
+    }
   ],
   "elapsed_ms": 1,
   "exit_code": 0,
   "frame": null,
+  "hit_breakpoint_ids": [],
+  "output_truncated": false,
+  "raw_reason": null,
   "reason": null,
   "state": "exited",
-  "thread_id": null
+  "thread_id": null,
+  "thread_updates": []
 }
 ```
 

@@ -17,11 +17,16 @@ only run shell commands. An agent with a Bash tool cannot open VS Code. A CI job
 "this binary, given this input, stops at line 42 with `n == 10`" has no editor to drive. A vim
 autocommand has no MCP host.
 
-The research says the capability is worth having. Microsoft's debug-gym
-([arXiv 2503.21557](https://arxiv.org/abs/2503.21557)) measured SWE-bench Lite success with
-and without a debugger available to the model: +30% for Claude 3.7 Sonnet, +182% for o1, +160%
-for o3-mini. Giving a model a debugger helps a lot. Giving it one it can actually invoke is
-the unsolved half.
+The research points the same way, with appropriate modesty. Microsoft Research's
+[debug-gym](https://arxiv.org/abs/2503.21557) is an environment for studying agents that use
+an interactive debugger, and their write-up reports "significant performance improvement" on
+SWE-bench Lite when the agent can actually use debugging tools — while being blunt about the
+ceiling: "Even with debugging tools, our simple prompt-based agent rarely solves more than
+half of the SWE-bench Lite issues"
+([Microsoft Research blog](https://www.microsoft.com/en-us/research/blog/debug-gym-an-environment-for-ai-coding-tools-to-learn-how-to-debug-code-like-programmers/)).
+
+So: a debugger helps, and it is not a solved problem. Giving a model one it can actually
+invoke from a shell is the part lazydap is for.
 
 ## The five trade-offs
 
