@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 
 #[derive(Debug, thiserror::Error)]
@@ -46,9 +47,8 @@ pub enum Incoming {
 }
 
 pub struct DapTransport {
-    child: Child,
-    stream: BufReader<TcpStream>,
-    seq: AtomicI64,
+    reader: DapReader,
+    writer: DapWriter,
 }
 
 impl DapTransport {
@@ -98,11 +98,7 @@ impl DapTransport {
         });
 
         let stream = TcpStream::connect(("127.0.0.1", port)).await?;
-        Ok(Self {
-            child,
-            stream: BufReader::new(stream),
-            seq: AtomicI64::new(1),
-        })
+        Ok(Self::from_parts(child, stream))
     }
 
     /// Send a request and read until its response arrives, discarding events.
@@ -118,7 +114,7 @@ impl DapTransport {
         let seq = self.send_request(command, args).await?;
 
         loop {
-            let body = self.read_message_body().await?;
+            let body = self.reader.read_message_body().await?;
             let value: serde_json::Value = serde_json::from_slice(&body)?;
             let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match kind {
@@ -157,34 +153,65 @@ impl DapTransport {
     /// Write a request and return its `seq` without waiting for the response.
     /// The caller correlates the response itself via [`read_incoming`](Self::read_incoming).
     pub async fn send_request<T: Serialize>(&mut self, command: &str, args: &T) -> Result<i64> {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-
-        let outbound = serde_json::json!({
-            "seq": seq,
-            "type": "request",
-            "command": command,
-            "arguments": args,
-        });
-        let body = serde_json::to_vec(&outbound)?;
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        self.stream.get_mut().write_all(header.as_bytes()).await?;
-        self.stream.get_mut().write_all(&body).await?;
-        self.stream.get_mut().flush().await?;
-        tracing::debug!(target: "dap.send", seq, command, "request");
-
-        Ok(seq)
+        self.writer.send_request(command, args).await
     }
 
+    /// Read the next message off the socket, in receipt order, whatever it is.
+    ///
+    /// **Not cancellation-safe** — see [`DapReader::read_incoming`].
+    pub async fn read_incoming(&mut self) -> Result<Incoming> {
+        self.reader.read_incoming().await
+    }
+
+    /// Hand reads and writes to separate owners.
+    ///
+    /// The daemon needs this: a long-lived task owns [`DapReader`] and does
+    /// nothing but read, which is the only way to consume the adapter's stream
+    /// without ever cancelling a read mid-frame, while request handlers write
+    /// through the shared [`DapWriter`].
+    pub fn split(self) -> (DapReader, DapWriter) {
+        (self.reader, self.writer)
+    }
+
+    /// Kill the adapter process.
+    pub async fn shutdown(self) -> Result<()> {
+        self.writer.shutdown().await
+    }
+
+    fn from_parts(child: Child, stream: TcpStream) -> Self {
+        // Split before the first read so the buffered reader owns its half from
+        // the start: splitting later would strand whatever bytes the buffer had
+        // already pulled off the socket.
+        let (read_half, write_half) = stream.into_split();
+        Self {
+            reader: DapReader {
+                stream: BufReader::new(read_half),
+            },
+            writer: DapWriter {
+                child,
+                stream: write_half,
+                seq: AtomicI64::new(1),
+            },
+        }
+    }
+}
+
+/// The read side of an adapter connection.
+pub struct DapReader {
+    stream: BufReader<OwnedReadHalf>,
+}
+
+impl DapReader {
     /// Read the next message off the socket, in receipt order, whatever it is.
     ///
     /// **Not cancellation-safe.** Cancelling this future — dropping it, or
     /// wrapping it in `tokio::time::timeout` and having the timer fire — can
     /// leave the stream mid-frame, part way through a header or a body. After
-    /// a cancelled read the transport must not be reused: the next read starts
+    /// a cancelled read the reader must not be reused: the next read starts
     /// mid-frame and misparses, and the session is corrupted from there on.
-    /// Shut the transport down instead. A dedicated read task that owns all
-    /// reads and forwards messages over a channel is the cancellation-safe
-    /// pattern, and is what the daemon uses (M5).
+    /// Shut the adapter down instead. Owning this half in a dedicated task
+    /// that only ever reads is the cancellation-safe pattern, and is what the
+    /// daemon's session pump does.
     pub async fn read_incoming(&mut self) -> Result<Incoming> {
         let body = self.read_message_body().await?;
         let value: serde_json::Value = serde_json::from_slice(&body)?;
@@ -238,7 +265,46 @@ impl DapTransport {
         self.stream.read_exact(&mut body).await?;
         Ok(body)
     }
+}
 
+/// The write side of an adapter connection, and the adapter process itself.
+///
+/// The process lives here because killing it is a control action, and control
+/// actions travel with the writer: whoever can send `disconnect` is also the
+/// one that gets to give up and pull the plug.
+pub struct DapWriter {
+    child: Child,
+    stream: OwnedWriteHalf,
+    seq: AtomicI64,
+}
+
+impl DapWriter {
+    /// Write a request and return its `seq` without waiting for the response.
+    pub async fn send_request<T: Serialize>(&mut self, command: &str, args: &T) -> Result<i64> {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+
+        let outbound = serde_json::json!({
+            "seq": seq,
+            "type": "request",
+            "command": command,
+            "arguments": args,
+        });
+        let body = serde_json::to_vec(&outbound)?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        self.stream.write_all(header.as_bytes()).await?;
+        self.stream.write_all(&body).await?;
+        self.stream.flush().await?;
+        tracing::debug!(target: "dap.send", seq, command, "request");
+
+        Ok(seq)
+    }
+
+    /// Whether the adapter process has already exited, without blocking.
+    pub fn has_exited(&mut self) -> Result<bool> {
+        Ok(self.child.try_wait()?.is_some())
+    }
+
+    /// Kill the adapter process.
     pub async fn shutdown(mut self) -> Result<()> {
         self.child.kill().await?;
         Ok(())
@@ -284,11 +350,7 @@ mod tests {
             .spawn()
             .expect("spawn stand-in adapter process");
 
-        DapTransport {
-            child,
-            stream: BufReader::new(stream),
-            seq: AtomicI64::new(1),
-        }
+        DapTransport::from_parts(child, stream)
     }
 
     #[tokio::test]
@@ -372,5 +434,30 @@ mod tests {
 
         assert_eq!(first, 1, "got: {first}");
         assert_eq!(second, 2, "got: {second}");
+    }
+
+    #[tokio::test]
+    async fn a_split_transport_reads_and_writes_from_separate_owners() {
+        let transport = scripted_adapter(vec![
+            r#"{"seq":1,"type":"event","event":"initialized"}"#.to_string(),
+        ])
+        .await;
+        let (mut reader, mut writer) = transport.split();
+
+        // The read half blocks in its own task while the write half is still
+        // usable — the whole point of the split.
+        let pump = tokio::spawn(async move { reader.read_incoming().await });
+
+        let seq = writer
+            .send_request("configurationDone", &serde_json::json!({}))
+            .await
+            .expect("write while the reader is blocked");
+        assert_eq!(seq, 1, "got: {seq}");
+
+        let event = match pump.await.expect("join").expect("read event") {
+            Incoming::Event(event) => event,
+            other => unreachable!("expected an event, got: {other:?}"),
+        };
+        assert_eq!(event.event, "initialized");
     }
 }
