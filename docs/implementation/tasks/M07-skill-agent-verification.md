@@ -114,3 +114,49 @@ unzip -l lazydap.skill   # confirm contents
 - **Examples should cover the 80% case.** Don't pad with rare scenarios.
 - **Test with multiple agents if possible.** Cursor, Copilot, etc. The skill format is portable.
 - **After M7, Phase B is done.** Lazydap is a working CLI debugger usable by humans, agents, and scripts. The TUI is next.
+
+---
+
+## Completed 2026-07-30
+
+`lazydap.skill` ships at the repository root, built reproducibly from `skill/`.
+
+### What shipped
+
+- **`skill/SKILL.md`** — frontmatter plus the loop, written for an agent that has never seen lazydap. Leads with the one thing that matters (`--wait`), then the things that otherwise cost a turn.
+- **`skill/references/commands.md`** — generated from the clap tree (D035).
+- **`skill/references/examples.md`** — worked sessions: find a variable's value, investigate a crash, step, catch a hang, reuse breakpoints.
+- **`skill/references/error-codes.md`** — exit codes, error names, and what to do about each.
+- **`skill/references/output-schemas.md`** — every command's JSON, field by field.
+- **`scripts/build-skill.sh`** — regenerates and packs.
+- **CI job `skill`** — rebuilds and fails on a diff, then unzips and diffs the ZIP against its sources.
+
+### Decisions taken
+
+- **D035** — the generator is an example walking the real `Cli` type, not a second `[[bin]]` and not a parser for `--help` output.
+
+### Deviations from the plan above
+
+- **Sources live in `skill/`, the artefact is `lazydap.skill`.** The task file lists both `lazydap.skill/SKILL.md` and `lazydap.skill` (ZIP) — a directory and a file of the same name, which cannot both exist. The build script sketched in Step 4 would have tried to `mv` a ZIP over its own source directory. `skill/` in, `lazydap.skill` out, and D027's promised artefact name is unchanged.
+- **The ZIP is byte-for-byte reproducible.** Fixed entry timestamps, `zip -X`, sorted entries. Not in the plan, but a committed binary artefact that changes on every build is one nobody can review and everybody re-commits by accident — and it is what makes the CI diff check mean anything.
+- **No `install-skill` subcommand.** The task file floats it parenthetically; the blueprint puts it post-v0.1. Two `cp` lines in the docs cover it.
+
+### What writing the skill taught us about the CLI
+
+Documentation as a design review — each of these was found by trying to write down what an agent should do:
+
+- **`--stop-on-entry` stops before `main`.** The stack reads `_dyld_start` and no local exists yet, so `eval "y"` fails with *undeclared identifier*. Correct, surprising, and now the first thing the skill warns about.
+- **`eval` was routed to LLDB's command interpreter** (D034, quirk 7). Found while checking that the skill's simplest example actually worked. It did not.
+- **The error taxonomy is the agent's control flow.** `error-codes.md` is organised around what to *do* about each error, not what each error is, because that is the only question a caller has.
+
+### Verification
+
+Every transcript in the skill was captured from a real session against real codelldb and pasted rather than recalled. The claims nothing else exercised — `--condition`, `--remove --all --dry-run`, `scopes` → `variables`, `step --wait` — were run end to end before the docs quoting them were committed.
+
+The acceptance test in the task file ("a test conversation with Claude Code") is performed by the reviewing agent, driving a session with only the skill and the binary.
+
+### Follow-ups discovered
+
+- **`references/commands.md` documents flags, not workflows**, because it is generated. The judgement lives in `SKILL.md` and `examples.md`, which are hand-written and therefore the parts that can go stale silently. Worth re-reading whenever the CLI surface changes.
+- **The skill claims C, C++ and Rust** because that is what codelldb covers. It needs a line about Python the moment debugpy lands (M18).
+- **Nothing checks the hand-written references against reality.** CI keeps `commands.md` in sync with the CLI, but an example's pasted JSON could drift from what lazydap actually prints. A test that runs the skill's transcripts and diffs the output would close that; it needs a fixture with stable ids first.

@@ -11,10 +11,13 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Next milestone: [M6 — CLI subcommands talk to daemon](docs/implementation/tasks/M06-cli-subcommands.md)** — M5 shipped the daemon, the IPC protocol and five subcommands; M6 adds the rest of the surface and `--wait`
+- **Next milestone: [M8 — Hello ratatui](docs/implementation/tasks/M08-hello-ratatui.md)** — Phase B is
+  done. lazydap is a working CLI debugger: launch, breakpoints, stepping with `--wait`, inspection,
+  and an agent skill. Phase C starts the TUI, which is a client of the same protocol.
 - Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
   [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
-  D029 (adapter seam) and D030 (`SessionId` form)
+  D029 (adapter seam), D030 (`SessionId` form), and D031–D036 from M6/M7 (breakpoint ids, protocol
+  v2, the two codelldb normalisations, skill generation, and what `--dry-run` means per command)
 
 ### Repo state notes (for cold-start agent)
 
@@ -40,8 +43,8 @@ workflow at M15.
 ## Phase B — daemon + protocol (M5–M7)
 
 - [x] [M5 — IPC protocol + daemon binary](docs/implementation/tasks/M05-ipc-protocol-daemon.md) — completed 2026-07-30. The binary is now `lazydap`. New crates `lazydap-protocol` (envelope + codec) and `lazydap-config` (paths, project-root detection); the daemon serves a Unix socket, auto-spawns, owns one session (D007), and runs a per-session read pump that resolves M3's cancellation-safety debt. Subcommands: `launch`, `status`, `disconnect`, `shutdown`, `daemon`. Boundary check wired into CI.
-- [ ] [M6 — CLI subcommands talk to daemon](docs/implementation/tasks/M06-cli-subcommands.md)
-- [ ] [M7 — Skill + agent verification](docs/implementation/tasks/M07-skill-agent-verification.md)
+- [x] [M6 — CLI subcommands talk to daemon](docs/implementation/tasks/M06-cli-subcommands.md) — completed 2026-07-30. The full surface: stepping with `--wait`, `break`/`stack`/`scopes`/`variables`/`eval`/`threads`/`output`, `doctor`/`version`/`logs`/`completions`, and `table`/`json`/`jsonl`/`csv`/`ids`. New crate `lazydap-store` persists breakpoints to `.lazydap/state.toml` (D006) and applies them during each launch's configuration phase. Protocol goes to v2 (D032). Live verification against real codelldb found three bugs, including one that made `eval` unusable (D034).
+- [x] [M7 — Skill + agent verification](docs/implementation/tasks/M07-skill-agent-verification.md) — completed 2026-07-30. `lazydap.skill` at the repository root, built reproducibly from `skill/` by `scripts/build-skill.sh`; `references/commands.md` is generated from the clap tree (D035) and CI fails if the committed artefacts drift. **Phase B complete.**
 
 ## Phase C — TUI (M8–M11)
 

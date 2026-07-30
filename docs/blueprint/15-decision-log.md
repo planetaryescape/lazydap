@@ -337,6 +337,87 @@ v0.1 ships one adapter (D013). A trait with a single implementor does not abstra
 
 ---
 
+## D031 — `BreakpointId` is a small integer, not a UUID
+
+**Status:** decided (2026-07-30, with M6).
+
+**Why:** The blueprint's examples show `bp-01ABC...`, and AGENTS.md's agent-loop example shows `"breakpoint_id": 1`. They cannot both be right, and the integer wins on every use it actually gets: a person types it (`lazydap break --remove --id 3`), a pipeline pipes it (`break --list --format ids | xargs`), and a human reads it out of `.lazydap/state.toml`. A UUID is worse at all three and better at nothing lazydap does — there is no distributed allocation to avoid colliding with.
+
+The counter is persisted alongside the breakpoints and never goes backwards, including past an id added by hand-editing the file. Ids are therefore not reused after a removal: a script holding a stale id gets `not_found` rather than silently hitting a different breakpoint.
+
+**Consequences:** `BreakpointId` is a `u32` newtype serialising as a bare number. Adapter ids are a separate namespace and never leak — the session maps between them, and a `hitBreakpointIds` entry we cannot map is dropped rather than passed through as a number from the wrong namespace.
+
+---
+
+## D032 — Protocol version 2 at M6
+
+**Status:** decided (2026-07-30, with M6).
+
+**Why:** M6 adds the stepping, inspection and breakpoint requests. A v1 daemon cannot decode any of them. Left at v1, an M6 client talking to a still-running M5 daemon would get `BadRequest` for `continue` — a command that plainly exists — and no path to fixing it. At v2 the same situation is a `VersionMismatch`, which the client already knows how to resolve: stop the old daemon (`Shutdown` is version-exempt) and start its own.
+
+Bumping the version is what D004 requires an entry for. Nothing has shipped, so no external client is broken by it.
+
+**Consequences:** `ErrorCode` gains `SessionNotPaused`, which `docs/blueprint/10-async-to-sync.md` had always specified and M5 had no requests to need. `Request::Shutdown` and `Request::Disconnect` gain `dry_run`, and `Response::Disconnected`/`ShuttingDown` gain the fields to report it.
+
+---
+
+## D033 — codelldb's entry stop is reported as `entry`, with the raw reason kept
+
+**Status:** decided (2026-07-30, with M6). Resolves the M5 follow-up and option 3 of quirk 6.
+
+**Why:** codelldb implements `--stop-on-entry` by letting the process start and sending it `SIGSTOP`; LLDB classifies a signal stop as an exception, so a launch that did exactly what was asked reports `"reason": "exception"` ([quirk 6](../reference/codelldb-quirks.md#6---stop-on-entry-reports-reason-exception-not-entry-on-macos)). An agent reading that concludes the program crashed before `main` — the single most expensive kind of wrong answer, because it looks like a real finding.
+
+"JSON output is a product feature" (non-negotiable #3) settles it: `reason` is lazydap's vocabulary, and the adapter's idiosyncrasy belongs below the seam (non-negotiable #5). So the **first** stop of a launch that asked for `stop_on_entry`, and only that one, is reported as `entry` when the raw reason is exception-class and the description names `SIGSTOP`.
+
+The normalisation is visible rather than silent: `raw_reason` carries the adapter's own word, and is absent when the two agree. That is option 3 from the quirk, chosen over option 2 (map it quietly — a lie by omission) and option 1 (leave it — every agent has to learn that "exception" sometimes means "entry").
+
+**Consequences:** the guard is deliberately narrow. A real exception at the entry point does not carry `SIGSTOP` and passes through; a `SIGSTOP` nobody asked for passes through; every later stop passes through. The normalisation lives in `crates/daemon/src/adapter/codelldb.rs`, not in the pump — by the time the pump is running, the adapter's reasons are its own.
+
+---
+
+## D034 — `lazydap eval` defaults to the `watch` context, not `repl`
+
+**Status:** decided (2026-07-30, with M6).
+
+**Why:** DAP's `evaluate` takes a `context`, and codelldb reads `repl` literally — "a line typed at the debug console" — handing it to LLDB's *command* interpreter rather than its expression evaluator. `lazydap eval "x"` on a program with an `int x = 5` therefore failed with *"memory read takes a start address expression"*, because `x` is LLDB's alias for `memory read` ([quirk 7](../reference/codelldb-quirks.md#7-evaluate-with-context-repl-runs-an-lldb-command-not-an-expression)).
+
+`lazydap eval "x + y"` is asking about the program, not driving the debugger. `watch` and `hover` both evaluate the string as an expression; `watch` is the default, and `EvalContext::default()` matches so the protocol and the CLI cannot disagree.
+
+**Alternatives considered:** prefixing `repl` expressions with `?` as codelldb's console suggests — codelldb-specific syntax leaking into what a caller types, and `lazydap eval` would mean something different per adapter. Keeping `repl` as the default and documenting the trap — a documented footgun is still a footgun, and this one costs an agent a turn every time.
+
+**Consequences:** `--context repl` is still there and still means "run an adapter command", which for codelldb is a real feature rather than a mistake.
+
+---
+
+## D035 — `commands.md` is generated by an example, not a second binary
+
+**Status:** decided (2026-07-30, with M7).
+
+**Why:** The skill's command reference has to be generated or it drifts (M7's own note). The question was what generates it.
+
+It walks the real `Cli` type via `clap`'s `CommandFactory`, rather than parsing `--help` output: help text is a rendering, and a parser for it would be a second, worse model of something clap already has — quietly losing whatever it did not understand.
+
+It lives in `crates/daemon/examples/gen_skill_commands.rs` rather than a second `[[bin]]`, because a binary in the product crate is installed onto users' machines by `cargo install` for no reason. Examples are still compiled by `cargo check --all-targets`, so it cannot rot silently, and `cargo run --example` is the same one-line invocation a build script would need.
+
+**Consequences:** `scripts/build-skill.sh` regenerates the reference and packs the ZIP; CI runs it and fails if the committed artefacts differ. The ZIP is built reproducibly — fixed entry timestamps, sorted entries — because a committed binary artefact that changes on every build is one nobody can review and everybody re-commits by accident.
+
+---
+
+## D036 — every mutation is dry-runnable, including the ones that only tear down
+
+**Status:** decided (2026-07-30, with M6).
+
+**Why:** Non-negotiable #4 requires `--dry-run` on mutations, using the same selection logic as the real thing. M6 settles what that means per command:
+
+- **`break --remove` / `--toggle`** — the preview and the mutation both call `ProjectStore::select` with the same selector. Not "the same logic": the same function. A toggle preview shows the state it *would* leave behind, since echoing the current state answers a question nobody asked.
+- **`break` (add)** — has no selector, so its preview answers the question a caller actually has: is this new, or do I already have one there? It reports the existing breakpoint when there is one.
+- **`disconnect` / `shutdown`** — dry-runnable. They destroy something (a session, every session), and "what would this take down?" is a fair question to be able to ask first.
+- **`launch`** — deliberately none. It creates rather than destroys, and the honest preview of a launch is a launch. A `--dry-run` that reported "would start codelldb" without finding out whether the program is debuggable would be a prediction, not a preview, and the failure it would fail to predict is exactly the one worth knowing about. `lazydap doctor` covers "is this set up correctly" without pretending to be a launch.
+
+**Consequences:** `--yes` is not implemented. The blueprint pairs it with `--dry-run`, but it exists to skip a confirmation prompt, and lazydap has no prompts — a flag that skipped nothing would be a promise to add one. It lands with the first command that actually asks.
+
+---
+
 ## Open decisions
 
 These need user input.

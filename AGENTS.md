@@ -262,17 +262,23 @@ If your task is "fix a bug in `lazydap continue --wait`":
 
 ## Current state (verified 2026-07-30)
 
-**Pre-alpha.** Most of the CLI documented above is still the *target design*. Five subcommands
-are real; assume nothing else is. What exists today:
+**Pre-alpha, but the CLI above is now real.** The agent loop documented in this file works
+end to end against a C binary. What exists today:
 
-- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, five crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-daemon`.
+- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, six crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-store`, `lazydap-daemon`.
 - **One binary: `lazydap`** (built from `crates/daemon`). `cargo install --path crates/daemon` installs it.
-- **Working subcommands:** `launch`, `status`, `disconnect`, `shutdown`, `daemon`. Both `--format table` and `--format json`, auto-detected from the tty. Everything else in this file — `break`, `continue`, `stack`, `scopes`, `eval`, `--wait` — **does not exist yet** (M6).
+- **Working subcommands:** `launch`, `status`, `disconnect`, `shutdown`, `daemon`, `continue`, `step` (alias `next`), `step-in`, `step-out`, `pause`, `break` (add/list/remove/toggle), `stack`, `scopes`, `variables`, `eval`, `threads`, `output`, `doctor`, `version`, `logs`, `completions`. `--wait` and `--timeout` on everything that moves the program.
+- **All five formats:** `table`, `json`, `jsonl`, `csv`, `ids`, auto-detected from the tty.
 - **A real daemon:** per-project instance, auto-spawns on first use, Unix socket with length-delimited JSON, one debug session at a time (D007), a per-session read pump, and events buffered per session.
-- **Working DAP plumbing** in `lazydap-dap`: framed read/write, typed `initialize`, and a splittable transport.
-- **Five runnable examples:** `cargo run --example m0_hello_adapter`, `m1_read_one_message`, `m2_initialize`, `m3_launch_and_observe`, `m4_pause_on_breakpoint`.
+- **Persistent breakpoints** in `.lazydap/state.toml` (D006), applied during each launch's configuration phase and surviving both the session and the daemon.
+- **The agent skill**, `lazydap.skill` at the repository root, built by `scripts/build-skill.sh` from `skill/`.
+- **Two adapter normalisations you should know about:** `--stop-on-entry` reports `reason: "entry"` with the adapter's `"exception"` kept in `raw_reason` (D033), and `eval` defaults to the `watch` context because `repl` runs an LLDB *command* (D034). Both are in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md).
+- **Not yet:** the TUI (M8–M11), watches, `attach`, `until`, `source`, launch configs, `config`, `restart`, and `Subscribe`/live event streaming (M11).
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
-- **Milestones complete:** workspace setup, M0–M5. **Next up: M6 — CLI subcommands talk to daemon.**
+- **Milestones complete:** workspace setup, M0–M7. Phase B is done. **Next up: M8 — Hello ratatui.**
+
+Note the protocol is at **v2**. A daemon left running from an older build is refused with
+`VersionMismatch`; `lazydap shutdown` clears it and the next command starts a current one.
 
 If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
 point at the roadmap. Don't pretend the rest of the CLI is there.
