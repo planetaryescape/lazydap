@@ -201,8 +201,8 @@ fn nearest_ancestor_containing(start: &Path, markers: &[&str]) -> Option<PathBuf
 /// directory handles, which is not worth a dependency for a local-only socket
 /// whose parent an attacker must already share.
 fn ensure_private_dir(dir: &Path) -> Result<()> {
-    let metadata = match fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) => validate_private_dir(dir, &metadata),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             // Create with the mode set, not chmod-after-create: the window
             // between the two would leave the directory briefly world-readable.
@@ -210,11 +210,22 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
                 .recursive(true)
                 .mode(0o700)
                 .create(dir)?;
-            return Ok(());
-        }
-        Err(source) => return Err(source.into()),
-    };
 
+            // Check again. Between the lstat above and this create, an
+            // attacker can win the race and leave a symlink-to-directory in
+            // place — which `create_dir_all` accepts without complaint,
+            // because the path does resolve to a directory. Re-validating
+            // afterwards does not close the race, but it does turn it from
+            // exploitable into detected: whatever is at this path now has to
+            // pass the same checks as a directory we found already there.
+            let metadata = fs::symlink_metadata(dir)?;
+            validate_private_dir(dir, &metadata)
+        }
+        Err(source) => Err(source.into()),
+    }
+}
+
+fn validate_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         return Err(PathsError::UnsafeDirectory {
             path: dir.to_path_buf(),
