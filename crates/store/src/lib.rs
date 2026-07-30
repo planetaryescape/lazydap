@@ -10,6 +10,27 @@
 //! - **Writes are debounced and atomic** (500ms, write-then-rename). Setting
 //!   twenty breakpoints in a script should cost one write, and a crash
 //!   mid-write must not leave half a file where the state used to be.
+//!
+//! # One writer per project, assumed
+//!
+//! This store assumes it is the only process writing its file. That normally
+//! holds by construction: a daemon instance is keyed to a project root (D010,
+//! D024), so one project means one daemon means one writer.
+//!
+//! It is an assumption rather than a guarantee. `LAZYDAP_INSTANCE` and
+//! `--instance` override the instance name, so two daemons under different
+//! names can be started in the same directory and both claim the same
+//! `.lazydap/state.toml`. Nothing here stops them.
+//!
+//! What is defended today: each write goes to a temporary file named per
+//! process before being renamed into place, so concurrent writers cannot
+//! interleave bytes — the loser's update is lost, but the file is never
+//! corrupt. External edits are noticed by mtime and merged on the way past.
+//!
+//! What is not: there is no interprocess lock, so a lost update is possible.
+//! Recorded as a follow-up on M6 rather than built now — file locking that is
+//! correct across platforms and network filesystems is a real piece of work,
+//! and the failure it prevents needs a deliberately unusual setup to reach.
 
 mod file;
 
@@ -71,6 +92,11 @@ pub struct ProjectStore {
 struct State {
     breakpoints: Vec<Breakpoint>,
     next_id: u32,
+    /// Sections of the file this build does not model — watches, launch
+    /// configs, anything a newer lazydap wrote. Held so they can be written
+    /// back untouched; dropping them would mean adding one breakpoint deletes
+    /// a colleague's configuration.
+    unknown: toml::Table,
     /// What the file looked like when we last read or wrote it, so an edit
     /// made behind our back is noticed rather than silently overwritten.
     seen_mtime: Option<SystemTime>,
@@ -86,7 +112,7 @@ impl ProjectStore {
         let root = root.into();
         let path = root.join(STATE_DIR).join(STATE_FILE);
         let (document, seen_mtime) = file::read(&path)?;
-        let (breakpoints, next_id) = document.into_memory(&root);
+        let (breakpoints, next_id, unknown) = document.into_memory(&root);
 
         tracing::debug!(
             target: "daemon.store",
@@ -101,6 +127,7 @@ impl ProjectStore {
             state: Mutex::new(State {
                 breakpoints,
                 next_id,
+                unknown,
                 seen_mtime,
             }),
             dirty: AtomicBool::new(false),
@@ -234,15 +261,26 @@ impl ProjectStore {
     /// Write now, whatever the debounce window says. Called on daemon
     /// shutdown, and by tests that would otherwise have to sleep.
     pub fn flush_now(&self) -> Result<()> {
-        if !self.dirty.swap(false, Ordering::SeqCst) {
+        if !self.dirty.load(Ordering::SeqCst) {
             return Ok(());
         }
 
         let mut state = lock(&self.state);
         self.adopt_external_edits(&mut state)?;
 
-        let document = file::Document::from_memory(&state.breakpoints, state.next_id, &self.root);
+        let document = file::Document::from_memory(
+            &state.breakpoints,
+            state.next_id,
+            &self.root,
+            state.unknown.clone(),
+        );
         let mtime = file::write(&self.path, &document)?;
+
+        // Cleared only now. Clearing it up front would mean a transient
+        // failure — a full disk, a directory that vanished — leaves the store
+        // believing it is clean: the flusher never retries, the flush on
+        // shutdown is a no-op, and the breakpoint is simply gone.
+        self.dirty.store(false, Ordering::SeqCst);
         state.seen_mtime = mtime;
 
         tracing::debug!(
@@ -295,7 +333,10 @@ impl ProjectStore {
             return Ok(());
         }
 
-        let (on_disk, disk_next_id) = document.into_memory(&self.root);
+        let (on_disk, disk_next_id, unknown) = document.into_memory(&self.root);
+        // The file is the authority on the parts we do not model: a newer
+        // lazydap may have written watches since we loaded.
+        state.unknown = unknown;
         let known: Vec<BreakpointId> = state
             .breakpoints
             .iter()
@@ -583,6 +624,54 @@ mod tests {
             BreakpointId(42),
             "ids continue past what is there"
         );
+    }
+
+    #[test]
+    fn a_write_that_fails_leaves_the_store_dirty_so_the_next_one_retries() {
+        // Clearing `dirty` before the write means a transient failure — a full
+        // disk, a directory that has gone — looks like success: the flusher
+        // never retries, the flush on shutdown is a no-op, and the breakpoint
+        // is simply lost.
+        let project = TempProject::new("retry");
+        let store = project.store();
+        store.add(new_breakpoint(&project.root.join("main.c"), 19));
+
+        // A directory where the state file goes: the rename cannot succeed.
+        std::fs::create_dir_all(project.state_file()).expect("block the state file");
+        assert!(store.flush_now().is_err(), "the write should have failed");
+
+        // Unblock it, and the retry must still have something to write.
+        std::fs::remove_dir_all(project.state_file()).expect("unblock");
+        store.flush_now().expect("the retry writes");
+
+        assert_eq!(
+            project.store().breakpoints().len(),
+            1,
+            "the breakpoint survived a failed write",
+        );
+    }
+
+    #[test]
+    fn state_this_build_does_not_model_survives_a_breakpoint_being_added() {
+        // Watches and launch configs are in the file format but not yet
+        // written by anything. A colleague on a newer build has them, and
+        // adding one breakpoint must not delete them.
+        let project = TempProject::new("preserve");
+        std::fs::create_dir_all(project.root.join(STATE_DIR)).expect("create .lazydap");
+        std::fs::write(
+            project.state_file(),
+            "version = 1\n\n[[watches]]\nid = \"w1\"\nexpression = \"tokens[pos]\"\n",
+        )
+        .expect("write");
+
+        let store = project.store();
+        store.add(new_breakpoint(&project.root.join("main.c"), 19));
+        store.flush_now().expect("flush");
+
+        let written = std::fs::read_to_string(project.state_file()).expect("read");
+        assert!(written.contains("watches"), "got: {written}");
+        assert!(written.contains("tokens[pos]"), "got: {written}");
+        assert!(written.contains("[[breakpoints]]"), "got: {written}");
     }
 
     #[tokio::test(start_paused = true)]

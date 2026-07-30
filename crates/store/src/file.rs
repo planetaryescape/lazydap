@@ -38,8 +38,10 @@ pub struct Document {
 }
 
 impl Document {
-    /// Absolute paths, and the id the next breakpoint should take.
-    pub fn into_memory(self, root: &Path) -> (Vec<Breakpoint>, u32) {
+    /// Absolute paths, the id the next breakpoint should take, and whatever
+    /// sections this build does not model — which the caller has to hold on to
+    /// and hand back, or the next write deletes them.
+    pub fn into_memory(self, root: &Path) -> (Vec<Breakpoint>, u32, toml::Table) {
         let breakpoints: Vec<Breakpoint> = self
             .breakpoints
             .into_iter()
@@ -56,10 +58,15 @@ impl Document {
             .unwrap_or(1);
         let next_id = self.next_breakpoint_id.unwrap_or(1).max(highest);
 
-        (breakpoints, next_id)
+        (breakpoints, next_id, self.unknown)
     }
 
-    pub fn from_memory(breakpoints: &[Breakpoint], next_id: u32, root: &Path) -> Self {
+    pub fn from_memory(
+        breakpoints: &[Breakpoint],
+        next_id: u32,
+        root: &Path,
+        unknown: toml::Table,
+    ) -> Self {
         let mut breakpoints: Vec<Breakpoint> = breakpoints
             .iter()
             .map(|breakpoint| Breakpoint {
@@ -75,7 +82,12 @@ impl Document {
             version: SCHEMA_VERSION,
             next_breakpoint_id: Some(next_id),
             breakpoints,
-            unknown: toml::Table::new(),
+            // Carried straight back out. These are the sections this build
+            // does not model — watches and launch configs, on the roadmap but
+            // not written by anything yet, or whatever a newer lazydap put
+            // there. Rewriting the file to add one breakpoint must not delete
+            // a colleague's launch configs because they run a newer build.
+            unknown,
         }
     }
 }
@@ -120,8 +132,12 @@ pub fn write(path: &Path, document: &Document) -> Result<Option<SystemTime>> {
     }
 
     // Same directory as the target, because `rename` is only atomic within a
-    // filesystem.
-    let temporary = path.with_extension("toml.tmp");
+    // filesystem — and named per process, because two daemons pointed at one
+    // project (see the single-writer note in `lib.rs`) would otherwise write
+    // the *same* temporary file at the same time and rename each other's
+    // half-written bytes into place. Unique names make the worst case a lost
+    // update rather than a corrupt file.
+    let temporary = path.with_extension(format!("toml.tmp.{}", std::process::id()));
     std::fs::write(&temporary, serialised).map_err(|source| StoreError::Write {
         path: temporary.clone(),
         source,
@@ -191,6 +207,7 @@ mod tests {
             ],
             4,
             root,
+            toml::Table::new(),
         );
 
         let sources: Vec<String> = document
@@ -207,7 +224,7 @@ mod tests {
         let document: Document =
             toml::from_str("version = 1\n\n[[breakpoints]]\nid = 7\nsource = \"a.c\"\nline = 1\n")
                 .expect("parse");
-        let (_, next_id) = document.into_memory(Path::new("/p"));
+        let (_, next_id, _) = document.into_memory(Path::new("/p"));
         assert_eq!(next_id, 8);
     }
 
@@ -218,7 +235,7 @@ mod tests {
              [[breakpoints]]\nid = 9\nsource = \"a.c\"\nline = 1\n",
         )
         .expect("parse");
-        let (_, next_id) = document.into_memory(Path::new("/p"));
+        let (_, next_id, _) = document.into_memory(Path::new("/p"));
         assert_eq!(
             next_id, 10,
             "the counter cannot go backwards past a live id"
