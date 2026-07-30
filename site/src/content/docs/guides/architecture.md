@@ -42,15 +42,17 @@ codelldb and LLDB do that.
 Seven crates, with the dependency arrows chosen so that the rules cannot be broken by someone
 who disagrees with them:
 
+Straight from `cargo metadata`:
+
 | Crate | Depends on | Is |
 |---|---|---|
 | `lazydap-core` | nothing internal | Domain types and errors. Zero I/O. |
 | `lazydap-dap` | nothing internal | Raw DAP framing. Knows nothing about lazydap. |
+| `lazydap-config` | nothing internal | Paths, project-root detection. |
 | `lazydap-protocol` | `core` | The IPC contract, so a client can speak it without the daemon. |
-| `lazydap-config` | `core` | Paths, project-root detection. |
 | `lazydap-store` | `core` | `.lazydap/state.toml`. No sockets, no adapters. |
-| `lazydap-tui` | `core`, `protocol`, `config` | A client. Nothing more. |
-| `lazydap-daemon` | everything | The `lazydap` binary, the daemon, the CLI. |
+| `lazydap-tui` | `core`, `protocol` | A client. Nothing more. |
+| `lazydap-daemon` | all six | The `lazydap` binary, the daemon, the CLI. |
 
 The load-bearing row is `lazydap-tui`. It cannot depend on the daemon, the store, or DAP —
 so a TUI feature that reaches into daemon-private state is not something a developer can

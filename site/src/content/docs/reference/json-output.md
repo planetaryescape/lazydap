@@ -12,8 +12,8 @@ Every shape below was captured from a real run. Home directories are rewritten t
 
 ## Stepping and continuing
 
-`launch`, `continue`, `step`, `step-in`, `step-out` and `pause`, **with `--wait`**, all return
-the same object.
+`continue`, `step`, `step-in`, `step-out` and `pause`, **with `--wait`**, all return the same
+object. `launch` does not take `--wait` and has [its own shape](#launch).
 
 ```json
 {
@@ -51,14 +51,14 @@ the same object.
 | `additional_stopped_threads` | array of integer | Other threads that stopped inside the 50 ms coalescing window |
 | `frame` | object or null | Top frame. Null when the program is gone |
 | `hit_breakpoint_ids` | array of integer | lazydap breakpoint ids, matching `lazydap break --list` |
-| `exit_code` | integer or null | Set on `exited`; on `adapter_died` it is the adapter's, negative for a signal |
+| `exit_code` | integer or null | The debuggee's, set on `exited`. Null on `adapter_died`: that ending carries a `detail` string rather than the adapter's process status |
 | `captured_output` | array | Everything the program printed during the wait |
 | `output_truncated` | boolean | True when output was dropped rather than buffered |
 | `breakpoint_updates` | array | Breakpoints whose state changed during the run |
 | `thread_updates` | array | Threads that started or exited |
 | `elapsed_ms` | integer | How long the wait took |
 
-**Without `--wait`**, the same commands return an acknowledgement instead — the request was
+**Without `--wait`**, those commands return an acknowledgement instead — the request was
 accepted, nothing more. [The `--wait` contract](/guides/wait/) explains when each is right.
 
 ### `frame`
@@ -88,7 +88,7 @@ accepted, nothing more. [The `--wait` contract](/guides/wait/) explains when eac
 
 ## `launch`
 
-Adds the session identity and what the adapter can do:
+Its own shape, not a stable-state blob. The session identity and what the adapter can do:
 
 ```json
 {

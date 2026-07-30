@@ -12,7 +12,12 @@ stack.
 lazydap continue --wait --format json
 ```
 
-`--wait` is available on `launch`, `continue`, `step`, `step-in`, `step-out` and `pause`.
+`--wait` is available on `continue`, `step`, `step-in`, `step-out` and `pause`.
+
+**Not on `launch`.** `lazydap launch --wait` is a usage error (exit `2`). Launching answers
+with its own shape — session id, capabilities, and the persisted breakpoints with whatever
+the adapter made of them — rather than a stable-state blob. Use `--stop-on-entry` to hold the
+program still, then `continue --wait` to move it.
 
 ## What it blocks on
 
@@ -39,7 +44,7 @@ Read `state`. It is always one of these, always lower-case:
 | `exited` | The program finished | `exit_code`; `frame` is `null` |
 | `terminated` | The session is over | Later commands on that session get `SessionNotFound` |
 | `timeout` | Nothing settled in time | The program **is still running** |
-| `adapter_died` | codelldb went away | `exit_code` is the adapter's, negative for a signal; the session is unrecoverable |
+| `adapter_died` | codelldb went away | The session is unrecoverable. `exit_code` is `null` — the ending carries a `detail` string, not the adapter's process status |
 
 The command's own exit code is a different question. `lazydap continue --wait` exits `0` when
 it successfully reports that your program crashed. Read `state` for the program; read the exit
