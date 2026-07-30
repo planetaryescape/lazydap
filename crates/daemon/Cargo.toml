@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The lazydap binary: CLI subcommands, the daemon that owns the debug session, and the entrypoint to the TUI"
 publish = false
 
 # The product is one binary called `lazydap` (D002). `main.rs` is a thin

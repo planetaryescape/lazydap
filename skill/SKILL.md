@@ -65,6 +65,11 @@ Worked examples, including a crash investigation:
 - **Inspection needs a paused program.** `stack`, `scopes`, `variables` and
   `eval` fail with `SessionNotPaused` while it is running. Pause it first
   (`lazydap pause --wait`) or wait for a breakpoint.
+- **A `variables_reference` stops being valid the moment the program moves.**
+  The numbers `scopes` hands you are good for that stop only. After any step or
+  `continue`, ask `scopes` again and use the new ones; reusing the old ones
+  fails with `DapProtocolError: Invalid variabes reference` — the typo is the
+  adapter's, and the turn it costs you is avoidable.
 - **One session at a time.** Launch again and you get `SessionAlreadyActive`,
   unless the previous program has finished — a finished session is cleared
   automatically.

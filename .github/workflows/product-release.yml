@@ -1,0 +1,263 @@
+# This file is intentionally boring. A release workflow that is clever is a
+# release workflow nobody can debug at the moment it matters.
+name: Product Release
+
+# `v*` tags only. `chapter-*` tags belong to the learn-by-LLM book and are
+# handled by release.yml, which this workflow deliberately does not touch: the
+# two have nothing to do with each other beyond both creating GitHub Releases.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets you rehearse the whole thing against a branch without cutting a tag.
+  # The publish job is skipped in that mode; only the gates and the builds run.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: product-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Everything CI runs on a pull request, run again against the tagged commit.
+  # A tag can point anywhere; do not assume it points at a commit CI has seen.
+  gates:
+    name: Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+
+      - run: bash scripts/check_architecture_boundaries.sh
+
+      - run: cargo clippy --workspace --all-targets
+
+      - run: cargo check --workspace --all-targets
+
+      # codelldb is not installed here, so the adapter integration tests skip
+      # themselves rather than fail. That is the same bargain CI makes.
+      - run: cargo test --workspace --all-targets
+
+      - name: Skill matches its sources
+        run: |
+          bash scripts/build-skill.sh
+          if ! git diff --exit-code -- skill/ lazydap.skill; then
+            echo "::error::lazydap.skill is out of date. Run scripts/build-skill.sh and commit the result."
+            exit 1
+          fi
+
+      # A tag whose version does not match the workspace is the single most
+      # likely way to ship the wrong thing. Catch it before anything is built.
+      - name: Tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "lazydap-daemon"))')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag is v${TAG_VERSION} but Cargo.toml says ${CARGO_VERSION}"
+            exit 1
+          fi
+          echo "tag and workspace agree on ${CARGO_VERSION}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: gates
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners per target. Cross-compiling to macOS x86_64 from an
+          # arm64 runner works, but a natively built binary is one fewer thing
+          # to explain when somebody reports it does not run.
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # `publish = false` on every crate stops `cargo publish`, not
+      # `cargo build`. The product is one binary, so build only that.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin lazydap
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "lazydap-daemon"))')
+          NAME="lazydap-${VERSION}-${{ matrix.target }}"
+
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/lazydap" "dist/${NAME}/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/${NAME}/"
+
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+
+          # Checksums are computed on the runner that built the artifact and
+          # attached alongside it, so a download can be verified without
+          # trusting the release page's rendering of it.
+          if command -v shasum >/dev/null 2>&1; then
+            (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          else
+            (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          fi
+
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    # Both halves matter. `workflow_dispatch` can be pointed at a tag, so the
+    # ref test alone would let a rehearsal create the real release and clobber
+    # its assets. Requiring a push event means a rehearsal runs the gates and
+    # the builds and then stops, which is the whole point of rehearsing.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The agent skill is a committed, reproducibly built artifact. Attaching
+      # it means an agent can fetch the skill for a specific release without
+      # cloning the repository or guessing which commit it came from.
+      - name: Collect the skill
+        run: cp lazydap.skill dist/lazydap.skill
+
+      # The CHANGELOG is the source of truth for what a release contains.
+      # Generating notes from it rather than from commit subjects keeps one
+      # description of the release rather than two that drift.
+      - name: Release notes from CHANGELOG
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG_NAME#v}"
+
+          # The section for this version: from its `## [x.y.z]` heading up to
+          # the next `## ` heading, exclusive.
+          #
+          # Matched literally with index(), not as a regex. A legal Cargo
+          # version carries characters a regex reads as syntax — `0.1.0+build.1`
+          # has a `+` — and such a tag passes the equality check above only to
+          # fail its own match here, after every build has already run.
+          awk -v heading="## [$VERSION]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes-body.md
+
+          if [ ! -s notes-body.md ]; then
+            echo "::error::no [${VERSION}] section in CHANGELOG.md"
+            exit 1
+          fi
+
+          # The CHANGELOG carries its own "not tagged yet" wording while a
+          # version is being worked on, and this job would otherwise copy that
+          # verbatim onto the release page announcing the tag. Finalising the
+          # section is part of cutting the tag; refuse until it has been done.
+          if grep -qiE 'unreleased|not (yet )?tagged|until the tag is cut' notes-body.md; then
+            echo "::error::the [${VERSION}] section of CHANGELOG.md still reads as unreleased. Finalise its wording (drop the unreleased preamble, date the heading) and re-tag."
+            exit 1
+          fi
+
+          {
+            cat notes-body.md
+            echo
+            echo "---"
+            echo
+            echo "## Install"
+            echo
+            echo "Download the archive for your platform below, verify it, then unpack it and put the binary on your \`PATH\`:"
+            echo
+            echo '```bash'
+            echo "shasum -a 256 -c lazydap-${VERSION}-<target>.tar.gz.sha256"
+            echo "tar -xzf lazydap-${VERSION}-<target>.tar.gz"
+            echo "mkdir -p ~/.local/bin"
+            echo "install lazydap-${VERSION}-<target>/lazydap ~/.local/bin/"
+            echo '```'
+            echo
+            echo "Verifying before unpacking is the order that helps: a checksum checked after the fact tells you what you already extracted."
+            echo
+            echo "Or build it yourself: \`cargo install --path crates/daemon\`."
+            echo
+            echo "lazydap needs **codelldb** on your \`PATH\`, and it must be installed via a wrapper script rather than a symlink. [README](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG_NAME}/README.md#install) has the four commands."
+            echo
+            echo "\`lazydap.skill\` is attached for agents. Point one at it and it drives the debugger from the shell."
+          } > release-notes.md
+
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Pre-1.0, and anything with a hyphen in it (v0.1.0-rc1), goes out
+          # as a prerelease. A 0.x release is not a stability promise.
+          PRERELEASE=""
+          case "$TAG_NAME" in
+            v0.*|*-*) PRERELEASE="--prerelease" ;;
+          esac
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --notes-file release-notes.md
+            gh release upload "$TAG_NAME" dist/* --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$TAG_NAME" \
+              --title "lazydap ${TAG_NAME}" \
+              --notes-file release-notes.md \
+              $PRERELEASE \
+              dist/*
+          fi
+
+  # NOT DONE HERE: publishing to crates.io. Every crate carries
+  # `publish = false`, which is the recorded default and matches mxr's stance.
+  # The open question is tracked in TODO.md ("whether to publish crates to
+  # crates.io") and belongs in docs/blueprint/15-decision-log.md before any job
+  # is added here. Publishing seven crates in dependency order is easy to write
+  # and impossible to take back: crates.io versions are immutable and names are
+  # permanent. Decide first.

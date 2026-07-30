@@ -15,6 +15,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 5 | [Hangs at `_dyld_start` after a macOS update](#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) | Ship-mode Wave 0 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 6 | [`--stop-on-entry` stops with reason `exception`, not `entry`](#6---stop-on-entry-reports-reason-exception-not-entry-on-macos) | M5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 7 | [`evaluate` with context `repl` runs an LLDB *command*, not an expression](#7-evaluate-with-context-repl-runs-an-lldb-command-not-an-expression) | M6 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 8 | [Breakpoints never bind for a debuggee under `/tmp` on macOS](#8-breakpoints-never-bind-for-a-debuggee-under-tmp-on-macos) | Ship-mode Wave 5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -384,6 +385,109 @@ make `lazydap eval` mean something different per adapter.
 
 - [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md) — D034
 - Milestone: [`docs/implementation/tasks/M06-cli-subcommands.md`](../implementation/tasks/M06-cli-subcommands.md)
+
+---
+
+## 8. Breakpoints never bind for a debuggee under `/tmp` on macOS
+
+### Symptom
+
+You put a scratch program in `/tmp`, set a breakpoint on a line you know is reached, and the
+program runs straight to completion without stopping. `break` looks like it worked:
+
+```json
+{
+  "action": "added",
+  "breakpoints": [
+    { "enabled": true, "id": 1, "line": 6,
+      "source": "/private/tmp/lazydap-demo/hello.c", "verified": false }
+  ]
+}
+```
+
+`launch` is where it says so, in a `message` that reads like it is reporting a success:
+
+```json
+{
+  "breakpoints": [
+    { "enabled": true, "id": 1, "line": 6,
+      "message": "Breakpoint at /private/tmp/lazydap-demo/hello.c:6 could not be resolved, but a valid location was found at /tmp/lazydap-demo/hello.c:6",
+      "source": "/private/tmp/lazydap-demo/hello.c", "verified": false }
+  ],
+  "state": "running"
+}
+```
+
+Then `continue --wait` returns `"state": "exited"`, `"exit_code": 0`, with the program's whole
+output in `captured_output` and `"hit_breakpoint_ids": []`.
+
+The two paths in that message differ only by the `/private` prefix, which is easy to read past.
+`verified: false` is the real signal, and quirk 1's crashed-adapter symptom aside, this is the
+main way a breakpoint silently does nothing.
+
+### Root cause
+
+On macOS `/tmp` is a symlink to `/private/tmp`. Two components disagree about which spelling is
+the file's name:
+
+1. **lazydap canonicalises.** `resolve_source` calls `Path::canonicalize`, which resolves
+   symlinks, so a breakpoint set from `/tmp/lazydap-demo` is stored and sent as
+   `/private/tmp/lazydap-demo/hello.c` (`crates/daemon/src/commands/mod.rs:129`). It does this so
+   the daemon and the adapter agree on a path regardless of either one's working directory, and
+   so a typo fails immediately rather than as a silent `verified: false` later.
+2. **The compiler doesn't.** DWARF records the path as it was typed on the command line. Build
+   with `gcc /tmp/lazydap-demo/hello.c` and the debug info says `/tmp/...`.
+3. **codelldb matches the literal string.** It compares the `setBreakpoints` source path against
+   the compilation unit's path textually, without resolving either. `/private/tmp/...` and
+   `/tmp/...` are different strings, so nothing matches.
+
+Neither canonicalising nor not canonicalising is wrong on its own. Disagreeing is.
+
+codelldb does find the line — that is what "a valid location was found at /tmp/..." means — and
+then declines to bind to it, because the location it found is not in the file it was asked about.
+It reports this at `verified: false` rather than as an error, which is correct per DAP and
+unhelpful in practice.
+
+This is not specific to `/tmp`. Any symlinked directory on the path to a source file will do it;
+`/tmp` is just the one everybody reaches for when writing a scratch program. `/var` and
+`/etc` are symlinks on macOS too.
+
+### Fix
+
+**Keep debuggees out of `/tmp`.** A directory under `$HOME` has no symlink on the way to it and
+the problem does not arise. This is the whole fix for scratch work and what `CONTRIBUTING.md`
+tells contributors.
+
+**If you must work under a symlinked path**, make the two spellings agree by compiling with the
+resolved path, so the debug info matches what lazydap will send:
+
+```bash
+gcc -g -O0 /private/tmp/scratch/hello.c -o /private/tmp/scratch/hello
+```
+
+**Check `verified` rather than assuming.** `lazydap break --list` shows the column, and the
+`breakpoints` array in `launch`'s response carries both `verified` and the adapter's `message`. A
+script or an agent that reads `verified: false` and stops is spared the confusion; one that
+ignores it debugs a program that never pauses.
+
+### The real fix, not yet made
+
+lazydap knows both spellings at the moment it matters and could reconcile them: when a
+breakpoint comes back `verified: false` with a resolved location that differs from the requested
+source only by symlink resolution, re-send it under the path the adapter found. That is a change
+to how the store and the launch configuration phase handle source paths, which is
+**[M15](../implementation/tasks/M15-config-file.md)'s code half** — the same milestone that owns
+`launch.json` import and its `${workspaceFolder}` substitution, and therefore the place where
+path handling gets thought about properly rather than patched here.
+
+Until then this is documented rather than fixed, which is the honest trade: the workaround is one
+directory move.
+
+### Cross-references
+
+- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — the warning where somebody about to do this will see it
+- Milestone: [`M15-config-file.md`](../implementation/tasks/M15-config-file.md) — where source-path handling belongs
+- Quirk 1 — the other way a breakpoint silently fails to do anything
 
 ---
 

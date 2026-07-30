@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Per-project state that outlives a debug session, persisted to .lazydap/state.toml"
 publish = false
 
 [lints]

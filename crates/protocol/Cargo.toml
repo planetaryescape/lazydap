@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The lazydap IPC contract: requests, responses, events, and the length-delimited JSON codec clients speak"
 publish = false
 
 [lints]

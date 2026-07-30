@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "lazydap's terminal UI. A ratatui client of the IPC protocol, with no path to the daemon's internals"
 publish = false
 
 [lints]
