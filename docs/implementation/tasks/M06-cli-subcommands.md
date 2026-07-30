@@ -231,3 +231,35 @@ Each has a unit test now; none would have been caught by the adapter-free tests 
 - **`output` reads the buffer without consuming it, while `--wait` consumes.** Documented in the skill, but the two commands having different consumption semantics is the sort of thing that will need re-explaining. Revisit if `Subscribe` (M11) makes a cleaner model available.
 - **Inspection requires `paused`, and `threads` deliberately does not** — which threads exist is a fair question about a running program.
 - **The multi-threaded `additional_stopped_threads` assertion is weaker than the blueprint's.** How many threads an adapter reports as separately stopped is a race by construction — that is what the coalescing window is *for* — so the integration test asserts the invariant (the named thread is not also in the extras, and the program really is multi-threaded) and the coalescing itself is unit-tested deterministically.
+
+### Review fixes (2026-07-30, post-implementation external review)
+
+Eleven defects, adjudicated from an orchestrator + external review. Four were correctness bugs that a user would have hit.
+
+- **The execution permit was scoped to the message, not the run.** Three findings shared this root cause. A second concurrent `continue --wait` subscribed *before* queueing on the permit, so it observed the first wait's stop, resumed past it, and returned that stop as its own — reporting `paused` while the debuggee ran on. The permit is now taken by the caller (`AdapterHandle::execution_permit`, a typed guard the execution methods require), held across the whole wait, and the subscription happens inside it. `pause` and `disconnect` deliberately bypass it: both exist to end a run already under way, and queueing the thing that breaks the queue is how a runaway program becomes unstoppable.
+- **An acknowledgement timeout released the permit with the request still outstanding at the adapter.** A retry would then pipeline a second execution request — precisely what D021 and non-negotiable #6 forbid, and what deadlocks adapters that serialise internally. An adapter that cannot acknowledge a `continue` within the deadline is wedged, so it is killed and the session becomes `adapter_died` (D022).
+- **The failed-request path restored its state snapshot unconditionally.** An adapter can execute a `continue`, emit `terminated` and die before acknowledging; the pump records the ending, and the restore stamped `paused` back over it. A dead session then looked live and refused every later launch. Now a compare-and-set that only undoes its own write.
+- **The v2 protocol bump broke the upgrade escape hatch a second time.** Giving `Request::Shutdown` a `dry_run` field turned `"Shutdown"` into `{"Shutdown":{...}}`, which a v1 daemon fails to *deserialise* before it ever reaches the version exemption that exists to let that message through. It would have bitten on merge, since `main`'s daemons are v1. `Shutdown` is frozen as a unit variant with a comment asking not to be tidied, `auto_spawn` builds the frame as literal JSON rather than through `IpcMessage`, and a golden test pins the v1 bytes. `shutdown --dry-run` is answered from a `Status` call — a preview mutates nothing, so it never needed the daemon.
+
+The rest:
+
+- A wait marked its backlog delivered at `begin`, before the request had succeeded, so a rejected `continue` silently swallowed events nobody had seen. Delivery is committed only when a blob is actually returned.
+- `flush_now` cleared the dirty flag before writing, so a transient failure left the store "clean" — no retry, a no-op flush on shutdown, breakpoint lost.
+- Unknown top-level sections were parsed and then dropped, so editing one breakpoint deleted a newer build's watches and launch configs.
+- The write-then-rename temporary had a fixed name; it is per-process now.
+- Breakpoint events carried `id: None` even when the adapter id resolved, so `breakpoint_updates` could not be correlated with `break --list`.
+- Malformed `--session-id` exited 1; invalid CLI syntax is a usage error (2).
+- The codelldb suite ran adapters concurrently and timed out under load. See below.
+
+### The test flake, and what it turned out to be
+
+The 13 real-codelldb tests failed 12-of-13 for the reviewer under load while passing in isolation. Serialising them under a file-scope mutex was the obvious half of the fix and was not enough on its own.
+
+The rest was that each test compiled its fixture to a *fresh temporary path*. macOS evaluates a binary the first time a given inode is executed, and attaching a debugger to a brand-new one pays that in full: about thirteen seconds, against a fifteen-second handshake deadline. Measured directly — six hand-run launches against the same long-lived binary averaged 420ms, while the identical launch inside a test took 13s. Fixtures now build once to a stable path under `target/` and are skipped when fresh. The suite went from 271s and failing to 12s green, twice consecutively.
+
+This is the benign end of the mechanism [quirk 5](../../reference/codelldb-quirks.md#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) documents the pathological end of. Worth knowing before blaming the adapter.
+
+### Further follow-ups
+
+- **The store has no interprocess lock.** One daemon per project root makes it a non-issue by construction, but `LAZYDAP_INSTANCE` can put two daemons on one project, and then a concurrent write is a lost update. Mitigated (per-process temporary files, so never a corrupt file) and documented in `crates/store/src/lib.rs`; a real lock that is correct across platforms and network filesystems is its own piece of work and is deliberately not in M6.
+- **The 15-second handshake deadline is tight for a cold binary on a loaded machine.** Not changed — it is the right deadline for a healthy setup, and raising it to accommodate a pathological one would hide the failure rather than fix it. Worth revisiting if users report it.
