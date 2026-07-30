@@ -25,6 +25,14 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  boundaries:
+    name: Architecture boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain needed: this reads Cargo.toml files, it does not build.
+      - run: bash scripts/check_architecture_boundaries.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

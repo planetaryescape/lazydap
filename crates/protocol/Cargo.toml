@@ -1,5 +1,5 @@
 [package]
-name = "lazydap-dap"
+name = "lazydap-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,11 +12,12 @@ publish = false
 workspace = true
 
 [dependencies]
+lazydap-core = { path = "../core" }
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "process", "rt"] }
-tracing = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

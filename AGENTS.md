@@ -262,18 +262,20 @@ If your task is "fix a bug in `lazydap continue --wait`":
 
 ## Current state (verified 2026-07-30)
 
-**Pre-alpha.** The `lazydap` CLI documented above is the *target design*, not the shipped
-surface. Do not assume any of it exists. What actually exists today:
+**Pre-alpha.** Most of the CLI documented above is still the *target design*. Five subcommands
+are real; assume nothing else is. What exists today:
 
-- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, three crates: `lazydap-core`, `lazydap-dap`, `lazydap-daemon`.
-- **One binary: `lazydap-daemon`.** There is no `lazydap` binary. No subcommands, no Unix socket, no session store, no TUI.
-- **Working DAP plumbing** in `lazydap-dap`: framed message read/write, and a typed `initialize` round-trip against real codelldb.
-- **Three runnable examples:** `cargo run --example m0_hello_adapter`, `m1_read_one_message`, `m2_initialize`.
-- `cargo build --workspace` and `cargo test --workspace` both pass — 3 tests, all in `lazydap-dap`.
-- **Milestones complete:** workspace setup, M0, M1, M2. **Next up: M3 — Launch and observe.**
+- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, five crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-daemon`.
+- **One binary: `lazydap`** (built from `crates/daemon`). `cargo install --path crates/daemon` installs it.
+- **Working subcommands:** `launch`, `status`, `disconnect`, `shutdown`, `daemon`. Both `--format table` and `--format json`, auto-detected from the tty. Everything else in this file — `break`, `continue`, `stack`, `scopes`, `eval`, `--wait` — **does not exist yet** (M6).
+- **A real daemon:** per-project instance, auto-spawns on first use, Unix socket with length-delimited JSON, one debug session at a time (D007), a per-session read pump, and events buffered per session.
+- **Working DAP plumbing** in `lazydap-dap`: framed read/write, typed `initialize`, and a splittable transport.
+- **Five runnable examples:** `cargo run --example m0_hello_adapter`, `m1_read_one_message`, `m2_initialize`, `m3_launch_and_observe`, `m4_pause_on_breakpoint`.
+- All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
+- **Milestones complete:** workspace setup, M0–M5. **Next up: M6 — CLI subcommands talk to daemon.**
 
-If a user asks you to "use lazydap to debug X", tell them it isn't built yet and point at
-[`README.md`](README.md) plus the roadmap. Don't pretend the CLI exists.
+If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
+point at the roadmap. Don't pretend the rest of the CLI is there.
 
 **This paragraph will go stale.** [`/TODO.md`](TODO.md) is the live source of truth — trust
 its checkboxes over this list, and correct this section when you notice it has drifted.

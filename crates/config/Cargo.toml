@@ -1,5 +1,5 @@
 [package]
-name = "lazydap-core"
+name = "lazydap-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,5 @@ publish = false
 workspace = true
 
 [dependencies]
-serde = { workspace = true }
-uuid = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }

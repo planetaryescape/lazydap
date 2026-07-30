@@ -11,10 +11,10 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Next milestone: [M5 — IPC protocol + daemon binary](docs/implementation/tasks/M05-ipc-protocol-daemon.md)** — Phase A is done; the protocol is proven end to end (launch, breakpoint, pause, resume, terminate)
-- Open decisions O01–O04 resolved 2026-07-30 (root detection order, read-only doctor, adapter
-  discovery priority, sibling-ZIP skill distribution) — being recorded as D-entries in
-  [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md) with the M5 work
+- **Next milestone: [M6 — CLI subcommands talk to daemon](docs/implementation/tasks/M06-cli-subcommands.md)** — M5 shipped the daemon, the IPC protocol and five subcommands; M6 adds the rest of the surface and `--wait`
+- Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
+  [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
+  D029 (adapter seam) and D030 (`SessionId` form)
 
 ### Repo state notes (for cold-start agent)
 
@@ -39,7 +39,7 @@ workflow at M15.
 
 ## Phase B — daemon + protocol (M5–M7)
 
-- [ ] [M5 — IPC protocol + daemon binary](docs/implementation/tasks/M05-ipc-protocol-daemon.md)
+- [x] [M5 — IPC protocol + daemon binary](docs/implementation/tasks/M05-ipc-protocol-daemon.md) — completed 2026-07-30. The binary is now `lazydap`. New crates `lazydap-protocol` (envelope + codec) and `lazydap-config` (paths, project-root detection); the daemon serves a Unix socket, auto-spawns, owns one session (D007), and runs a per-session read pump that resolves M3's cancellation-safety debt. Subcommands: `launch`, `status`, `disconnect`, `shutdown`, `daemon`. Boundary check wired into CI.
 - [ ] [M6 — CLI subcommands talk to daemon](docs/implementation/tasks/M06-cli-subcommands.md)
 - [ ] [M7 — Skill + agent verification](docs/implementation/tasks/M07-skill-agent-verification.md)
 

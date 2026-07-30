@@ -251,36 +251,99 @@ We ship those two. We don't ship AI features in core. (See [`12-ai-future.md`](1
 
 ---
 
+## D024 — Project root detection walks one marker tier at a time (resolves O01)
+
+**Status:** decided (2026-07-30, with M5).
+
+**Why:** D010 keys one daemon per project, so "which project am I in?" has to have exactly one answer. The order is `.lazydap/`, then `.git/`, then a language manifest (`Cargo.toml`, `package.json`, `pyproject.toml`), then the working directory.
+
+The load-bearing detail is that each tier is searched **all the way up before the next one is tried**, rather than taking the first marker of any kind found in the nearest directory. That is what makes `.lazydap/` usable as a deliberate override: in a monorepo or a submodule, a `.lazydap/` further up beats a `.git/` right here. Nesting between markers of the *same* tier resolves to the nearest, which is what people expect of nested repositories.
+
+**Implementation:** `crates/config/src/paths.rs`. `LAZYDAP_INSTANCE` and `--instance` both override the whole business.
+
+**Alternatives considered:** first-marker-wins per directory (makes `.lazydap/` useless as an override — a nearer `.git/` always shadows it); `.git/` only (breaks non-git projects and every worktree).
+
+---
+
+## D025 — `lazydap doctor` only ever writes to stdout (resolves O02)
+
+**Status:** decided (2026-07-30). **Lands at M6**, recorded now because it was answered alongside O01/O03/O04.
+
+**Why:** Diagnostics are for reading and for piping, not for committing. A command that drops a file into the project is a command that eventually gets that file reviewed, stale, and arguing with reality. `lazydap doctor --format json > report.json` covers every case where somebody genuinely wants a file, and puts them in charge of where it goes.
+
+---
+
+## D026 — Adapter discovery: config, then managed directory, then PATH (resolves O03)
+
+**Status:** decided (2026-07-30). **PATH lookup implemented at M5**; the earlier tiers land with the config loader (M15) and the second adapter (M18).
+
+**Why:** Option (d) from O03, matching mxr. Priority order:
+
+1. Per-project or global config — `[adapter.codelldb] command = "/path/to/codelldb"`. Explicit beats implicit, and pinning a specific build is the whole reason someone reaches for this.
+2. A lazydap-managed directory (`{data_dir}/adapters/codelldb`), for adapters lazydap installed itself.
+3. `PATH`.
+
+**What M5 ships:** step 3 only, in `crates/daemon/src/adapter/mod.rs::discover`. The other two tiers need config loading that does not exist yet; adding empty lookups now would be dead code dressed up as policy. The failure carries `ErrorCode::AdapterNotFound` and lists the directories it searched, so the message stays useful when the earlier tiers arrive.
+
+---
+
+## D027 — `lazydap.skill` ships as a sibling ZIP (resolves O04)
+
+**Status:** decided (2026-07-30). **Lands at M7.**
+
+**Why:** Same as mxr (D009), for the same reason: the author's agent tooling already understands that shape. A ZIP next to the binary can be updated without rebuilding, inspected without extracting, and versioned in the repo. Embedding it in the binary would mean a recompile to fix a typo in a doc; auto-extracting on first run would mean writing to the user's disk uninvited.
+
+---
+
+## D028 — IPC framing uses `tokio_util`'s `LengthDelimitedCodec`
+
+**Status:** decided (2026-07-30, with M5).
+
+**Why:** D004 settled the wire format — a 4-byte big-endian length then that many bytes of JSON. This decides who implements it: `tokio_util::codec::LengthDelimitedCodec` wrapped in a serde_json encoder/decoder pair (`crates/protocol/src/codec.rs`), which is the proven shape from mxr's `crates/protocol/src/codec.rs`.
+
+Hand-rolling `read_exact` on a 4-byte header is about fifteen lines and gets the easy cases right. It gets the hard ones wrong: partial reads, a frame split across two `read` calls, and — the expensive one — an attacker-or-bug-supplied length prefix that makes the daemon allocate gigabytes. `LengthDelimitedCodec` has a `max_frame_length` (16 MiB here) and correct partial-frame handling for free.
+
+**Consequences:** `tokio-util` and `bytes` join the dependency budget. Malformed JSON surfaces as `io::ErrorKind::InvalidData` so the daemon can answer `BadRequest` before hanging up, rather than dropping the connection silently.
+
+**Note:** the connection wrapper (`IpcConnection`) drives the codec by hand instead of using `tokio_util::codec::Framed`, because `Framed` needs the `futures` `SinkExt`/`StreamExt` traits and a whole dependency for two method calls is a poor trade.
+
+---
+
+## D029 — The adapter seam is a module boundary, not a `DebugAdapter` trait (yet)
+
+**Status:** decided (2026-07-30, with M5). **Revisit at M18.**
+
+**Why:** `ARCHITECTURE.md` requires that DAP details never leak past the adapter layer, and names a `DebugAdapter` trait as the mechanism. M5 implements the requirement without the trait.
+
+v0.1 ships one adapter (D013). A trait with a single implementor does not abstract anything — it adds `async_trait` or boxed futures, a `dyn` indirection, and an interface designed against exactly one example, which is the reliable way to design the wrong one. Worse, it *looks* like the seam while the real seam goes unchecked.
+
+**What we do instead:** `crates/daemon/src/adapter/` is the only module in the daemon that may name a `lazydap_dap` type. Everything outside it — `state`, `server`, `handlers`, `commands` — works in `lazydap_core` and `lazydap_protocol` vocabulary. The boundary is one `grep` away from being checkable, and the module already exposes the shape a trait would need: `launch`, a handle with `disconnect`/`kill`, and a pump that translates DAP events into `lazydap_protocol::Event`.
+
+**Trigger to revisit:** M18, when debugpy gives us a second implementor and therefore a real basis for the interface. At that point this module becomes the trait plus `adapter-codelldb`, and `crates/adapter-*` appears in the boundary script.
+
+**Alternatives considered:** the trait in `lazydap-core` now (core would have to name adapter concepts it otherwise knows nothing about, and the trait would be written blind); no seam at all (DAP types spread through the daemon, which is the anti-pattern that paid for this rule).
+
+---
+
+## D030 — `SessionId` is a UUID v4
+
+**Status:** decided (2026-07-30, with M5).
+
+**Why:** The blueprint's examples show ULID-shaped ids (`01ABC...`), which are attractive because they sort by creation time. Nothing in lazydap sorts session ids: there is one live session (D007), and the daemon holds them in a map. Sortability would buy nothing, and the `ulid` crate would be a dependency bought for aesthetics.
+
+`uuid` is already in the budget, universally understood, and parses from a string on every platform a client might be written for.
+
+**Consequences:** ids look like `02ef9b0b-7288-4f0b-89b5-de539f8d2e29` rather than `01ABC...`. `SessionId` is a newtype in `lazydap-core` serialising transparently as a string, so the wire format does not care what is inside it.
+
+---
+
 ## Open decisions
 
 These need user input.
 
-### O01 — Default project root detection priority
+*(O01–O04 were answered on 2026-07-30 and became D024, D025, D026 and D027.)*
 
-**Question:** When detecting project root, what's the order? `.lazydap/` → `.git/` → language manifests (`Cargo.toml`, `package.json`, ...) → cwd?
-
-**Why it matters:** If two `.git/` repos are nested (worktrees, submodules, monorepo), which wins?
-
-### O02 — Should `lazydap doctor` write to the project's `.lazydap/`?
-
-**Question:** Does the doctor command write diagnostics to a file the user might commit? Or always print to stdout?
-
-### O03 — Adapter binary discovery
-
-**Question:** How does lazydap find `codelldb`?
-
-- (a) `which codelldb` — relies on PATH
-- (b) Mason-style: `~/.local/share/lazydap/adapters/codelldb`
-- (c) Per-project config: `[adapter.codelldb] command = "/path/to/codelldb"`
-- (d) All of the above with priority order
-
-mxr-style answer: (d) with priority — config > Mason-managed > PATH.
-
-### O04 — `lazydap.skill` distribution
-
-**Question:** Where does the `.skill` ZIP live? Bundled in the binary at compile time? Distributed alongside? Auto-extracted on first run?
-
-mxr does it as a sibling ZIP in the repo root. Probably the same.
+None outstanding. One question is parked for M15: whether to publish crates to crates.io. Default is no — `publish = false` stays, matching mxr.
 
 ---
 

@@ -1,0 +1,144 @@
+use crate::error::{CliError, Result};
+use lazydap_protocol::{
+    ErrorCode, IpcConnection, IpcError, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request,
+    Response,
+};
+use std::io;
+use std::path::Path;
+use std::time::Duration;
+use tokio::net::UnixStream;
+
+/// How long to wait for one response.
+///
+/// Generous because it also covers `launch`, which waits on an adapter that is
+/// starting a process. The daemon has its own, shorter, adapter timeouts, so
+/// hitting this one means the daemon itself is wedged.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A connection to the daemon, with the version handshake already done.
+pub struct DaemonClient {
+    connection: IpcConnection<UnixStream>,
+    next_id: u64,
+    /// What the daemon said its version was, kept for error messages.
+    pub daemon_version: u32,
+    pub instance: String,
+}
+
+impl DaemonClient {
+    /// Connect and exchange versions.
+    ///
+    /// The first thing on any connection is `Ping`, so a client never sends a
+    /// real request to a daemon it cannot understand.
+    pub async fn connect(socket: &Path) -> Result<Self> {
+        let stream = UnixStream::connect(socket).await.map_err(|source| {
+            CliError::unreachable(anyhow::anyhow!(
+                "cannot connect to the daemon socket at {}: {source}",
+                socket.display(),
+            ))
+        })?;
+
+        let mut client = Self {
+            connection: IpcConnection::new(stream),
+            next_id: 1,
+            daemon_version: 0,
+            instance: String::new(),
+        };
+
+        match client.request(Request::Ping).await? {
+            Response::Pong {
+                version, instance, ..
+            } => {
+                client.daemon_version = version;
+                client.instance = instance;
+            }
+            other => {
+                return Err(CliError::general(anyhow::anyhow!(
+                    "the daemon answered a ping with {other:?}"
+                )));
+            }
+        }
+
+        if client.daemon_version != LAZYDAP_PROTOCOL_VERSION {
+            return Err(version_mismatch(client.daemon_version));
+        }
+        Ok(client)
+    }
+
+    /// Send one request and wait for the response with the same id.
+    pub async fn request(&mut self, request: Request) -> Result<Response> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        self.connection
+            .send(IpcMessage::request(id, request))
+            .await?;
+
+        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            let message = tokio::time::timeout_at(deadline, self.connection.recv())
+                .await
+                .map_err(|_| {
+                    CliError::general(anyhow::anyhow!(
+                        "the daemon did not answer within {}s",
+                        REQUEST_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|source| classify_read_error(source, id))?
+                .ok_or_else(|| {
+                    CliError::unreachable(anyhow::anyhow!(
+                        "the daemon closed the connection before answering"
+                    ))
+                })?;
+
+            // Events are unsolicited and carry id 0. M5 never subscribes, but
+            // a daemon that starts sending them must not derail a reply.
+            if message.id != id {
+                tracing::debug!(
+                    target: "daemon.ipc",
+                    frame_id = message.id,
+                    awaiting = id,
+                    "ignoring an unsolicited frame",
+                );
+                continue;
+            }
+
+            return match message.payload {
+                IpcPayload::Response(response) => Ok(response),
+                IpcPayload::Error(error) => Err(error.into()),
+                other => Err(CliError::general(anyhow::anyhow!(
+                    "expected a response, got {other:?}"
+                ))),
+            };
+        }
+    }
+}
+
+/// The client and the daemon were built against different protocols.
+pub fn version_mismatch(daemon_version: u32) -> CliError {
+    IpcError::new(
+        ErrorCode::VersionMismatch,
+        format!(
+            "this lazydap speaks protocol v{LAZYDAP_PROTOCOL_VERSION}, \
+             the running daemon speaks v{daemon_version}"
+        ),
+    )
+    .with_details(serde_json::json!({
+        "client_version": LAZYDAP_PROTOCOL_VERSION,
+        "daemon_version": daemon_version,
+    }))
+    .into()
+}
+
+/// A daemon from another build can fail to decode our frame and hang up. Say
+/// so, rather than reporting a bare I/O error.
+fn classify_read_error(source: io::Error, id: u64) -> CliError {
+    match source.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
+            CliError::unreachable(anyhow::anyhow!(
+                "the daemon sent a frame this build cannot read while awaiting response {id} \
+                 ({source}). Run `lazydap shutdown` and try again."
+            ))
+        }
+        _ => CliError::general(source),
+    }
+}

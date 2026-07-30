@@ -8,14 +8,30 @@ repository.workspace = true
 homepage.workspace = true
 publish = false
 
+# The product is one binary called `lazydap` (D002). `main.rs` is a thin
+# entrypoint; everything it calls lives in the library so integration tests can
+# reach it without going through a subprocess.
+[lib]
+name = "lazydap_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lazydap"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+lazydap-config = { path = "../config" }
+lazydap-core = { path = "../core" }
 lazydap-dap = { path = "../dap" }
+lazydap-protocol = { path = "../protocol" }
