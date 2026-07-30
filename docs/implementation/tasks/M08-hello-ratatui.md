@@ -161,3 +161,21 @@ echo "" | lazydap         # should NOT open TUI; should print help or behave gra
 - **No layout panes.** Just one centered text. M9 adds source rendering.
 - **`alternate_screen` and `raw_mode`** must be cleaned up on panic too — wrap the run loop in a panic guard if you're paranoid. Optional for M8.
 - **Don't try to make it pretty yet.** M9–M11 are about correctness. Phase D adds polish.
+
+## Completed 2026-07-30
+
+New crate `lazydap-tui`: a render loop, a bordered greeting, `q`/`Esc` to leave. `cargo run --bin lazydap` opens it on a terminal, `echo "" | lazydap` prints help.
+
+Deviations from the sketch above, all deliberate:
+
+- **The tty check is stdin *and* stdout, not stdout alone.** `echo "" | lazydap` leaves stdout on the terminal and only stdin on a pipe — and stdin is the half the TUI needs, because that is where keys come from. Checking stdout alone would have taken the terminal over for a shell pipeline and then sat there unable to read the keypress that quits. `std::io::IsTerminal`, not the `atty` crate: it has been in std since 1.70 and `atty` is unmaintained.
+- **`ratatui::try_init` / `ratatui::restore` rather than hand-rolled setup.** They do what the sketch does and also install a panic hook that restores the terminal before unwinding, which the notes list as optional and which is not optional in a debugger.
+- **No mouse capture.** `EnableMouseCapture` breaks the terminal's own text selection, and nothing reads mouse events until post-v0.1.
+- **ratatui 0.30.2, crossterm through `ratatui::crossterm`.** Two crossterm versions in one build compile and then hand the backend `KeyEvent`s of a type the widgets do not accept; the re-export cannot drift.
+- **A `tui` subcommand as well as the bare path**, per `03-phase-C.md`. It regenerates `skill/references/commands.md`, which is built from the clap tree.
+
+`crates/daemon` now depends on `crates/tui`, which `ARCHITECTURE.md` forbade. The rule was wrong, not the dependency — see **D037**: the daemon crate *is* the `lazydap` binary, so it is what starts the TUI. The direction that matters (`tui` → `daemon`) is still forbidden, and `scripts/check_architecture_boundaries.sh` now has a row for each.
+
+**Verified** by driving the real binary in a sized pseudo-terminal: it enters the alternate screen, draws the box, and leaves cleanly on `q` with exit 0.
+
+**Follow-up discovered:** none.

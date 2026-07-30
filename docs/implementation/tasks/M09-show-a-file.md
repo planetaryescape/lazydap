@@ -177,3 +177,19 @@ cargo run --bin lazydap
 - **No multi-pane layout.** That's M12 (stack pane). For now full-screen source.
 - **State is mutated in `run_loop`.** That's the anti-pattern Phase C.M10 will fix. Don't worry about it now — refactor in M10.
 - **`SourceView::open` reads the entire file.** Fine for source files (typically <10KB). For 100MB binaries, optimise later.
+
+## Completed 2026-07-30
+
+`crates/tui/src/panes/source.rs` renders the file with line numbers, a highlighted cursor line, and the path in the title. `j`/`k`/`Down`/`Up`, `<C-d>`/`<C-u>`, `gg` and `G` all work; the content scrolls only when the cursor would otherwise leave the screen.
+
+Deviations from the sketch above:
+
+- **Not wrapped.** The sketch passes `Wrap { trim: false }`. A wrapped long line takes two rows and pushes everything below it down by one, so the row a line number is painted on stops matching the line it names — and the cursor highlight drifts off its line. `Paragraph` clips by default, which is what a source view wants.
+- **`<C-d>` is half the visible height**, not a hardcoded ten lines, which is what half-page means in the editor these keys come from. The pane learns its height during a draw; before the first one it falls back to one line so the key still does something.
+- **Fields are private, movement goes through methods** (`go_to_top`, `go_to_bottom`, `move_cursor`) rather than the sketch's `s.cursor_line = 1; s.scroll_offset = 0`. Two invariants are worth protecting — the cursor is always on a line that exists, and the scroll offset always keeps it visible — and both would be one careless assignment away otherwise. (M11 later made the two *read-only* fields crate-visible; a read cannot break an invariant.)
+- **`gg` is two keystrokes**, as the success criteria say and unlike the sketch's single `g`. M10 moves the pending prefix into the state, where it belongs.
+- **A missing file is not fatal.** The pane says so and the TUI still runs.
+
+**Verified** in a pseudo-terminal against the real `examples/c-hello/main.c`: startup at line 1, `j`×4 → line 5, `<C-d>` → half a page, `G` → line 21 with the file scrolled, `gg` → back to line 1.
+
+**Follow-up discovered:** no syntax highlighting, as planned. Tabs are rendered as-is, so a file indented with tabs will not line up with its gutter — worth a look when a non-fixture file is first opened.

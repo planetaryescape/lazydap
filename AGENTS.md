@@ -265,17 +265,19 @@ If your task is "fix a bug in `lazydap continue --wait`":
 **Pre-alpha, but the CLI above is now real.** The agent loop documented in this file works
 end to end against a C binary. What exists today:
 
-- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, six crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-store`, `lazydap-daemon`.
+- **Cargo workspace**, edition 2024, `rust-version = "1.85"`, seven crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-store`, `lazydap-tui`, `lazydap-daemon`.
 - **One binary: `lazydap`** (built from `crates/daemon`). `cargo install --path crates/daemon` installs it.
-- **Working subcommands:** `launch`, `status`, `disconnect`, `shutdown`, `daemon`, `continue`, `step` (alias `next`), `step-in`, `step-out`, `pause`, `break` (add/list/remove/toggle), `stack`, `scopes`, `variables`, `eval`, `threads`, `output`, `doctor`, `version`, `logs`, `completions`. `--wait` and `--timeout` on everything that moves the program.
+- **Working subcommands:** `launch`, `status`, `disconnect`, `shutdown`, `daemon`, `tui`, `continue`, `step` (alias `next`), `step-in`, `step-out`, `pause`, `break` (add/list/remove/toggle), `stack`, `scopes`, `variables`, `eval`, `threads`, `output`, `doctor`, `version`, `logs`, `completions`. `--wait` and `--timeout` on everything that moves the program.
+- **A TUI.** Bare `lazydap` on a terminal opens it (`lazydap tui` is the explicit spelling); anywhere else — a pipe, a CI job — it prints help instead. It is a **client**, with no path to the daemon's internals: it connects over the same socket, subscribes to events, and F5/`c`, F10/`n`, F11 and shift-F11 send the requests behind `continue`, `step`, `step-in` and `step-out`. `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` move the view; `q` leaves without ending the session.
 - **All five formats:** `table`, `json`, `jsonl`, `csv`, `ids`, auto-detected from the tty.
 - **A real daemon:** per-project instance, auto-spawns on first use, Unix socket with length-delimited JSON, one debug session at a time (D007), a per-session read pump, and events buffered per session.
 - **Persistent breakpoints** in `.lazydap/state.toml` (D006), applied during each launch's configuration phase and surviving both the session and the daemon.
 - **The agent skill**, `lazydap.skill` at the repository root, built by `scripts/build-skill.sh` from `skill/`.
 - **Two adapter normalisations you should know about:** `--stop-on-entry` reports `reason: "entry"` with the adapter's `"exception"` kept in `raw_reason` (D033), and `eval` defaults to the `watch` context because `repl` runs an LLDB *command* (D034). Both are in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md).
-- **Not yet:** the TUI (M8–M11), watches, `attach`, `until`, `source`, launch configs, `config`, `restart`, and `Subscribe`/live event streaming (M11).
+- **`Subscribe` and live event streaming.** A subscribed connection is pushed event frames as they happen, filtered to the kinds it asked for, interleaved with its own replies. It is answered with a `Response::Status` snapshot taken at the moment the stream starts, and replays nothing (D038).
+- **Not yet:** stack/scopes/breakpoint panes in the TUI (M12–M14), TUI reconnection after a daemon dies, watches, `attach`, `until`, `source`, launch configs, `config`, `restart`.
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
-- **Milestones complete:** workspace setup, M0–M7. Phase B is done. **Next up: M8 — Hello ratatui.**
+- **Milestones complete:** workspace setup, M0–M11. Phases A, B and C are done. **Next up: M12 — Stack pane.**
 
 Note the protocol is at **v2**. A daemon left running from an older build is refused with
 `VersionMismatch`; `lazydap shutdown` clears it and the next command starts a current one.
