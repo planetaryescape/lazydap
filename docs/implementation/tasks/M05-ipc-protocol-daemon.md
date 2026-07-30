@@ -252,9 +252,25 @@ pgrep -f "lazydap daemon" || echo "(daemon stopped — for our purposes, OK)"
 - **PID and log files are instance-scoped** (`lazydap-{instance}.pid`, not `daemon.pid`), so two projects' daemons cannot overwrite each other's.
 - **D015 fixed on the way past:** the old `main.rs` used `println!` with no subscriber. Tracing now initialises before anything else — `info` for the daemon, `warn` for subcommands so stdout stays a clean JSON pipeline.
 
+### Review fixes (2026-07-30, post-implementation review)
+
+Adjudicated from an orchestrator + external review. Three were real correctness bugs:
+
+- **A debuggee that finished during its own launch lost its exit code.** The handshake loop handled `terminated` but let `exited` fall through, and the session was never properly ended — so the pump's later EOF could rewrite the ending as `adapter_died`. The handshake now captures `exitCode`, and the promotion path ends the session with the right `EndReason` *before* the pump starts.
+- **`disconnect` freed the session slot before tearing the adapter down.** Teardown can take seconds (a `disconnect` the adapter ignores waits out its timeout), and in that window a concurrent `launch` passed the D007 check and spawned a second adapter, with the first session being torn down outside daemon state. The slot now stays occupied until the adapter is actually gone.
+- **The runtime-directory ownership check followed symlinks.** `/tmp` is world-writable, so anyone could pre-create `/tmp/lazydap-$UID` as a symlink into a directory that passes the uid/mode check, then retarget it — putting lazydap's control socket somewhere they choose, and a fake daemon on that socket accepts `launch`. Now `lstat`, with symlinks and non-directories refused outright.
+- **The version-upgrade path was dead on arrival.** The server rejected every mismatched non-`Ping` request, including the `Shutdown` that the upgrade path depends on, so an old daemon survived and auto-spawn timed out; `lazydap shutdown` separately treated a mismatch as "no daemon" and exited 0 without stopping anything. `Shutdown` is now version-exempt (it is the escape hatch) and the shutdown command sends it blind on mismatch.
+- **D021 was only half-enforced:** the writer lock was released after the send, so two execution requests could be in flight at once. Execution requests now hold a per-session permit across send *and* response-wait. M6 inherits the mechanism.
+- **A cleared stale spawn lock was not retried**, so that client waited the full deadline for a daemon nobody was starting and only succeeded on a retry.
+- `--cwd` is canonicalised client-side (a relative one was resolved against the daemon's cwd); failing to open the daemon log is exit 3, not 1; the data directory is 0700 and the log 0600.
+
 ### Follow-ups discovered
 
 - **An ended session still occupies the slot.** After the debuggee exits, `launch` refuses until `disconnect` runs. That matches the lifecycle doc but is a papercut; M6 should decide whether a dead session is auto-reaped.
+- **A late `exited` cannot correct an already-emitted `SessionEnded`.** DAP does not guarantee `exited` arrives before `terminated`. `status` stays correct either way — the exit code is recorded unconditionally — but **M6's `--wait` must grace-window a late `exited`** before it emits its final blob, or a program's exit code can be missing from the one JSON object the agent reads.
+- **`--stop-on-entry` reports `reason: "exception"`, not `"entry"`.** codelldb implements entry-stop with `SIGSTOP` and LLDB classifies that as an exception-class stop; see [quirk 6](../../reference/codelldb-quirks.md#6---stop-on-entry-reports-reason-exception-not-entry-on-macos) for the captured event and three normalisation options. **Whether to normalise is an M6 decision** and belongs with the `--wait` design, since that is where agents read stop reasons.
+- **Usage errors print human text on stderr even under `--format json`.** clap owns that output and the exit code stays canonical (2), but the JSON error shape for usage errors is an M6 CLI-surface concern. *(Deferred from the M5 review.)*
+- **Non-negotiable #4 (`--dry-run`) is not covered for `launch`/`disconnect`/`shutdown`.** Lands with M6's full CLI surface, so the selection logic is shared with the mutating path from the start. *(Deferred from the M5 review.)*
 - **No `Subscribe` means no live event delivery.** Events are buffered per session (1000, drop-oldest) and broadcast, but nothing consumes the broadcast until M11.
 - **Requests on one connection are handled sequentially.** Fine for a CLI that sends one and waits; M6's `--wait` should confirm a long request cannot starve a `status` on the same connection.
 - **`env` is always empty in `LaunchRequest`.** The protocol carries it, the CLI has no `--env` flag yet.

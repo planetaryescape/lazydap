@@ -95,8 +95,13 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
             });
         }
         // `exited` carries the debuggee's status; `terminated` is the session
-        // ending. They arrive in that order, so recording the code first means
-        // the ending can report it.
+        // ending. DAP does *not* guarantee that order — adapters are free to
+        // send `terminated` first, or `exited` late — so this arm records the
+        // code unconditionally, including after the session has already ended.
+        // `status` therefore reports the right exit code either way; what a
+        // late `exited` cannot do is correct an already-emitted
+        // `SessionEnded`, which M6's `--wait` has to handle with a short grace
+        // window before it emits its final blob.
         "exited" => session.set_exit_code(body["exitCode"].as_i64().map(|code| code as i32)),
         "terminated" => {
             let reason = match session.exit_code() {

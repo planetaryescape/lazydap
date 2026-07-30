@@ -13,6 +13,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 3 | [Speaks DAP only over TCP, not stdio](#3-tcp-only-not-stdio) | M0 milestone doc | codelldb 1.x |
 | 4 | [`--version` flag is not recognised; use `--help`](#4---version-not-supported) | CONTRIBUTING.md authoring | codelldb 1.x |
 | 5 | [Hangs at `_dyld_start` after a macOS update](#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) | Ship-mode Wave 0 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 6 | [`--stop-on-entry` stops with reason `exception`, not `entry`](#6---stop-on-entry-reports-reason-exception-not-entry-on-macos) | M5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -252,6 +253,74 @@ Verify end-to-end with `cargo run --example m2_initialize`.
 
 - Quirk 1 — the wrapper-script install this fix rebuilds
 - [`docs/issues/0001-codelldb-symlink-install-broken.md`](../issues/0001-codelldb-symlink-install-broken.md) — the adjacent install footgun
+
+---
+
+## 6. `--stop-on-entry` reports reason `exception`, not `entry`, on macOS
+
+### Symptom
+
+Launching with `stopOnEntry: true` does stop the debuggee at its entry point, exactly as
+asked. But the `stopped` event that reports it says the reason was an **exception**:
+
+```json
+{"seq":12,"type":"event","event":"stopped",
+ "body":{"reason":"exception","description":"signal SIGSTOP","threadId":26187878,
+         "allThreadsStopped":true}}
+```
+
+So `lazydap launch --stop-on-entry --format json` returns `"reason": "exception"` where a
+reader of the DAP specification would expect `"reason": "entry"`. The pause itself is
+correct — the program is stopped before `main` — only the label is surprising.
+
+First seen during M5 in a sandboxed shell, where it looked like the sandbox had trapped the
+debuggee. It is not sandbox-related: the same event was captured unsandboxed on a normal
+terminal.
+
+### Root cause
+
+codelldb implements entry-stop by letting the process start and immediately sending it
+`SIGSTOP`, rather than by using a dedicated entry breakpoint. LLDB classifies a stop caused
+by a signal as an exception-class stop, and codelldb reports the stop reason it gets from
+LLDB. The `description` field is the giveaway: `"signal SIGSTOP"`.
+
+DAP's `entry` reason is therefore not used by this adapter on macOS at all.
+
+### Implication for lazydap
+
+lazydap passes the adapter's reason through unchanged, which is why `PauseReason`
+serialises as a bare string and keeps unmodelled reasons verbatim — a reason we did not
+anticipate reaches the client as the reason the adapter gave, rather than being coerced into
+something tidier and wrong.
+
+**Whether to normalise this is an M6 decision**, and it belongs with the `--wait` design
+because `--wait`'s response is where agents actually read stop reasons. The options:
+
+1. Leave it. Honest, and `description` carries the detail; but every agent has to learn that
+   "exception" sometimes means "entry".
+2. Map it in the adapter module: a `stopped` with reason `exception` and description
+   `signal SIGSTOP`, arriving while a `stop_on_entry` launch is still settling, becomes
+   `PauseReason::Entry`. Narrow enough to be safe, and puts adapter-specific knowledge in
+   the adapter seam where it belongs. Costs a lie-by-omission unless the raw reason is kept
+   alongside.
+3. Report both — a normalised `reason` plus the adapter's own `raw_reason`.
+
+Option 3 fits "JSON output is a product feature" best, at the cost of one more field.
+
+### Verification
+
+```bash
+lazydap launch ./examples/c-hello/build/hello --stop-on-entry --format json
+# "state": "paused", "reason": "exception"
+```
+
+Raw event capture: set `LAZYDAP_LOG=dap.recv.event=debug` and read the daemon log at
+`{data_dir}/lazydap-{instance}.log`.
+
+### Cross-references
+
+- Milestone: [`docs/implementation/tasks/M05-ipc-protocol-daemon.md`](../implementation/tasks/M05-ipc-protocol-daemon.md) — follow-ups
+- [`docs/blueprint/10-async-to-sync.md`](../blueprint/10-async-to-sync.md) — where the `--wait` reason semantics get decided
 
 ---
 
