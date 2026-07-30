@@ -295,6 +295,15 @@ plus 59), verified live against real codelldb.
 - **D048** — an unbound breakpoint is re-sent under the path the adapter names, once, only when
   nothing in that file bound and only when the suggestion resolves to the same file.
 
+### Review round — 2026-07-30, six findings, all fixed
+
+1. **The adapter pin was resolved in the wrong process.** Discovery ran inside the daemon, under the daemon's environment, so `LAZYDAP_CONFIG_PATH=... lazydap launch` read the pin client-side and then the long-lived daemon resolved the adapter again against its own default path and fell through to `PATH`. The client now resolves it and sends it in `LaunchRequest` (**D050**), and the **protocol goes to v4** — an optional field would be *ignored* by a stale same-version daemon, which is the bug wearing a compatibility hat.
+2. **cppdbg configurations lost their environment.** cppdbg spells it `environment: [{name, value}]` and its entry stop `stopAtEntry`; both were ignored while the configuration was still declared runnable, so a program needing `LD_LIBRARY_PATH` launched without it and nothing said so. Both spellings are now mapped, and the warning names what is still ignored (`MIMode`, `miDebuggerPath`, `setupCommands`).
+3. **The documented config path was wrong on macOS.** `dirs::config_dir()` is `~/Library/Application Support`; the docs said `~/.config`. Now searched in order — `LAZYDAP_CONFIG_PATH`, `$XDG_CONFIG_HOME`, `~/.config`, then the platform directory — first that *exists* winning (**D049**). README, CHANGELOG and blueprint 08 all say the same thing.
+4. **`args` as a shell string was dropped.** codelldb accepts one; such configurations were discarded as unreadable. A small quote-aware splitter handles it, and an unterminated quote makes the configuration *unrunnable with that reason* rather than silently mis-split.
+5. **A config typo bricked the recovery commands.** Every command parsed the config before dispatch, so a misplaced bracket took `status`, `shutdown`, `disconnect` and `logs` down with it — the commands you reach for while a debuggee is running. Only launch-class commands now require it (`Command::needs_config`); the rest warn and carry on with the defaults, and `doctor` reports it as a failed `config.file` check with the path and the parse error.
+6. **The JSONC stripper deleted comments instead of blanking them.** `tr/*x*/ue` became `true` — a document VS Code rejects, quietly accepted. Comments now become the whitespace they occupied, character for character, which also keeps parse errors pointing at the right column. An unterminated comment or string is refused rather than accepted.
+
 ### Still to do at tag time (not code)
 
 1. Answer the crates.io question and record it as a D-entry. `publish = false` on all seven crates

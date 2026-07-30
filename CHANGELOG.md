@@ -4,7 +4,7 @@ All notable changes to lazydap are recorded here.
 
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The **lazydap protocol** is versioned separately from the binary. It is at **v3**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+The **lazydap protocol** is versioned separately from the binary. It is at **v4**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
 
 ## [0.1.0] — 2026-07-30
 
@@ -26,7 +26,9 @@ The first release. A debugger you drive from the shell, one command at a time, w
 
 **Launch configurations, including the ones your repository already has.** `lazydap launches list` shows every named way to start this project, from `.lazydap/state.toml` and from `.vscode/launch.json`, which lazydap reads and never writes. VS Code's dialect is understood as written — `//` and `/* */` comments, trailing commas — and `${workspaceFolder}`, `${workspaceFolderBasename}`, `${userHome}` and `${env:VAR}` are expanded. A variable nothing can expand is **left in the string and reported**, not quietly replaced with nothing, and the configuration is marked unrunnable rather than launched at a path that is missing a piece. Configurations for adapters lazydap does not ship are listed too, with the reason they cannot run. `lazydap launches run "Debug binary"` starts one, taking its program, arguments, working directory and environment from the file.
 
-**A config file.** `~/.config/lazydap/config.toml`, or wherever `LAZYDAP_CONFIG_PATH` says. Two settings are read: `[adapter.codelldb] command` pins the adapter binary — the first tier of adapter discovery, ahead of `PATH`, and a pinned path that is not there is an error rather than a quiet fall-through to a different build — and `[general] wait_timeout_seconds` sets your own default for `--wait`, under `--timeout` and `LAZYDAP_TIMEOUT`. No file is needed; without one, lazydap runs on its defaults and writes nothing.
+Both dialects are read where they differ: Microsoft's `cppdbg` spells the environment `environment: [{name, value}]` and its entry stop `stopAtEntry`, and both are honoured — a configuration that sets `LD_LIBRARY_PATH` is launched with it rather than silently without. `args` is accepted as a list or as one shell-style string, quotes and all; a string with an unterminated quote makes the configuration unrunnable with that as the reason, rather than being guessed at.
+
+**A config file.** `~/.config/lazydap/config.toml` — or `$XDG_CONFIG_HOME/lazydap/config.toml`, or wherever `LAZYDAP_CONFIG_PATH` says; the first that exists wins, and the platform's own config directory (`~/Library/Application Support` on macOS) is searched last so a file written there still works. Two settings are read: `[adapter.codelldb] command` pins the adapter binary — the first tier of adapter discovery, ahead of `PATH`, and a pinned path that is not there is an error rather than a quiet fall-through to a different build — and `[general] wait_timeout_seconds` sets your own default for `--wait`, under `--timeout` and `LAZYDAP_TIMEOUT`. No file is needed; without one, lazydap runs on its defaults and writes nothing.
 
 **A debuggee that dies with its debugger.** If the adapter is killed without stopping the program first, lazydap reaps the process it launched — after checking the pid still names that program, because a recycled pid belongs to a stranger.
 

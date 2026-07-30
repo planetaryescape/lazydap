@@ -98,16 +98,59 @@ impl Config {
 /// Where the config file lives: the environment override, else the platform's
 /// config directory.
 pub fn config_path() -> Result<PathBuf> {
-    match env_path() {
-        Some(path) => Ok(path),
-        None => default_config_path(),
+    if let Some(path) = env_path() {
+        return Ok(path);
     }
+    let candidates = search_paths();
+    candidates
+        .iter()
+        .find(|path| path.exists())
+        .or_else(|| candidates.first())
+        .cloned()
+        .ok_or(ConfigError::NoConfigDirectory)
 }
 
-fn default_config_path() -> Result<PathBuf> {
-    dirs::config_dir()
+/// Every place a config file may live, in the order they are tried.
+///
+/// `~/.config/lazydap/config.toml` rather than whatever `dirs::config_dir()`
+/// says, because on macOS that is `~/Library/Application Support` — right for
+/// an application bundle, wrong for a command-line tool, and not what this
+/// project's own docs tell people to create. `ripgrep`, `git`, `starship` and
+/// the rest all read `~/.config`; a CLI that did not would be the odd one out
+/// on the one platform its author uses (D049).
+///
+/// The platform directory is still tried last, so a config already written
+/// there by an earlier build keeps working.
+fn search_paths() -> Vec<PathBuf> {
+    ordered_candidates(
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| !dir.as_os_str().is_empty()),
+        dirs::home_dir(),
+        dirs::config_dir(),
+    )
+}
+
+/// The ordering, with its inputs passed in so it can be tested without
+/// mutating the process environment (which edition 2024 makes `unsafe`, and
+/// this workspace forbids).
+///
+/// Deduplicated, order preserved: on Linux all three of these are usually the
+/// same directory, and reporting `~/.config/lazydap/config.toml` three times
+/// would make `doctor` look broken.
+fn ordered_candidates(
+    xdg: Option<PathBuf>,
+    home: Option<PathBuf>,
+    platform: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = [xdg, home.map(|home| home.join(".config")), platform]
+        .into_iter()
+        .flatten()
         .map(|dir| dir.join("lazydap").join("config.toml"))
-        .ok_or(ConfigError::NoConfigDirectory)
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    paths
 }
 
 /// Read the user's config, or the defaults if there is none.
@@ -122,11 +165,11 @@ pub fn load_config() -> Result<Config> {
         return load_config_from(&path);
     }
 
-    let path = default_config_path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(body) => parse(&path, &body),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(source) => Err(ConfigError::Read { path, source }),
+    // The first one that is actually there. A machine with none — which is
+    // most of them — runs on the defaults and is told nothing.
+    match search_paths().into_iter().find(|path| path.exists()) {
+        Some(path) => load_config_from(&path),
+        None => Ok(Config::default()),
     }
 }
 
@@ -264,6 +307,51 @@ mod tests {
         )
         .expect_err("that is not a number");
         assert!(matches!(error, ConfigError::Parse { .. }), "got: {error:?}");
+    }
+
+    #[test]
+    fn xdg_beats_dot_config_beats_the_platform_directory() {
+        // macOS is the case that matters: dirs::config_dir() is
+        // ~/Library/Application Support, and a CLI tool belongs in ~/.config.
+        let candidates = ordered_candidates(
+            Some(PathBuf::from("/xdg")),
+            Some(PathBuf::from("/home/someone")),
+            Some(PathBuf::from("/home/someone/Library/Application Support")),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/xdg/lazydap/config.toml"),
+                PathBuf::from("/home/someone/.config/lazydap/config.toml"),
+                PathBuf::from("/home/someone/Library/Application Support/lazydap/config.toml"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_same_directory_reached_three_ways_is_listed_once() {
+        // The usual Linux case. Three identical rows would make `doctor` look
+        // broken.
+        let candidates = ordered_candidates(
+            Some(PathBuf::from("/home/someone/.config")),
+            Some(PathBuf::from("/home/someone")),
+            Some(PathBuf::from("/home/someone/.config")),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from("/home/someone/.config/lazydap/config.toml")],
+        );
+    }
+
+    #[test]
+    fn a_machine_with_no_home_at_all_still_offers_the_platform_directory() {
+        let candidates = ordered_candidates(None, None, Some(PathBuf::from("/var/lib/config")));
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from("/var/lib/config/lazydap/config.toml")],
+        );
     }
 
     #[test]

@@ -67,6 +67,14 @@ pub async fn launch(
             )
         })?;
 
+    // Resolved here, against this process's config and `PATH`, for the same
+    // reason the program and the working directory are (D050). The daemon's
+    // environment is whatever it inherited whenever it started, so a
+    // `LAZYDAP_CONFIG_PATH` set for this command would mean nothing there.
+    // Failing now also beats failing after a daemon has been spawned.
+    let adapter_command = crate::adapter::discover_with(options.adapter, &instance.config)
+        .map_err(|error| CliError::from(error.into_ipc()))?;
+
     let mut client = ensure_daemon_running(instance).await?;
     let response = client
         .request(Request::Launch(LaunchRequest {
@@ -76,6 +84,7 @@ pub async fn launch(
             cwd,
             env: options.env,
             stop_on_entry: options.stop_on_entry,
+            adapter_command: Some(adapter_command),
         }))
         .await?;
 

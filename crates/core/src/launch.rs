@@ -45,6 +45,15 @@ pub struct LaunchConfig {
     /// configuration lazydap cannot honour into one that looks fine and starts
     /// the wrong thing.
     pub unresolved: Vec<String>,
+    /// A problem found while *reading* this configuration that makes it
+    /// unrunnable.
+    ///
+    /// Recorded at import rather than recomputed from the fields, because the
+    /// fields no longer show it: an argument string with an unterminated quote
+    /// leaves no arguments behind to look wrong. Listing the configuration
+    /// with the reason beats dropping it, which would have the caller hunting
+    /// for a configuration they can see in their editor.
+    pub blocked: Option<NotRunnable>,
 }
 
 /// Which file a configuration came from.
@@ -109,6 +118,8 @@ pub enum NotRunnable {
     NoProgram,
     /// Variables nothing could expand, so the path is not a path.
     UnresolvedVariables { variables: Vec<String> },
+    /// The configuration's arguments could not be read as a list.
+    BadArguments { problem: String },
 }
 
 impl std::fmt::Display for NotRunnable {
@@ -127,6 +138,9 @@ impl std::fmt::Display for NotRunnable {
                 "nothing could expand {}, so its paths are not paths",
                 variables.join(", "),
             ),
+            Self::BadArguments { problem } => {
+                write!(f, "its arguments could not be read: {problem}")
+            }
         }
     }
 }
@@ -142,6 +156,11 @@ impl LaunchConfig {
     /// the branch it then writes for the impossible case is a branch nobody
     /// can test.
     pub fn runnable_program(&self) -> Result<&std::path::Path, NotRunnable> {
+        // Whatever the reader found comes first: it saw the file, and this
+        // function is looking at what survived the reading.
+        if let Some(blocked) = &self.blocked {
+            return Err(blocked.clone());
+        }
         if self.adapter.is_none() {
             return Err(NotRunnable::UnsupportedAdapter {
                 adapter_type: self.adapter_type.clone(),
@@ -186,6 +205,7 @@ mod tests {
             stop_on_entry: false,
             source: LaunchConfigSource::VsCodeLaunchJson,
             unresolved: Vec::new(),
+            blocked: None,
         }
     }
 
@@ -229,6 +249,20 @@ mod tests {
         };
         let reason = config.not_runnable().expect("nothing expanded it");
         assert!(reason.to_string().contains("pickProcess"), "got: {reason}");
+    }
+
+    #[test]
+    fn a_problem_the_reader_found_is_reported_ahead_of_anything_else() {
+        // The fields left behind look fine — an unterminated quote leaves no
+        // arguments to look wrong — so only what the reader saw can say this.
+        let config = LaunchConfig {
+            blocked: Some(NotRunnable::BadArguments {
+                problem: "unterminated \" quote".to_string(),
+            }),
+            ..config()
+        };
+        let reason = config.not_runnable().expect("the reader refused it");
+        assert!(reason.to_string().contains("unterminated"), "got: {reason}");
     }
 
     #[test]

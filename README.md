@@ -136,7 +136,7 @@ $ lazydap doctor --format json
   "checks": [
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (0 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v3", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v4", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -220,7 +220,7 @@ VS Code's dialect is read as written: `//` and `/* */` comments and trailing com
 
 ## Configuring lazydap itself
 
-Optional. Without a config file lazydap runs on its defaults and writes nothing. With one — at `~/.config/lazydap/config.toml`, or wherever `LAZYDAP_CONFIG_PATH` points — two settings are read:
+Optional. Without a config file lazydap runs on its defaults and writes nothing. With one — at `~/.config/lazydap/config.toml`, at `$XDG_CONFIG_HOME/lazydap/config.toml`, or wherever `LAZYDAP_CONFIG_PATH` points — two settings are read:
 
 ```toml
 [general]

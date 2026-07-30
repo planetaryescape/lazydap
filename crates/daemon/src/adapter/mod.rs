@@ -568,7 +568,19 @@ fn decode<R: DeserializeOwned>(command: &str, body: serde_json::Value) -> Result
 /// build expects the next launch to use it, not the next reboot.
 pub fn discover(kind: AdapterKind) -> Result<PathBuf> {
     let config = lazydap_config::load_config().map_err(|source| AdapterError::Config { source })?;
-    discover_in(kind, &config, &std::env::var_os("PATH").unwrap_or_default())
+    discover_with(kind, &config)
+}
+
+/// Discovery against a config somebody else has already loaded.
+///
+/// This is what the *client* calls (D050). The config file and `PATH` both
+/// describe the machine as the person typing the command sees it, and the
+/// daemon sees neither: it may have been started days ago, from another
+/// directory, without the `LAZYDAP_CONFIG_PATH` now in force. Resolving there
+/// would read a different config than the one the caller set and fall through
+/// to `PATH` without saying so.
+pub fn discover_with(kind: AdapterKind, config: &lazydap_config::Config) -> Result<PathBuf> {
+    discover_in(kind, config, &std::env::var_os("PATH").unwrap_or_default())
 }
 
 /// The lookup itself, with the config and `PATH` passed in so tests do not

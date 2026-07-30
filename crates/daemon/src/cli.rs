@@ -352,6 +352,25 @@ impl Command {
         matches!(self, Self::Daemon { .. })
     }
 
+    /// Whether this command would *act* on the user's config file.
+    ///
+    /// Only the launch-class commands do: the adapter binary comes from it,
+    /// and starting a debugger with the wrong one is worse than not starting.
+    /// Everything else — `status`, `shutdown`, `disconnect`, `logs`, stepping,
+    /// inspection — either uses a default it can state, or does not read the
+    /// config at all, and must keep working when the file has a typo in it.
+    /// Those are the commands you reach for *because* something is wrong.
+    ///
+    /// `doctor` is deliberately not here. Its job is to report the problem,
+    /// which it cannot do if the problem stops it running.
+    pub fn needs_config(&self) -> bool {
+        match self {
+            Self::Launch { .. } => true,
+            Self::Launches { command } => matches!(command, LaunchesCommand::Run { .. }),
+            _ => false,
+        }
+    }
+
     /// Whether this command can answer without a daemon at all.
     ///
     /// `version` and `completions` are pure output. Starting a background
@@ -436,6 +455,42 @@ mod tests {
             }
             other => unreachable!("expected a break command, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_commands_you_reach_for_when_things_go_wrong_do_not_need_the_config() {
+        // A typo in config.toml must not take down the tools you use to
+        // recover from a debuggee that is still running.
+        for command in [
+            Command::Status,
+            Command::Shutdown { dry_run: false },
+            Command::Disconnect {
+                session_id: None,
+                no_terminate: false,
+                dry_run: false,
+            },
+            Command::Doctor {
+                check_adapters: false,
+                check_state: false,
+            },
+            Command::Threads,
+        ] {
+            assert!(!command.needs_config(), "got: {command:?}");
+        }
+    }
+
+    #[test]
+    fn launching_needs_the_config_because_the_adapter_comes_from_it() {
+        let launch = Cli::try_parse_from(["lazydap", "launch", "./app"]).expect("parse");
+        assert!(launch.command.expect("a command").needs_config());
+
+        let run = Cli::try_parse_from(["lazydap", "launches", "run", "Debug"]).expect("parse");
+        assert!(run.command.expect("a command").needs_config());
+
+        // Listing does not launch anything, so a broken config costs it
+        // nothing it cannot state.
+        let list = Cli::try_parse_from(["lazydap", "launches", "list"]).expect("parse");
+        assert!(!list.command.expect("a command").needs_config());
     }
 
     #[test]

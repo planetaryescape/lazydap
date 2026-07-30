@@ -258,6 +258,7 @@ impl StoredLaunchConfig {
             // Nothing substitutes variables in lazydap's own file: it is
             // lazydap's, so a path in it means what it says.
             unresolved: Vec::new(),
+            blocked: None,
         }
     }
 }

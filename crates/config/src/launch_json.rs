@@ -47,6 +47,11 @@ pub enum LaunchJsonError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// Refused before `serde_json` ever saw it — an unterminated comment or
+    /// string, which VS Code refuses too.
+    #[error("{path} is not valid launch.json: {problem}")]
+    Malformed { path: PathBuf, problem: String },
 }
 
 pub type Result<T> = std::result::Result<T, LaunchJsonError>;
@@ -79,7 +84,10 @@ pub fn import(root: &Path) -> Result<Imported> {
 
 /// Parse the contents of a `launch.json`, with `root` as `${workspaceFolder}`.
 pub fn parse(path: &Path, body: &str, root: &Path) -> Result<Imported> {
-    let stripped = strip_jsonc(body);
+    let stripped = strip_jsonc(body).map_err(|problem| LaunchJsonError::Malformed {
+        path: path.to_path_buf(),
+        problem,
+    })?;
     let file: LaunchJsonFile =
         serde_json::from_str(&stripped).map_err(|source| LaunchJsonError::Parse {
             path: path.to_path_buf(),
@@ -124,12 +132,45 @@ struct VsCodeConfig {
     request: String,
     program: Option<String>,
     #[serde(default)]
-    args: Vec<String>,
+    args: Arguments,
     cwd: Option<String>,
+    /// codelldb's spelling: a map.
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// cppdbg's spelling for the same thing: an array of `{name, value}`.
+    /// A configuration that sets `LD_LIBRARY_PATH` here and is launched
+    /// without it is a program in the wrong state, with nothing said about it.
+    #[serde(default)]
+    environment: Vec<EnvPair>,
     #[serde(default)]
     stop_on_entry: bool,
+    /// cppdbg's spelling for `stopOnEntry`.
+    #[serde(default)]
+    stop_at_entry: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnvPair {
+    name: String,
+    value: String,
+}
+
+/// `args` as either debugger spells it.
+///
+/// codelldb documents a list and also accepts one shell-style string;
+/// real files in the wild carry both. Refusing the string form would drop a
+/// configuration that works in the editor it came from.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Arguments {
+    List(Vec<String>),
+    Line(String),
+}
+
+impl Default for Arguments {
+    fn default() -> Self {
+        Self::List(Vec::new())
+    }
 }
 
 /// One VS Code configuration as a lazydap one, or `None` if it is not a debug
@@ -157,8 +198,9 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         // breakpoint that never binds.
         "cppdbg" => {
             warnings.push(format!(
-                "`{name}` is a cppdbg configuration; lazydap runs it under codelldb and ignores \
-                 its MIMode and setupCommands",
+                "`{name}` is a cppdbg configuration; lazydap runs it under codelldb, which reads \
+                 its program, arguments, working directory, environment and stopAtEntry, but not \
+                 its MIMode, miDebuggerPath or setupCommands",
             ));
             Some(AdapterKind::Codelldb)
         }
@@ -172,16 +214,43 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
     let cwd = config
         .cwd
         .map(|cwd| absolute(&expand(&cwd, root, &mut unresolved), root));
-    let args = config
-        .args
-        .iter()
-        .map(|arg| expand(arg, root, &mut unresolved))
-        .collect();
-    let env = config
-        .env
+
+    // cppdbg writes `environment: [{name, value}]` where codelldb writes
+    // `env: {}`. Both are read, and `env` wins a collision only because
+    // something has to: a file carrying both spellings of one variable has
+    // already contradicted itself.
+    let mut env: BTreeMap<String, String> = config
+        .environment
         .into_iter()
-        .map(|(key, value)| (key, expand(&value, root, &mut unresolved)))
+        .map(|pair| (pair.name, expand(&pair.value, root, &mut unresolved)))
         .collect();
+    env.extend(
+        config
+            .env
+            .into_iter()
+            .map(|(key, value)| (key, expand(&value, root, &mut unresolved))),
+    );
+
+    let (args, blocked) = match config.args {
+        Arguments::List(args) => (
+            args.iter()
+                .map(|arg| expand(arg, root, &mut unresolved))
+                .collect(),
+            None,
+        ),
+        Arguments::Line(line) => match split_arguments(&expand(&line, root, &mut unresolved)) {
+            Ok(args) => (args, None),
+            Err(problem) => {
+                warnings.push(format!(
+                    "`{name}` has an argument string that cannot be split: {problem}"
+                ));
+                (
+                    Vec::new(),
+                    Some(lazydap_core::NotRunnable::BadArguments { problem }),
+                )
+            }
+        },
+    };
 
     if !unresolved.is_empty() {
         warnings.push(format!(
@@ -199,10 +268,69 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         args,
         cwd,
         env,
-        stop_on_entry: config.stop_on_entry,
+        // Either spelling means the same thing, and a configuration that says
+        // both means it once.
+        stop_on_entry: config.stop_on_entry || config.stop_at_entry,
         source: LaunchConfigSource::VsCodeLaunchJson,
         unresolved,
+        blocked,
     })
+}
+
+/// Split one shell-style argument string into arguments.
+///
+/// Deliberately small: whitespace separates, double and single quotes group,
+/// and a backslash escapes the next character outside single quotes. That is
+/// the part of shell word-splitting that appears in a `launch.json`; variable
+/// expansion, globbing, `$(...)` and the rest are the shell's job and are not
+/// happening here — a debugger silently running a subshell out of a config
+/// file would be a far worse surprise than an argument that keeps its `$`.
+///
+/// An unterminated quote is an error rather than a guess. Closing it for the
+/// author would hand the program an argument list they never wrote.
+fn split_arguments(line: &str) -> std::result::Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if quote != Some('\'') => match chars.next() {
+                Some(escaped) => {
+                    current.push(escaped);
+                    started = true;
+                }
+                None => return Err("it ends in a trailing backslash".to_string()),
+            },
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(c);
+                // An empty quoted string is an argument: `--name ""` passes
+                // one, and dropping it shifts every argument after it.
+                started = true;
+            }
+            c if Some(c) == quote => quote = None,
+            c if c.is_whitespace() && quote.is_none() => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+
+    if let Some(quote) = quote {
+        return Err(format!("it has an unterminated {quote} quote"));
+    }
+    if started {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 /// A path from the file as an absolute one.
@@ -282,10 +410,21 @@ fn resolve(name: &str, root: &Path) -> Option<String> {
 
 /// JSON with the comments and trailing commas taken out.
 ///
-/// Comments become the whitespace they occupied — newlines inside them are
-/// kept — so a `serde_json` error still points at the line the reader is
-/// looking at in their editor.
-fn strip_jsonc(source: &str) -> String {
+/// Comments become **the whitespace they occupied**, character for character,
+/// newlines included. Two reasons, and the second is the one that bites:
+///
+/// 1. A `serde_json` error then points at the line *and column* the reader is
+///    looking at in their editor.
+/// 2. Deleting a comment joins what was on either side of it. `tr/*x*/ue`
+///    would become `true` — a document VS Code rejects, quietly accepted here
+///    as something the author never wrote. A space keeps it two tokens, and
+///    `serde_json` refuses it exactly as VS Code does.
+///
+/// Returns the offending construct rather than a string when the input runs
+/// out mid-comment or mid-string. Both are malformed in VS Code, and a parser
+/// that accepts what its own format's editor rejects is a parser that
+/// disagrees with the file on screen.
+fn strip_jsonc(source: &str) -> std::result::Result<String, String> {
     let mut out = String::with_capacity(source.len());
     // A comma that has been read but not written yet, plus whatever
     // whitespace followed it. Held back because whether it is legal depends
@@ -296,25 +435,33 @@ fn strip_jsonc(source: &str) -> String {
 
     while let Some(c) = chars.next() {
         match c {
+            // A line comment ends at the newline, which survives it. Running
+            // off the end of the file is fine here — a file may end in one.
             '/' if chars.peek() == Some(&'/') => {
+                gap.push_str("  ");
+                chars.next();
                 for c in chars.by_ref() {
+                    gap.push(blank(c));
                     if c == '\n' {
-                        gap.push('\n');
                         break;
                     }
                 }
             }
             '/' if chars.peek() == Some(&'*') => {
+                gap.push_str("  ");
                 chars.next();
                 let mut previous = '\0';
+                let mut closed = false;
                 for c in chars.by_ref() {
+                    gap.push(blank(c));
                     if previous == '*' && c == '/' {
+                        closed = true;
                         break;
                     }
-                    if c == '\n' {
-                        gap.push('\n');
-                    }
                     previous = c;
+                }
+                if !closed {
+                    return Err("a /* comment is never closed".to_string());
                 }
             }
             c if c.is_whitespace() => gap.push(c),
@@ -339,6 +486,7 @@ fn strip_jsonc(source: &str) -> String {
                 // `,` in a separator are data, and this is the whole reason
                 // the scanner exists.
                 let mut escaped = false;
+                let mut closed = false;
                 for c in chars.by_ref() {
                     out.push(c);
                     if escaped {
@@ -346,8 +494,12 @@ fn strip_jsonc(source: &str) -> String {
                     } else if c == '\\' {
                         escaped = true;
                     } else if c == '"' {
+                        closed = true;
                         break;
                     }
+                }
+                if !closed {
+                    return Err("a \" string is never closed".to_string());
                 }
             }
             other => {
@@ -360,7 +512,16 @@ fn strip_jsonc(source: &str) -> String {
     // Whatever is left is malformed input; hand it over as it was and let
     // serde_json describe it.
     flush(&mut out, &mut pending_comma, &mut gap);
-    out
+    Ok(out)
+}
+
+/// What a character becomes when the comment around it is taken out.
+///
+/// Line breaks stay, so line numbers survive; everything else becomes a space,
+/// so column numbers do too — and so that removing a comment never joins the
+/// tokens on either side of it.
+fn blank(c: char) -> char {
+    if c == '\n' || c == '\r' { c } else { ' ' }
 }
 
 fn flush(out: &mut String, pending_comma: &mut bool, gap: &mut String) {
@@ -381,11 +542,15 @@ mod tests {
         parse(Path::new("/p/.vscode/launch.json"), body, Path::new(ROOT)).expect("parse")
     }
 
+    fn strip_ok(source: &str) -> String {
+        strip_jsonc(source).expect("valid JSONC")
+    }
+
     // --- The stripper ---
 
     #[test]
     fn line_and_block_comments_are_removed() {
-        let stripped = strip_jsonc(
+        let stripped = strip_ok(
             r#"{
                 // the version VS Code writes
                 "version": "0.2.0", /* and a block one */
@@ -399,7 +564,7 @@ mod tests {
     #[test]
     fn a_comment_marker_inside_a_string_is_data() {
         // The bug every naive stripper has: a URL is not a comment.
-        let stripped = strip_jsonc(r#"{"url": "https://example.com/x", "n": 1}"#);
+        let stripped = strip_ok(r#"{"url": "https://example.com/x", "n": 1}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["url"], "https://example.com/x");
         assert_eq!(value["n"], 1);
@@ -407,21 +572,21 @@ mod tests {
 
     #[test]
     fn a_block_comment_marker_inside_a_string_is_data_too() {
-        let stripped = strip_jsonc(r#"{"glob": "src/*/ *.c", "n": 1}"#);
+        let stripped = strip_ok(r#"{"glob": "src/*/ *.c", "n": 1}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["glob"], "src/*/ *.c");
     }
 
     #[test]
     fn an_escaped_quote_does_not_end_the_string() {
-        let stripped = strip_jsonc(r#"{"say": "she said \"// hi\"", "n": 1}"#);
+        let stripped = strip_ok(r#"{"say": "she said \"// hi\"", "n": 1}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["say"], r#"she said "// hi""#);
     }
 
     #[test]
     fn a_string_ending_in_an_escaped_backslash_ends_where_it_looks_like_it_does() {
-        let stripped = strip_jsonc(r#"{"path": "C:\\", "n": 1}"#);
+        let stripped = strip_ok(r#"{"path": "C:\\", "n": 1}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["path"], r"C:\");
         assert_eq!(value["n"], 1);
@@ -429,7 +594,7 @@ mod tests {
 
     #[test]
     fn trailing_commas_are_dropped_because_vs_code_accepts_them() {
-        let stripped = strip_jsonc(r#"{"args": ["a", "b",], "n": 1,}"#);
+        let stripped = strip_ok(r#"{"args": ["a", "b",], "n": 1,}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["args"][1], "b");
         assert_eq!(value["n"], 1);
@@ -437,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_trailing_comma_followed_by_a_comment_is_still_trailing() {
-        let stripped = strip_jsonc(
+        let stripped = strip_ok(
             r#"{"args": [
                 "a", // the only one
             ]}"#,
@@ -448,7 +613,7 @@ mod tests {
 
     #[test]
     fn a_comma_inside_a_string_is_not_a_separator() {
-        let stripped = strip_jsonc(r#"{"sep": ",", "list": [1]}"#);
+        let stripped = strip_ok(r#"{"sep": ",", "list": [1]}"#);
         let value: serde_json::Value = serde_json::from_str(&stripped).expect("valid JSON");
         assert_eq!(value["sep"], ",");
     }
@@ -458,10 +623,155 @@ mod tests {
         // A parse error has to point at the line the person is looking at.
         let source = "{\n// one\n/* two\nthree */\n\"a\": 1\n}";
         assert_eq!(
-            strip_jsonc(source).matches('\n').count(),
+            strip_ok(source).matches('\n').count(),
             source.matches('\n').count(),
             "comments must leave their newlines behind",
         );
+    }
+
+    #[test]
+    fn a_comment_becomes_the_space_it_occupied_rather_than_disappearing() {
+        // Deleting it would join what was either side: `tr/*x*/ue` reads as
+        // `true`, which VS Code rejects and we would have silently accepted.
+        let stripped = strip_ok(r#"{"a": tr/*x*/ue}"#);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&stripped).is_err(),
+            "got: {stripped}",
+        );
+        assert!(
+            !stripped.contains("true"),
+            "the comment must not weld the two halves together: {stripped}",
+        );
+    }
+
+    #[test]
+    fn stripping_keeps_the_columns_a_parse_error_would_point_at() {
+        let source = r#"{"a": /* two */ 1}"#;
+        let stripped = strip_ok(source);
+        assert_eq!(stripped.len(), source.len(), "got: {stripped}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stripped).expect("valid JSON")["a"],
+            1,
+        );
+    }
+
+    #[test]
+    fn an_unclosed_block_comment_is_refused_rather_than_swallowing_the_file() {
+        let problem = strip_jsonc(r#"{"a": 1} /* and then nothing"#)
+            .expect_err("VS Code will not read this either");
+        assert!(problem.contains("never closed"), "got: {problem}");
+    }
+
+    #[test]
+    fn a_comment_that_only_looks_closed_is_still_unclosed() {
+        // `/*/` — the slash that opened it cannot also close it.
+        let problem = strip_jsonc(r#"{"a": 1} /*/"#).expect_err("that is not a closed comment");
+        assert!(problem.contains("never closed"), "got: {problem}");
+    }
+
+    #[test]
+    fn an_unclosed_string_is_refused() {
+        let problem = strip_jsonc(r#"{"a": "unterminated}"#).expect_err("that string never ends");
+        assert!(problem.contains("never closed"), "got: {problem}");
+    }
+
+    #[test]
+    fn a_file_ending_in_a_line_comment_is_fine() {
+        // Unlike the two above: a line comment is closed by the end of the
+        // file just as it is by a newline.
+        let stripped = strip_ok("{\"a\": 1} // trailing thought");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stripped).expect("valid JSON")["a"],
+            1,
+        );
+    }
+
+    // --- Shell-style argument strings ---
+
+    #[test]
+    fn an_argument_string_splits_on_whitespace() {
+        assert_eq!(
+            split_arguments("--verbose --level 3").expect("split"),
+            vec!["--verbose", "--level", "3"],
+        );
+    }
+
+    #[test]
+    fn quotes_group_words_that_contain_spaces() {
+        assert_eq!(
+            split_arguments(r#"--path "/tmp/two words" --name 'single quoted'"#).expect("split"),
+            vec!["--path", "/tmp/two words", "--name", "single quoted"],
+        );
+    }
+
+    #[test]
+    fn an_empty_quoted_argument_is_still_an_argument() {
+        // Dropping it would shift every argument after it by one.
+        assert_eq!(
+            split_arguments(r#"--name "" --last"#).expect("split"),
+            vec!["--name", "", "--last"],
+        );
+    }
+
+    #[test]
+    fn a_backslash_escapes_the_next_character_outside_single_quotes() {
+        assert_eq!(
+            split_arguments(r"a\ b 'c\ d'").expect("split"),
+            vec!["a b", r"c\ d"],
+        );
+    }
+
+    #[test]
+    fn nothing_in_an_argument_string_is_expanded_by_a_shell() {
+        // A debugger quietly running a subshell out of a config file would be
+        // a much worse surprise than an argument that keeps its `$`.
+        assert_eq!(
+            split_arguments("--home $HOME --sub $(whoami)").expect("split"),
+            vec!["--home", "$HOME", "--sub", "$(whoami)"],
+        );
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_an_error_rather_than_a_guess() {
+        let problem = split_arguments(r#"--name "never closed"#).expect_err("unterminated");
+        assert!(problem.contains("unterminated"), "got: {problem}");
+    }
+
+    #[test]
+    fn a_configuration_whose_arguments_cannot_be_split_is_listed_and_refused() {
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "lldb", "request": "launch", "name": "Quoted",
+                "program": "app", "args": "--name \"never closed"
+            }]}"#,
+        );
+
+        let config = &imported.configs[0];
+        assert!(config.args.is_empty());
+        let reason = config.not_runnable().expect("it cannot run");
+        assert!(reason.to_string().contains("unterminated"), "got: {reason}");
+        assert!(
+            imported.warnings.iter().any(|w| w.contains("Quoted")),
+            "got: {:?}",
+            imported.warnings,
+        );
+    }
+
+    #[test]
+    fn an_argument_string_is_accepted_the_way_codelldb_accepts_it() {
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "lldb", "request": "launch", "name": "Line",
+                "program": "app", "args": "--in ${workspaceFolder}/data --verbose"
+            }]}"#,
+        );
+
+        assert_eq!(
+            imported.configs[0].args,
+            vec!["--in", "/p/data", "--verbose"],
+            "variables expand before splitting, so a path with a space still splits right",
+        );
+        assert_eq!(imported.configs[0].not_runnable(), None);
     }
 
     // --- Mapping ---
@@ -524,6 +834,58 @@ mod tests {
         assert_eq!(imported.configs.len(), 1);
         assert_eq!(imported.configs[0].name, "app");
         assert_eq!(imported.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_cppdbg_configuration_keeps_its_environment_and_its_entry_stop() {
+        // cppdbg spells both differently from codelldb. A program that needs
+        // LD_LIBRARY_PATH and is launched without it is in the wrong state,
+        // and nothing would have said so.
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "cppdbg",
+                "request": "launch",
+                "name": "C++ app",
+                "program": "${workspaceFolder}/build/app",
+                "cwd": "${workspaceFolder}",
+                "stopAtEntry": true,
+                "MIMode": "lldb",
+                "environment": [
+                    {"name": "LD_LIBRARY_PATH", "value": "${workspaceFolder}/lib"},
+                    {"name": "LOG", "value": "debug"}
+                ]
+            }]}"#,
+        );
+
+        let config = &imported.configs[0];
+        assert_eq!(config.adapter, Some(AdapterKind::Codelldb));
+        assert_eq!(
+            config.env["LD_LIBRARY_PATH"], "/p/lib",
+            "and it expands too"
+        );
+        assert_eq!(config.env["LOG"], "debug");
+        assert!(config.stop_on_entry, "stopAtEntry means stopOnEntry");
+        assert_eq!(config.not_runnable(), None);
+        assert!(
+            imported.warnings.iter().any(|w| w.contains("MIMode")),
+            "the fields that are still ignored are named: {:?}",
+            imported.warnings,
+        );
+    }
+
+    #[test]
+    fn both_environment_spellings_in_one_configuration_are_merged() {
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "cppdbg", "request": "launch", "name": "Both", "program": "app",
+                "environment": [{"name": "FROM_ARRAY", "value": "1"}],
+                "env": {"FROM_MAP": "2"}
+            }]}"#,
+        );
+
+        let env = &imported.configs[0].env;
+        assert_eq!(env["FROM_ARRAY"], "1");
+        assert_eq!(env["FROM_MAP"], "2");
     }
 
     #[test]

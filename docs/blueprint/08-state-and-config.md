@@ -94,11 +94,14 @@ Both can coexist. `lazydap launches list` shows configs from both sources.
 
 Global preferences. Override-able by `LAZYDAP_*` env vars. Never per-project.
 
-XDG-compliant paths:
+Searched in this order, **first one that exists** winning (D049):
 
-- macOS: `~/Library/Application Support/lazydap/config.toml`
-- Linux: `$XDG_CONFIG_HOME/lazydap/config.toml` or `~/.config/lazydap/config.toml`
-- Windows: `%APPDATA%\lazydap\config.toml` (post-v0.1; v0.1 may be Unix-only)
+1. `LAZYDAP_CONFIG_PATH` — named explicitly, so a path that is not there is an error rather than a fall-through.
+2. `$XDG_CONFIG_HOME/lazydap/config.toml`
+3. `~/.config/lazydap/config.toml`
+4. `dirs::config_dir()/lazydap/config.toml` — `~/Library/Application Support` on macOS, `%APPDATA%` on Windows. Last, so a file written there by an earlier build still works.
+
+When none exists the first candidate is what `lazydap doctor` names as the place to create one. `~/.config` deliberately beats the macOS application-support directory: lazydap is a command-line tool, and that is where a terminal user keeps their configuration.
 
 ```toml
 version = 1

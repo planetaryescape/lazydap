@@ -620,6 +620,39 @@ lazydap has both spellings at the moment it matters. When a `setBreakpoints` res
 
 ---
 
+## D049 — the config file is looked for in `~/.config` first, not in the platform's config directory
+
+**Status:** decided (2026-07-30, review round after M15). Supersedes the path list in [`08-state-and-config.md`](08-state-and-config.md).
+
+**Why:** `dirs::config_dir()` returns `~/Library/Application Support` on macOS. That is right for an application bundle and wrong for a command-line tool: `git`, `ripgrep`, `starship`, `nvim` and everything else a terminal user has configured live in `~/.config`, this project's own README and blueprint both say `~/.config/lazydap/config.toml`, and a user who follows those instructions on a Mac would have written a file lazydap never reads. A config that is silently ignored is worse than one that does not exist — nothing is wrong until the pinned adapter quietly is not used.
+
+**The order**, first that **exists** winning:
+
+1. `LAZYDAP_CONFIG_PATH` — and if it names a file that is not there, that is an error, not a fall-through. The user said where it was.
+2. `$XDG_CONFIG_HOME/lazydap/config.toml`
+3. `~/.config/lazydap/config.toml`
+4. `dirs::config_dir()/lazydap/config.toml` — last, so a file an earlier build wrote to `~/Library/Application Support` keeps working rather than being orphaned by this change.
+
+When none exists, the **first** candidate is what `lazydap doctor` prints as the place to create one. The list is deduplicated with its order preserved, because on Linux all three usually name the same directory and a `doctor` that printed it three times would look broken.
+
+**Consequence:** the macOS location is read but never recommended. If both exist, XDG and `~/.config` win — deliberately: the one a user hand-wrote from the docs beats the one a library chose for them.
+
+---
+
+## D050 — the client resolves the adapter binary and sends it; protocol goes to v4
+
+**Status:** decided (2026-07-30, review round after M15). **Protocol v3 → v4.**
+
+**Why:** adapter discovery reads the user's config file and `PATH`. Both describe the machine *as the person typing the command sees it*. The daemon sees neither — it may have been started days earlier, from another directory, with another environment — so `LAZYDAP_CONFIG_PATH=/tmp/pinned.toml lazydap launch ./app` read the pin in the client, and then the daemon resolved the adapter again against its own default config path and fell through to `PATH`. The pin was obeyed by the process that could not act on it and ignored by the process that could, silently. This is the same failure D047 names for `launch.json` and D024 for the project root, arrived at from the other direction.
+
+**What changes:** `LaunchRequest` carries `adapter_command: Option<PathBuf>`, resolved client-side by `adapter::discover_with` against the config the client already loaded. The daemon uses it when present and falls back to its own lookup when absent. Discovery failing is now reported *before* a daemon is spawned, which is also a better error.
+
+**Why a version bump for an optional field.** The field is additive and `serde` ignores unknown ones, so an older daemon would accept the request and quietly ignore the pin — which is precisely the bug being fixed, reintroduced by the compatibility story. Both ends already refuse a version they do not recognise, so bumping turns "silently launches the wrong adapter" into a `VersionMismatch` that `lazydap shutdown` clears and auto-spawn replaces. The cost is one daemon restart; the alternative is a debugger obeying a configuration nobody can see. `Shutdown` stays version-exempt, so the escape hatch still crosses the boundary.
+
+**Not changed:** the daemon's own discovery is kept rather than deleted. It is the fallback for a client that sends nothing, and it is what `discover` still means for any future caller inside the daemon.
+
+---
+
 ## Open decisions
 
 These need user input.

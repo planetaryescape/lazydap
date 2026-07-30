@@ -77,7 +77,14 @@ pub async fn launch(
     request: &LaunchRequest,
     breakpoints: &[(PathBuf, Vec<Breakpoint>)],
 ) -> Result<Launched> {
-    let adapter_path = discover(AdapterKind::Codelldb)?;
+    // What the client resolved, when it said (D050). Its config file and its
+    // `PATH` are the ones the caller meant; falling back to our own lookup is
+    // for a client too old to have sent one, and the protocol version makes
+    // that impossible today.
+    let adapter_path = match &request.adapter_command {
+        Some(path) => path.clone(),
+        None => discover(AdapterKind::Codelldb)?,
+    };
     let mut transport = DapTransport::spawn(&adapter_path.to_string_lossy()).await?;
 
     match handshake(&mut transport, request, breakpoints).await {
@@ -476,6 +483,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             env: BTreeMap::new(),
             stop_on_entry: true,
+            adapter_command: None,
         }
     }
 

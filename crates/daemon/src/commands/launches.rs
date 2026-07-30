@@ -283,6 +283,7 @@ mod tests {
             stop_on_entry: false,
             source,
             unresolved: Vec::new(),
+            blocked: None,
         }
     }
 

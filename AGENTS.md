@@ -276,14 +276,15 @@ end to end against a C binary. What exists today:
 - **Two adapter normalisations you should know about:** `--stop-on-entry` reports `reason: "entry"` with the adapter's `"exception"` kept in `raw_reason` (D033), and `eval` defaults to the `watch` context because `repl` runs an LLDB *command* (D034). Both are in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md).
 - **`Subscribe` and live event streaming.** A subscribed connection is pushed event frames as they happen, filtered to the kinds it asked for, interleaved with its own replies. It is answered with a `Response::Status` snapshot taken at the moment the stream starts, and replays nothing (D038).
 - **Launch configurations, read from two files.** `lazydap launches list` merges `.lazydap/state.toml`'s `[[launch_configs]]` with `.vscode/launch.json` (JSONC: comments and trailing commas), expands `${workspaceFolder}` and friends, and marks each one runnable or not with the reason. `lazydap launches run <name>` sends the same `Launch` request `lazydap launch` does — resolution is client-side, because both files are found by walking up from *your* working directory, not the daemon's (D047).
-- **A user config file** at `~/.config/lazydap/config.toml` (or `LAZYDAP_CONFIG_PATH`). Two settings are consumed: `[adapter.codelldb] command` (D026's first discovery tier, ahead of `PATH`) and `[general] wait_timeout_seconds`. Everything else in the blueprint's schema parses and is ignored — deliberately, rather than being modelled as fields nothing reads.
+- **A user config file** at `~/.config/lazydap/config.toml`, `$XDG_CONFIG_HOME/lazydap/config.toml`, or `LAZYDAP_CONFIG_PATH` — first that exists wins, platform config dir searched last (D049). Two settings are consumed: `[adapter.codelldb] command` (D026's first discovery tier, ahead of `PATH`) and `[general] wait_timeout_seconds`. Everything else in the blueprint's schema parses and is ignored — deliberately, rather than being modelled as fields nothing reads.
 - **Breakpoints bind under symlinked paths.** A file whose breakpoints the adapter declines while naming a location it could have used is re-sent under that name, once, when nothing in it bound and the suggestion resolves to the same file (D048, quirk 8). This is what makes a debuggee under `/tmp` on macOS work.
 - **Not yet:** watches, `attach`, `until`, `source`, `restart`, conditional breakpoints from the TUI, the rest of the config schema.
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M15 and M19. Phases A, B, C and D are done. **Next up: cutting the v0.1.0 tag** — the CHANGELOG's `[0.1.0]` section is finalised and `.github/workflows/product-release.yml` runs on a `v*` tag.
 
-Note the protocol is at **v3** (D043: `BreakpointUpdated` distinguishes an adapter's
-opinion from a change to the project's list). A daemon left running from an older build is
+Note the protocol is at **v4** (D050: `LaunchRequest` carries the adapter binary the
+*client* resolved, because the daemon's environment is not the caller's; v3 was D043,
+`BreakpointUpdated` distinguishing an adapter's opinion from a change to the project's list). A daemon left running from an older build is
 refused with `VersionMismatch`; `lazydap shutdown` clears it and the next command starts a
 current one — and the TUI now does that for itself.
 

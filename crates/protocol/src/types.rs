@@ -25,7 +25,16 @@ use std::path::PathBuf;
 /// project rather than as an adapter's opinion. Both shapes would otherwise
 /// claim to be v2 and fail to decode each other's events — the exact hazard the
 /// version exists to turn into a clean restart.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 3;
+///
+/// v4 (M15, D050): `LaunchRequest` carries the adapter binary the *client*
+/// resolved. The field is optional and an older daemon would ignore it
+/// silently — which is precisely why this is a version bump rather than an
+/// additive field. Ignoring it means falling back to the daemon's own
+/// resolution, under the daemon's environment, and quietly launching a
+/// different codelldb than the one the caller pinned. A `VersionMismatch` that
+/// `lazydap shutdown` clears is a far better failure than a debugger that
+/// obeys the wrong configuration without saying so.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 4;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +255,19 @@ pub struct LaunchRequest {
     /// Extra environment for the debuggee. Ordered so the wire form is stable.
     pub env: BTreeMap<String, String>,
     pub stop_on_entry: bool,
+    /// The adapter binary, resolved by the client (D050).
+    ///
+    /// Discovery reads the user's config file and `PATH`, and both belong to
+    /// whoever typed the command — not to a daemon that may have been started
+    /// days ago from another directory with another environment. So the client
+    /// resolves it, exactly as it resolves every other path (D047), and sends
+    /// the answer.
+    ///
+    /// `None` means "resolve it yourself": no current client sends that, and
+    /// the daemon's own lookup remains as the fallback rather than as a second
+    /// opinion that could disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_command: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -665,6 +687,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             env: BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
             stop_on_entry: true,
+            adapter_command: Some(PathBuf::from("/usr/local/bin/codelldb")),
         });
         let message = IpcMessage::request(7, request.clone());
 
