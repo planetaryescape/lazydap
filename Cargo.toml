@@ -7,6 +7,7 @@ members = [
     "crates/dap",
     "crates/protocol",
     "crates/store",
+    "crates/tui",
 ]
 
 [workspace.package]
@@ -35,6 +36,11 @@ clap = { version = "4", features = ["derive"] }
 # Shell completions for `lazydap completions <shell>`. First-party to clap,
 # and generated from the same command tree, so it cannot drift from --help.
 clap_complete = "4"
+# The TUI's whole stack. ratatui re-exports the crossterm it was compiled
+# against (`ratatui::crossterm`), and the TUI uses that rather than a second
+# direct dependency: two crossterm versions in one build compile, and then
+# hand the backend `KeyEvent`s of a type the widgets do not accept.
+ratatui = "0.30"
 anyhow = "1"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }

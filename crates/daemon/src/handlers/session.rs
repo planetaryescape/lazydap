@@ -93,10 +93,12 @@ pub async fn launch(
             .map(|chunk| Event::Output { session_id, chunk })
             .collect(),
     );
-    session.emit(Event::SessionStarted {
-        session_id,
-        adapter: request.adapter,
-    });
+    // Live and announced, in that order and in one call: a subscriber must
+    // never be able to receive `SessionStarted` for a session it cannot then
+    // find. This is also why promotion happens *before* the two steps below —
+    // both can emit, and nothing may be emitted for this session before the
+    // event that opens it.
+    reservation.promote(Arc::clone(&session));
 
     // A debuggee quick enough to finish during its own launch has already
     // ended, and the pump will never see the events that say so. End it here,
@@ -115,7 +117,6 @@ pub async fn launch(
 
     // The pump takes over reads from here; nothing else may touch them.
     adapter::spawn_pump(launched.pump, Arc::clone(&session));
-    reservation.promote(Arc::clone(&session));
 
     // Read the state back rather than echoing what the handshake saw: ending
     // the session above may have refined `terminated` into `exited`.

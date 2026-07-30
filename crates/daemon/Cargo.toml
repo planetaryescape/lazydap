@@ -37,3 +37,4 @@ lazydap-core = { path = "../core" }
 lazydap-dap = { path = "../dap" }
 lazydap-protocol = { path = "../protocol" }
 lazydap-store = { path = "../store" }
+lazydap-tui = { path = "../tui" }

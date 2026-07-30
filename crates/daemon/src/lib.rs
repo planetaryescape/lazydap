@@ -50,8 +50,13 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
 
 async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
     let Some(command) = cli.command else {
-        // Bare `lazydap` becomes the TUI once there is one (M8+). Until then,
-        // saying what exists beats an empty prompt.
+        // Bare `lazydap` is the TUI, but only for a person sitting at a
+        // terminal. Anywhere else — a pipe, a CI job, `$(lazydap)` — saying
+        // what exists beats taking over a terminal nobody is watching.
+        if is_interactive() {
+            let instance = Instance::resolve(cli.instance.as_deref())?;
+            return commands::tui::run(&instance).await;
+        }
         let _ = <Cli as clap::CommandFactory>::command().print_help();
         return Ok(());
     };
@@ -71,6 +76,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
     match command {
         Command::Version | Command::Completions { .. } => unreachable!("handled above"),
         Command::Daemon { .. } => server::run_daemon(instance).await,
+        Command::Tui => commands::tui::run(&instance).await,
 
         Command::Launch {
             program,
@@ -214,6 +220,18 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             check_state,
         } => diagnostics::doctor(&instance, check_adapters, check_state, format).await,
     }
+}
+
+/// Whether there is a person at a terminal to hand the screen to.
+///
+/// **Both** streams, not just stdout. `echo "" | lazydap` leaves stdout on the
+/// terminal and only stdin on a pipe — and stdin is the half the TUI needs,
+/// because that is where keys come from. Checking stdout alone would take over
+/// the terminal for a shell pipeline and then sit there unable to read a
+/// keypress, including the one that quits.
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// Report a command line clap refused, in the shape the caller can read.

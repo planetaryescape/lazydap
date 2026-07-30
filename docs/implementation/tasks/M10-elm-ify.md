@@ -262,3 +262,21 @@ Self-test: try adding a new key. E.g., make `H` jump to line 1. You should add O
 - **`Cmd` is small now (Quit, LoadSource).** That's fine. M11 adds `SendIpc(Request)`. The more `Cmd` grows, the more important M10's discipline becomes.
 - **Don't introduce a framework for this.** No `tui-realm`, no `iocraft`. This 150 lines IS the framework.
 - **Tests for `update()` are easy** — pure function. Add a couple unit tests showing key → state transitions. They'll catch regressions when M11+ adds branches.
+
+## Completed 2026-07-30
+
+`state.rs`, `msg.rs`, `update.rs`, `view.rs` as described. Behaviour is identical to M9 — verified by driving the binary in a pseudo-terminal and comparing the rendered screen for every key, not by reading the diff.
+
+Sixteen tests cover the reducer: each binding, the `gg` prefix (including `gj` disarming it so a later `g` does not jump), key releases, scrolling with no file open, and both outcomes of a load. The self-test the task asks for holds — making `H` jump to the top would be one arm, `KeyCode::Char('H') => with_source(&mut state, SourceView::go_to_top)`.
+
+Deviations from the sketch above:
+
+- **`Msg::Resize` carries no size.** Every draw asks the frame for its own area, so a stored copy could only ever disagree with it. The message exists to make that draw happen now rather than at the next tick.
+- **No `focused_pane` or `size` on the state.** There is one pane, and neither field would have been read. M12 adds focus when there is something to focus between.
+- **`status: String` became `notice: Option<String>`.** The status row is derived from what the state already knows; a notice is for the things it cannot derive, i.e. a file that would not open.
+- **`SourceView::open` is gone.** Reading a file is a `Cmd` that comes back as a `Msg`, which is the whole discipline; leaving a synchronous constructor next to it would have been an invitation to skip the loop.
+- **Tick is 100ms, not 16ms.** 60Hz redraws of a static screen buys nothing in a debugger; input and daemon events wake the loop directly. This also matches M9's staleness exactly, which is part of "identical behaviour".
+
+**Bug this milestone shipped, found at M11:** the input pump only noticed the TUI had quit when the *next* keystroke failed to send. A `spawn_blocking` task cannot be aborted and the runtime waits for it at shutdown, so `q` left the process alive until somebody pressed another key. It is invisible to unit tests and to any check that ignores the exit code; a pseudo-terminal run caught it (exit 255 = SIGHUP). Fixed by checking `tx.is_closed()` each poll. See **D039**.
+
+**Follow-up discovered:** `Cmd` is one command, not a list. Every reducer branch so far wants at most one, but the first branch that needs two (M12's "fetch the stack *and* the scopes") will want `Cmd::Batch(Vec<Cmd>)` or a `Vec<Cmd>` return.

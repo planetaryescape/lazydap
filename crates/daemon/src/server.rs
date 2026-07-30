@@ -3,18 +3,21 @@
 use crate::error::{CliError, Result};
 use crate::handlers;
 use crate::instance::Instance;
-use crate::state::DaemonState;
+use crate::state::{DaemonState, SeqEvent};
 use lazydap_core::EndReason;
 use lazydap_protocol::{
-    ErrorCode, IpcConnection, IpcError, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request,
+    ErrorCode, Event, EventKind, IpcConnection, IpcError, IpcMessage, IpcPayload,
+    LAZYDAP_PROTOCOL_VERSION, Request, Response,
 };
 use lazydap_store::ProjectStore;
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 
 /// How long to let in-flight client connections finish during shutdown.
@@ -128,9 +131,15 @@ async fn accept_loop(listener: &UnixListener, state: &Arc<DaemonState>) -> Resul
 /// Requests on a connection are handled one at a time. A CLI client sends one
 /// and waits, so concurrency here would buy nothing; separate clients already
 /// get separate tasks.
+///
+/// A client that has sent [`Request::Subscribe`] also gets events pushed at it
+/// between replies, on the same connection. Sends happen in the *body* of a
+/// `select!` arm and never as one: [`IpcConnection::send`] is not
+/// cancellation-safe, and a cancelled send leaves half a frame on the wire.
 pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
     let mut connection = IpcConnection::new(stream);
     let mut shutdown = state.shutdown_receiver();
+    let mut subscription: Option<Subscription> = None;
 
     loop {
         if state.shutdown_requested() {
@@ -141,6 +150,20 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
             biased;
             _ = shutdown.changed() => break,
             incoming = connection.recv() => incoming,
+            event = next_event(subscription.as_mut()) => {
+                match event {
+                    Some(event) => {
+                        if let Err(error) = connection.send(IpcMessage::event(event)).await {
+                            tracing::debug!(target: "daemon.ipc", %error, "subscriber went away");
+                            break;
+                        }
+                    }
+                    // The broadcast closed, which only happens as the daemon
+                    // goes away. Stop pushing; the shutdown arm ends the loop.
+                    None => subscription = None,
+                }
+                continue;
+            }
         };
 
         let message = match incoming {
@@ -162,10 +185,98 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
             }
         };
 
-        let reply = handle_message(&state, message).await;
+        // Subscribing is the one request that changes the connection rather
+        // than the daemon, so it is answered here instead of in `dispatch`.
+        let reply = match subscribe_request(&message) {
+            Some(channels) => subscribe(&state, &mut subscription, channels, message.id),
+            None => handle_message(&state, message).await,
+        };
         if let Err(error) = connection.send(reply).await {
             tracing::debug!(target: "daemon.ipc", %error, "client went away mid-reply");
             break;
+        }
+    }
+}
+
+/// What one client is watching.
+struct Subscription {
+    events: broadcast::Receiver<SeqEvent>,
+    channels: HashSet<EventKind>,
+}
+
+/// The channels a `Subscribe` asked for, if that is what this message is.
+fn subscribe_request(message: &IpcMessage) -> Option<Vec<EventKind>> {
+    match &message.payload {
+        IpcPayload::Request(Request::Subscribe { channels })
+            if message.version == LAZYDAP_PROTOCOL_VERSION =>
+        {
+            Some(channels.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Start pushing events, and say what the daemon looks like right now.
+///
+/// The answer is a [`Response::Status`] rather than a variant of its own, and
+/// that is the whole design (D038): the snapshot and the subscription are
+/// taken under the same call, so there is no window between "what is the state
+/// now?" and "tell me when it changes" for an event to fall into. A client
+/// that asked those as two questions would have to reconcile the answers.
+///
+/// It follows that nothing buffered is replayed. A subscriber is told where
+/// things stand and then what happens next; re-sending history would report a
+/// `Stopped` the snapshot has already accounted for, and would send the TUI
+/// chasing a position the program left long ago. Debuggee output produced
+/// before the subscription is still readable — `Request::Output` reads the
+/// buffer without draining it — and, unlike this stream, that is a request the
+/// CLI makes too.
+fn subscribe(
+    state: &Arc<DaemonState>,
+    subscription: &mut Option<Subscription>,
+    channels: Vec<EventKind>,
+    id: u64,
+) -> IpcMessage {
+    // Subscribing again replaces the previous set rather than adding to it, so
+    // a client can narrow what it is watching without reconnecting.
+    let channels: HashSet<EventKind> = channels.into_iter().collect();
+    tracing::debug!(
+        target: "daemon.ipc",
+        channels = channels.len(),
+        "a client subscribed to events",
+    );
+    *subscription = Some(Subscription {
+        events: state.events().subscribe(),
+        channels,
+    });
+
+    IpcMessage::response(id, Response::Status(state.status()))
+}
+
+/// The next event this client asked to see.
+///
+/// Never resolves when there is no subscription, so the arm simply never wins
+/// — which is what keeps `select!` from spinning on a client that has not
+/// subscribed.
+async fn next_event(subscription: Option<&mut Subscription>) -> Option<Event> {
+    let Some(subscription) = subscription else {
+        return std::future::pending().await;
+    };
+
+    loop {
+        match subscription.events.recv().await {
+            Ok(sequenced) if subscription.channels.contains(&sequenced.event.kind()) => {
+                return Some(sequenced.event);
+            }
+            Ok(_) => continue,
+            // The client reads more slowly than the session produces. Dropping
+            // the oldest is the design (`EVENT_CHANNEL_CAPACITY`); what a
+            // client does about it is resynchronise, which for the TUI is the
+            // stack fetch that follows the next stop.
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!(target: "daemon.ipc", missed, "a subscriber fell behind");
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
         }
     }
 }

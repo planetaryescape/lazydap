@@ -48,3 +48,14 @@ The TUI runs `tokio::main`. The render loop uses `tokio::select!` over: input ev
 - M10's reducer pattern is in place; new features in Phase D extend the match without restructuring.
 
 Then move to Phase D — useful features → v0.1.
+
+## Completed 2026-07-30
+
+All four boxes ticked. `crates/tui` is a ratatui client of the daemon: it subscribes to events, shows the source with a marker that follows the debuggee, and drives the program with F5/`c`, F10/`n`, F11 and shift-F11 — each sending the request behind the matching subcommand, so the side-by-side check the criteria ask for is the same code path rather than two that happen to agree.
+
+Two things this phase settled beyond the milestones:
+
+- **The dependency arrow between `daemon` and `tui` points the other way from what `ARCHITECTURE.md` said** (D037). The daemon crate is also the `lazydap` binary, so it is what starts the TUI. The direction that protects the boundary — `tui` → `daemon` — is unchanged and now has a row in the CI check.
+- **`Subscribe` is answered with a state snapshot and replays nothing** (D038). That is what lets a TUI started against an already-running session find out where the program is without waiting for it to move.
+
+One thing the "done when" list does not yet cover: **`b` (toggle breakpoint) is M14**, not M11, so the keymap above is complete apart from that. The other gap is reconnection — a daemon that dies while the TUI runs is reported in the status row, and picking the connection back up needs its own milestone before v0.1.

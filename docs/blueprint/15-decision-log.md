@@ -418,6 +418,47 @@ It lives in `crates/daemon/examples/gen_skill_commands.rs` rather than a second 
 
 ---
 
+## D037 — the daemon crate may depend on the TUI crate; the arrow never points back
+
+**Status:** decided (2026-07-30, with M8).
+
+**Why:** `ARCHITECTURE.md` said "`daemon` depends on everything except `tui`", which cannot be true while D002 holds: there is one binary, `lazydap`, and it is built from `crates/daemon`, so something in that crate has to be able to call `lazydap_tui::run`. The alternative is a second binary crate whose only job is to depend on both, which buys nothing.
+
+What the rule was protecting is the *other* direction, and that is untouched: `lazydap-tui` may depend on `core`, `protocol` and `config` and nothing else. With no path to the daemon, the store or DAP, a TUI-only feature is not something that can be written — it has to become a protocol request, and a protocol request is one the CLI can send too. That is non-negotiable #2 enforced by Cargo rather than by review.
+
+**Implementation:** both rows are in `scripts/check_architecture_boundaries.sh`, which CI runs. Anything a client needs that requires a *process* — spawning a daemon, resolving an instance — happens in `crates/daemon/src/commands/tui.rs` and is handed to the TUI as data (a socket path).
+
+---
+
+## D038 — `Subscribe` is answered with a state snapshot, and replays nothing
+
+**Status:** decided (2026-07-30, with M11).
+
+**Why:** A long-lived client needs two things at startup: what the state is now, and what changes from here. Asking them as two questions leaves a window between the answers, and an event that lands in that window is either lost (snapshot first, subscribe second) or double-counted (the other way round). Answering `Subscribe` with `Response::Status` closes it: the snapshot is taken at the moment the stream is attached, under the same call.
+
+It also avoids a new `Response` variant. Two builds both claiming protocol v2 must agree on the shape of every frame, and `Subscribe` previously answered `Unsupported` — so a new variant would have been a wire change without a version to signal it. Reusing `Status` keeps v2 honest (no bump; see D032).
+
+**Nothing buffered is replayed.** Three reasons: the snapshot already accounts for the state those events produced; replaying a `Stopped` would send a TUI chasing a position the program left long ago; and the buffer's delivery watermark belongs to `--wait` (M6), so a subscriber consuming it would silently steal events from the next `continue --wait`. Debuggee output produced before the subscription is still readable through `Request::Output`, which reads without draining — and unlike an event stream, that is a request the CLI makes too.
+
+**Consequences:** subscribing again replaces the set of kinds rather than adding to it, so a client can narrow what it watches without reconnecting. A subscriber that falls behind the broadcast loses the oldest events (the channel is capacity-bounded, drop-oldest) and the daemon logs it; the TUI resynchronises at the next stop, because a stop is followed by a stack fetch that asks for the truth rather than reconstructing it.
+
+---
+
+## D039 — the TUI is verified in a real pseudo-terminal, not only against a test backend
+
+**Status:** decided (2026-07-30, with M8–M11).
+
+**Why:** ratatui's `TestBackend` renders into a buffer, which is exactly right for "does this state draw the marker on line 19" and useless for "does `q` give the terminal back". Both matter, and the second is the one that ruins somebody's shell. So the TUI has two kinds of test:
+
+- **`TestBackend` snapshots** for what is on screen, comparing symbols only — colour and emphasis are real decisions but not ones a string comparison judges usefully, and a test that breaks whenever a border changes shade gets deleted rather than fixed.
+- **A pseudo-terminal drive** for the things only a real terminal has: entering and leaving the alternate screen, raw mode, exit codes, and the cross-process scenario where a `lazydap continue` typed in another shell moves the marker in a running TUI.
+
+The PTY driver is a throwaway script rather than part of the suite (it needs a tty, a built binary and a live codelldb), so its output is pasted into the milestone notes as evidence. What *is* in the suite is the headless half: the reducer, exhaustively, and the IPC client against a real Unix socket.
+
+**Consequences:** this caught a bug that no unit test could have. The input pump runs on `spawn_blocking`, which cannot be aborted and which the runtime *waits for* at shutdown — so `q` left the process alive until somebody pressed another key. It showed up as an exit code of 255 in a PTY run and nowhere else.
+
+---
+
 ## Open decisions
 
 These need user input.

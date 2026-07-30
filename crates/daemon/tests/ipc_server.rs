@@ -5,11 +5,13 @@
 //! tests do not do is launch a debuggee — that needs a live adapter and is
 //! covered by the milestone's manual verification.
 
+use lazydap_core::{OutputCategory, OutputChunk, PauseReason, SessionId};
 use lazydap_daemon::client::DaemonClient;
 use lazydap_daemon::server::serve_client;
-use lazydap_daemon::state::DaemonState;
+use lazydap_daemon::state::{DaemonState, SeqEvent};
 use lazydap_protocol::{
-    ErrorCode, IpcConnection, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request, Response,
+    ErrorCode, Event, EventKind, IpcConnection, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION,
+    Request, Response,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,6 +62,73 @@ impl TestDaemon {
     async fn raw(&self) -> IpcConnection<UnixStream> {
         IpcConnection::new(UnixStream::connect(&self.socket).await.expect("connect"))
     }
+
+    /// A connection that has already asked for these event kinds.
+    ///
+    /// Its `Subscribe` reply is still unread — every test reads it, because
+    /// what that reply *is* is part of the contract.
+    async fn subscriber(&self, channels: &[EventKind]) -> Subscriber {
+        let mut subscriber = Subscriber {
+            connection: self.raw().await,
+        };
+        subscriber
+            .send(
+                1,
+                Request::Subscribe {
+                    channels: channels.to_vec(),
+                },
+            )
+            .await;
+        subscriber
+    }
+
+    /// Put an event on the daemon's broadcast, as a live session would.
+    ///
+    /// The sequence number is a session's business; nothing on the subscriber
+    /// side reads it, which is why one can be made up here.
+    ///
+    /// A send with nobody listening is ignored, exactly as `Session::emit`
+    /// ignores it — that is the normal state of a daemon between CLI calls.
+    fn emit(&self, event: Event) {
+        let _ = self.state.events().send(SeqEvent { seq: 1, event });
+    }
+}
+
+/// A raw connection used as a long-lived client.
+struct Subscriber {
+    connection: IpcConnection<UnixStream>,
+}
+
+impl Subscriber {
+    async fn send(&mut self, id: u64, request: Request) {
+        self.connection
+            .send(IpcMessage::request(id, request))
+            .await
+            .expect("send");
+    }
+
+    async fn next(&mut self) -> IpcMessage {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.recv())
+            .await
+            .expect("the daemon should answer within five seconds")
+            .expect("recv")
+            .expect("a frame")
+    }
+
+    async fn reply(&mut self) -> IpcPayload {
+        self.next().await.payload
+    }
+}
+
+fn stopped(session_id: SessionId) -> Event {
+    Event::Stopped {
+        session_id,
+        thread_id: Some(1),
+        reason: PauseReason::Breakpoint,
+        raw_reason: None,
+        all_threads_stopped: true,
+        hit_breakpoint_ids: Vec::new(),
+    }
 }
 
 impl Drop for TestDaemon {
@@ -107,17 +176,126 @@ async fn several_requests_share_one_connection_and_keep_their_ids_straight() {
 }
 
 #[tokio::test]
-async fn an_unimplemented_request_is_an_error_the_connection_survives() {
+async fn subscribing_is_answered_with_the_state_the_subscription_starts_from() {
+    // The snapshot and the stream are taken together on purpose (D038): a
+    // client that asked "what is the state?" and "tell me when it changes" as
+    // two questions would have a window between them to lose an event in.
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::Stopped]).await;
+
+    match subscriber.reply().await {
+        IpcPayload::Response(Response::Status(report)) => {
+            assert_eq!(report.instance, "lazydap-test");
+            assert!(report.session.is_none(), "nothing has been launched");
+        }
+        other => unreachable!("expected a status snapshot, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_subscriber_is_pushed_events_as_they_happen() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::Stopped]).await;
+    subscriber.reply().await;
+
+    let session_id = SessionId::new();
+    daemon.emit(stopped(session_id));
+
+    match subscriber.reply().await {
+        IpcPayload::Event(Event::Stopped { session_id: id, .. }) => assert_eq!(id, session_id),
+        other => unreachable!("expected a stopped event, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_event_the_client_did_not_ask_for_is_not_pushed_at_it() {
+    // "Subscribe to a small set of events" is only worth saying if the daemon
+    // honours it — otherwise every client pays for the chattiest one.
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::Stopped]).await;
+    subscriber.reply().await;
+
+    let session_id = SessionId::new();
+    daemon.emit(Event::Output {
+        session_id,
+        chunk: OutputChunk::new(OutputCategory::Stdout, "not subscribed to this\n"),
+    });
+    daemon.emit(stopped(session_id));
+
+    match subscriber.reply().await {
+        IpcPayload::Event(Event::Stopped { .. }) => {}
+        other => unreachable!("the output event should have been filtered, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_subscriber_can_still_ask_questions_and_get_its_own_answers_back() {
+    // Events share the connection with replies. A client that could not tell
+    // them apart would have to open a second one, and the whole point of the
+    // id on an envelope is that it does not.
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::Stopped]).await;
+    subscriber.reply().await;
+
+    daemon.emit(stopped(SessionId::new()));
+    subscriber.send(2, Request::Status).await;
+
+    let mut saw_event = false;
+    let mut saw_status = false;
+    for _ in 0..2 {
+        let message = subscriber.next().await;
+        match message.payload {
+            IpcPayload::Event(_) => {
+                assert_eq!(message.id, 0, "events belong to nobody's request");
+                saw_event = true;
+            }
+            IpcPayload::Response(Response::Status(_)) => {
+                assert_eq!(message.id, 2, "a reply carries the id that asked");
+                saw_status = true;
+            }
+            other => unreachable!("unexpected frame: {other:?}"),
+        }
+    }
+    assert!(saw_event && saw_status, "both should arrive");
+}
+
+#[tokio::test]
+async fn subscribing_again_replaces_the_kinds_rather_than_adding_to_them() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::Output]).await;
+    subscriber.reply().await;
+
+    subscriber
+        .send(
+            9,
+            Request::Subscribe {
+                channels: vec![EventKind::Stopped],
+            },
+        )
+        .await;
+    subscriber.reply().await;
+
+    let session_id = SessionId::new();
+    daemon.emit(Event::Output {
+        session_id,
+        chunk: OutputChunk::new(OutputCategory::Stdout, "no longer watched\n"),
+    });
+    daemon.emit(stopped(session_id));
+
+    match subscriber.reply().await {
+        IpcPayload::Event(Event::Stopped { .. }) => {}
+        other => unreachable!("the first subscription should be gone, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_never_subscribed_is_sent_no_events_at_all() {
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
 
-    let error = client
-        .request(Request::Subscribe { channels: vec![] })
-        .await
-        .expect_err("subscription lands at M11");
-    assert_eq!(error.label, "Unsupported", "got: {error}");
+    daemon.emit(stopped(SessionId::new()));
 
-    // The point of answering rather than hanging up: the client can carry on.
+    // If events leaked to every connection, this reply would be an event.
     assert!(matches!(
         client.request(Request::Status).await.expect("status"),
         Response::Status(_)

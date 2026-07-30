@@ -11,13 +11,16 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Next milestone: [M8 — Hello ratatui](docs/implementation/tasks/M08-hello-ratatui.md)** — Phase B is
-  done. lazydap is a working CLI debugger: launch, breakpoints, stepping with `--wait`, inspection,
-  and an agent skill. Phase C starts the TUI, which is a client of the same protocol.
+- **Next milestone: [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)** — Phase C is
+  done. The TUI is real: it connects to the daemon as a client, subscribes to events, shows the
+  source with a marker that follows the debuggee, and drives the program with F5/F10/F11/S-F11
+  through the same requests the CLI sends. Phase D adds the panes that make it useful.
 - Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
   [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
-  D029 (adapter seam), D030 (`SessionId` form), and D031–D036 from M6/M7 (breakpoint ids, protocol
-  v2, the two codelldb normalisations, skill generation, and what `--dry-run` means per command)
+  D029 (adapter seam), D030 (`SessionId` form), D031–D036 from M6/M7 (breakpoint ids, protocol
+  v2, the two codelldb normalisations, skill generation, and what `--dry-run` means per command),
+  and D037–D039 from Phase C (the daemon→TUI dependency arrow, what `Subscribe` answers with, and
+  how the TUI is verified)
 
 ### Repo state notes (for cold-start agent)
 
@@ -48,10 +51,10 @@ workflow at M15.
 
 ## Phase C — TUI (M8–M11)
 
-- [ ] [M8 — Hello ratatui](docs/implementation/tasks/M08-hello-ratatui.md)
-- [ ] [M9 — Show a file](docs/implementation/tasks/M09-show-a-file.md)
-- [ ] [M10 — Elm-ify the loop](docs/implementation/tasks/M10-elm-ify.md)
-- [ ] [M11 — Wire IPC into TUI](docs/implementation/tasks/M11-wire-ipc-into-tui.md)
+- [x] [M8 — Hello ratatui](docs/implementation/tasks/M08-hello-ratatui.md) — completed 2026-07-30. New crate `lazydap-tui` (ratatui 0.30, crossterm via ratatui's re-export). Bare `lazydap` on a terminal opens it; `echo "" | lazydap` prints help, because the tty check is stdin **and** stdout. `lazydap tui` is the explicit spelling. Boundary script gains the `lazydap-tui` row (D037).
+- [x] [M9 — Show a file](docs/implementation/tasks/M09-show-a-file.md) — completed 2026-07-30. Source pane with line numbers, `j`/`k`/arrows/`<C-d>`/`<C-u>`/`gg`/`G`, scrolling that keeps the cursor on screen. Not wrapped, and `<C-d>` is half the *visible* height rather than a fixed ten lines.
+- [x] [M10 — Elm-ify the loop](docs/implementation/tasks/M10-elm-ify.md) — completed 2026-07-30. `state`/`msg`/`update`/`view` per D012; behaviour identical to M9, checked screen by screen in a pseudo-terminal. The loop turns async here (`select!` over input and a tick, crossterm's blocking poll on `spawn_blocking`).
+- [x] [M11 — Wire IPC into TUI](docs/implementation/tasks/M11-wire-ipc-into-tui.md) — completed 2026-07-30. `Subscribe` implemented daemon-side and answered with a state snapshot (D038); the TUI connects as an ordinary client, F5/F10/F11/S-F11 send the same requests the CLI's subcommands send, and `stopped` events move the marker. **Phase C complete.**
 
 ## Phase D — useful features (M12–M15) → v0.1
 

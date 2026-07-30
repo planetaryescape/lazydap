@@ -197,3 +197,45 @@ End-to-end manual:
 - **Don't fire `--wait` from the TUI.** TUI uses fire-and-forget continue; it learns about the new state from the `Stopped` event. (Per [`/docs/blueprint/10-async-to-sync.md`](../../blueprint/10-async-to-sync.md): TUI uses streaming events, agents use `--wait`.)
 - **Reconnection.** If the daemon dies while TUI is running, show an error banner and offer to restart. Optional for M11; mandatory before v0.1.
 - **After M11, lazydap v0.1-prerelease is real.** The rest of Phase D is polish.
+
+## Completed 2026-07-30
+
+The TUI is a client of the daemon. `Subscribe` works server-side, the source pane's marker follows the debuggee, and F5/`c`, F10/`n`, F11 and shift-F11 send the requests behind `continue`, `step`, `step-in` and `step-out`.
+
+### `Subscribe`, and what it answers with
+
+It had been a placeholder answering `Unsupported` since M5. Implementing it is a change to `server::serve_client` rather than to `handlers::dispatch`: the connection is the thing an event stream attaches to, and the dispatcher does not have one. A subscribed connection selects over its socket *and* the session broadcast; events go out as ordinary event frames (id `0`) interleaved with replies, filtered to the kinds asked for. Sends happen in the body of a `select!` arm and never as one — `IpcConnection::send` is not cancellation-safe and a cancelled send leaves half a frame on the wire.
+
+The reply is a `Response::Status`, and **nothing buffered is replayed**. Both are load-bearing and both are argued in **D038**; the short version is that a snapshot taken under the same call has no window for an event to fall into, that a replayed `Stopped` would send the TUI chasing a position the program left, and that the buffer's delivery watermark belongs to `--wait`. Protocol stays at **v2**: no new `Response` variant, no reshaped frame, and the frozen `Shutdown` escape hatch untouched.
+
+### Corrections to the sketch above
+
+- **`connect` is `async`.** The sketch declares it non-async with `.await` inside, and ends in a `todo!()` — which the workspace lints warn on. There is no `todo!()` anywhere.
+- **Responses are not correlated back to requests.** A `Response` says what it is, and the daemon answers one request at a time in order, so the last answer of a given kind is the freshest. The id is carried for logging.
+- **`state.session.unwrap()` in the sketch's `Stopped` branch is not there.** The branch that sets the session and the one that reads it are the same branch; it reads what it just wrote.
+- **The marker is remembered, not passed along.** The daemon can say "line 19 of main.c" while main.c is still being read off disk, so a stop records a `location` and the marker is applied either immediately (file open) or when the load lands. A file that finishes loading *after* the program has moved on is not marked — both cases are tested.
+
+### Boundaries
+
+`crates/tui` depends on `core`, `protocol` and `config` only; the row is in `scripts/check_architecture_boundaries.sh` (D037). Nothing in it names a DAP type. The daemon is ensured by `commands::tui::run`, through the same `ensure_daemon_running` every subcommand uses, and the TUI is handed a socket path — starting a *process* is the binary's job, not a client's.
+
+### Verification
+
+Reducer and IPC client are covered headless (56 tests in `lazydap-tui`, five more in `crates/daemon/tests/ipc_server.rs` for the subscription). The cross-process scenario needs a real terminal and a real codelldb, so it was driven in a pseudo-terminal — see **D039**. Both directions were checked: a `lazydap continue` typed in another shell moves the marker, and so does F5 pressed inside the TUI.
+
+```
+┌source · …/examples/c-hello/main.c─────────────────────────────────────┐
+│  19     printf("goodbye y=%d\n", y); /* line 19 — M4 breakpoint */     │
+│▶ 20     return 0;                                                      │
+│  21 }                                                                  │
+└────────────────────────────────────────────────────────────────────────┘
+paused (step) at main.c:20 · F5 continue · F10 step · q quit
+```
+
+Also verified: `q` leaves the session running (the daemon still reports it paused afterwards), and a TUI started against an already-paused session finds the marker from the subscription snapshot rather than waiting for the program to move.
+
+### Follow-ups discovered
+
+- **No reconnection.** A daemon that goes away is reported in the status row and the TUI stays up with a dead connection. The notes call this optional for M11 and mandatory before v0.1; it needs a milestone.
+- **`EndReason` → `SessionState` is now written twice** — once in `crates/daemon/src/state.rs` (`end_once`) and once in `crates/tui/src/update.rs`. Its home is `lazydap-core`, next to `EndReason`, but that is a change to a crate outside this milestone's diff.
+- **Output events are not subscribed to.** There is no pane for them until M17. `Request::Output` already reads the buffer, so nothing is lost.

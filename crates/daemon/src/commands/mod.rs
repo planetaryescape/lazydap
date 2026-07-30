@@ -14,6 +14,7 @@ pub mod breakpoints;
 pub mod diagnostics;
 pub mod inspect;
 pub mod session;
+pub mod tui;
 
 use crate::cli::WaitArgs;
 use crate::client::DaemonClient;

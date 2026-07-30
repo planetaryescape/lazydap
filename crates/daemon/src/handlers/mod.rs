@@ -140,9 +140,12 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             breakpoints::toggle(state, selector, dry_run).await
         }
 
+        // Answered by `server::serve_client`, which is the only thing that
+        // has the connection to attach the event stream to. Reaching here
+        // means somebody called `dispatch` directly.
         Request::Subscribe { .. } => Err(IpcError::new(
-            ErrorCode::Unsupported,
-            "event subscription lands with the TUI at M11; use `lazydap output` for now",
+            ErrorCode::DaemonInternalError,
+            "subscription is handled on the connection, not by the dispatcher",
         )),
     }
 }
@@ -334,13 +337,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_this_build_does_not_implement_says_so() {
+    async fn subscription_is_not_something_the_dispatcher_can_answer() {
+        // It needs the connection to attach the event stream to, which only
+        // `server::serve_client` has. Refusing here rather than answering
+        // something plausible is what stops a future caller from wiring it up
+        // in the one place that cannot deliver on it.
         let state = state();
         let error = dispatch(&state, Request::Subscribe { channels: vec![] })
             .await
-            .expect_err("subscription is not implemented until M11");
+            .expect_err("the dispatcher has no connection to subscribe");
 
-        assert_eq!(error.code, ErrorCode::Unsupported, "got: {error}");
+        assert_eq!(error.code, ErrorCode::DaemonInternalError, "got: {error}");
     }
 
     #[tokio::test]

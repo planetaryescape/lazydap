@@ -290,6 +290,10 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Open the terminal UI. This is also what bare `lazydap` does on a
+    /// terminal.
+    Tui,
+
     /// Run the daemon. Normally started automatically by the first command
     /// that needs it.
     Daemon {
