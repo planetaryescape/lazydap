@@ -114,12 +114,24 @@ green; no Rust was touched.
 
 ### Build pipeline
 
-`npm run build` = `generate` → `validate` → `astro build` → `generate-llms-txt`.
+`npm run build` = `validate` → `astro build` → `generate-llms-txt`. **It needs Node and
+nothing else** — no cargo, no `lazydap` binary. That is load-bearing: a clean clone and a
+Vercel deploy both have neither. Verified by copying `site/` somewhere with no `target/` and
+building 39 pages there.
+
+Regeneration is separate (`npm run generate`) and is the only part that needs a binary. The
+generated pages are committed; CI regenerates against a binary it just built and fails on any
+diff.
 
 - `scripts/generate-cli-reference.mjs` shells out to the built binary and walks
   `lazydap --help` → `lazydap <cmd> --help`. Nothing is transcribed by hand. Options common
   to every command are hoisted to the index rather than repeated 22 times. Binary resolution
-  is `$LAZYDAP_BIN`, then `target/release`, then `target/debug`.
+  is `$LAZYDAP_BIN`, else whichever of `target/release` and `target/debug` is newest — not
+  release-first, which would let a stale release binary answer after a clap change and make
+  the freshness check pass against the wrong CLI. Each `--help` gets a 10-second timeout so a
+  wedged binary (quirk 5) fails the build rather than hanging it.
+- `crates/protocol/examples/wire_examples.rs` prints the serialised form of representative
+  protocol messages. `reference/protocol.md` pastes its output rather than describing it.
 - `scripts/validate-docs.mjs` checks internal links resolve, slugs are unique, frontmatter is
   complete, and that specific stale claims cannot be copied in from the blueprint —
   CamelCase wire values, the eleven-crate list, the "sixth IPC bucket" line, `xargs -r`, and
@@ -168,6 +180,24 @@ Two findings worth keeping: `--timeout 3` against a program printing once a seco
 `"state": "timeout"` with all three lines still in `captured_output`, which is the evidence
 for "output survives a timeout"; and a conditional breakpoint `i == 7` stopped with
 `sum == 21`, which is arithmetically the right iteration.
+
+### Review round: 15 defects fixed
+
+An external review found 14 defects plus one from the orchestrator, concentrated in the pages
+written from a model of the code rather than from the code. `reference/protocol.md` was the
+worst — six of the fifteen. All fixed; the durable lesson is that **wire shapes get verified
+the same way commands do**, by serialising the real types and pasting, which is now what
+`wire_examples.rs` exists for.
+
+The one that would have hurt most: `npm run build` regenerated the CLI reference, so it
+needed a Rust binary, so a clean clone and any Vercel deploy died on it. Split out.
+
+Also corrected: `launch` does not take `--wait` (three pages claimed it did); `adapter_died`
+leaves `exit_code` null; the error list was missing five names; the crate graph had two wrong
+rows against `cargo metadata`; the quickstart's "nothing else is edited" claim was not
+literally true; and a debug-gym citation carried per-model percentages that appear in neither
+the abstract nor the Microsoft Research blog, now replaced with what those sources actually
+say.
 
 ### Left open for the user
 
