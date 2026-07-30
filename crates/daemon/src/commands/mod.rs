@@ -89,13 +89,14 @@ pub async fn fetch_status(client: &mut DaemonClient) -> Result<StatusReport> {
 ///
 /// The protocol always carries an explicit id (D007); letting the user leave
 /// it out is a client-side convenience, so parsing it is a client-side job.
+/// Exit 2, not 1: this is a malformed argument, which the contract in
+/// AGENTS.md calls a usage error. Nothing has been asked of the daemon yet, so
+/// reporting it as a general failure would have a script retrying a command
+/// that can never work.
 pub fn parse_session_id(value: &str) -> Result<SessionId> {
-    value.parse::<SessionId>().map_err(|error| {
-        CliError::from(IpcError::new(
-            ErrorCode::BadRequest,
-            format!("`{value}` is not a session id: {error}"),
-        ))
-    })
+    value
+        .parse::<SessionId>()
+        .map_err(|error| CliError::usage(format!("`{value}` is not a session id: {error}")))
 }
 
 /// The single active session, for commands that let you leave the id out.
@@ -211,12 +212,17 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_session_id_is_rejected_before_the_daemon_is_bothered() {
+    fn a_malformed_session_id_is_a_usage_error_not_a_debugger_failure() {
         let error = match parse_session_id("not-a-uuid") {
             Err(error) => error,
             Ok(id) => unreachable!("that is not an id, got: {id}"),
         };
-        assert_eq!(error.label, "BadRequest", "got: {error}");
+        assert_eq!(
+            error.exit_code,
+            crate::error::exit::USAGE,
+            "exit 1 would have a script retrying a command that can never work",
+        );
+        assert_eq!(error.label, "UsageError", "got: {error}");
     }
 
     #[test]

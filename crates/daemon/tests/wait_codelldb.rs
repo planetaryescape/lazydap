@@ -19,14 +19,34 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 const LAZYDAP: &str = env!("CARGO_BIN_EXE_lazydap");
 
-/// Skip the rest of a test, saying why, when the machine cannot run it.
+/// One debug session at a time, across the whole file.
 ///
-/// The thread name is the test's own name under the default harness, which is
-/// what makes the skip line say which test went quiet.
+/// Every test here spawns a real codelldb, which loads LLDB, maps a debuggee
+/// and talks over TCP. `cargo test` runs the file's tests in parallel, so a
+/// dozen of those start at once and contend for the same machine — and the
+/// launch handshake has a 15-second deadline. Under load that deadline is
+/// reached before the adapter is ready, and the suite fails in a way that has
+/// nothing to do with lazydap: 12 of 13 timed out on a reviewer's machine
+/// while passing in isolation.
+///
+/// So they take turns. It costs a few seconds of wall clock and buys a suite
+/// whose failures mean something.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Claim the machine and check it can run this at all.
+///
+/// Skips, loudly, when codelldb or a C compiler is missing. The thread name is
+/// the test's own name under the default harness, which is what makes the skip
+/// line say which test went quiet.
 macro_rules! require_toolchain {
-    () => {
+    () => {{
+        // Held for the rest of the test: the guard is returned alongside the
+        // toolchain so it lives exactly as long as the test body does.
+        let guard = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match Toolchain::find() {
-            Some(toolchain) => toolchain,
+            Some(toolchain) => (toolchain, guard),
             None => {
                 eprintln!(
                     "skipping {}: needs codelldb on PATH and a C compiler",
@@ -35,7 +55,7 @@ macro_rules! require_toolchain {
                 return;
             }
         }
-    };
+    }};
 }
 
 struct Toolchain {
@@ -54,9 +74,26 @@ impl Toolchain {
     /// Build one of `examples/c-fixtures/`, with debug info and no optimising
     /// — a breakpoint on a line that the optimiser folded away is not a test
     /// of anything.
-    fn build(&self, fixture: &str, into: &Path) -> PathBuf {
+    ///
+    /// Built to a **fixed path**, and skipped when it is already newer than
+    /// its source. Not merely to save a compile: macOS evaluates a binary's
+    /// signature the first time a given *inode* is executed, and a debugger
+    /// attaching to a brand-new one pays that cost in full. Compiling to a
+    /// fresh temporary path per test made every launch take about thirteen
+    /// seconds against a fifteen-second handshake deadline — passing alone,
+    /// failing the moment the machine was busy. A stable path is evaluated
+    /// once and warm thereafter, which took the same launch to under half a
+    /// second. See `docs/reference/codelldb-quirks.md` quirk 5 for the
+    /// pathological version of the same mechanism.
+    fn build(&self, fixture: &str) -> PathBuf {
         let source = repo_root().join("examples/c-fixtures").join(fixture);
-        let binary = into.join(fixture.trim_end_matches(".c"));
+        let out_dir = repo_root().join("target/debug/c-fixtures");
+        std::fs::create_dir_all(&out_dir).expect("create the fixture directory");
+        let binary = out_dir.join(fixture.trim_end_matches(".c"));
+
+        if is_fresh(&binary, &source) {
+            return binary;
+        }
 
         let output = Command::new(&self.compiler)
             .args(["-g", "-O0", "-pthread"])
@@ -71,6 +108,19 @@ impl Toolchain {
             String::from_utf8_lossy(&output.stderr),
         );
         binary
+    }
+}
+
+/// Whether `binary` exists and is at least as new as `source`.
+fn is_fresh(binary: &Path, source: &Path) -> bool {
+    let modified = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    match (modified(binary), modified(source)) {
+        (Some(built), Some(written)) => built >= written,
+        _ => false,
     }
 }
 
@@ -220,9 +270,9 @@ fn output_texts(blob: &Value) -> Vec<String> {
 
 #[test]
 fn continuing_to_a_breakpoint_reports_where_and_why_it_stopped() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("bp");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     sandbox.launch(&program);
     let added = sandbox.breakpoint("exits.c", 6);
@@ -240,13 +290,24 @@ fn continuing_to_a_breakpoint_reports_where_and_why_it_stopped() {
             .is_some_and(|ids| !ids.is_empty()),
         "the stop must name the breakpoint that caused it: {blob}",
     );
+
+    // Breakpoint updates have to carry *our* id, not just the adapter's.
+    // codelldb verifies lazily, so these arrive mid-run; an update a caller
+    // cannot match against the ids `break --list` gave them names nothing.
+    let ours = added["breakpoints"][0]["id"].clone();
+    for update in blob["breakpoint_updates"].as_array().unwrap_or(&Vec::new()) {
+        assert_eq!(
+            update["id"], ours,
+            "a breakpoint update must be correlatable with break --list: {blob}",
+        );
+    }
 }
 
 #[test]
 fn continuing_to_the_end_reports_the_exit_code_and_the_last_of_the_output() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("exit");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     sandbox.launch(&program);
     let blob = sandbox.wait("20");
@@ -264,9 +325,9 @@ fn continuing_to_the_end_reports_the_exit_code_and_the_last_of_the_output() {
 
 #[test]
 fn a_program_that_segfaults_ends_the_wait_rather_than_hanging_it() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("crash");
-    let program = toolchain.build("crashes.c", &sandbox.root);
+    let program = toolchain.build("crashes.c");
 
     sandbox.launch(&program);
     let blob = sandbox.wait("20");
@@ -289,9 +350,9 @@ fn a_program_that_segfaults_ends_the_wait_rather_than_hanging_it() {
 
 #[test]
 fn a_program_that_never_stops_times_out_and_keeps_running() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("spin");
-    let program = toolchain.build("spins.c", &sandbox.root);
+    let program = toolchain.build("spins.c");
 
     sandbox.launch(&program);
     let blob = sandbox.wait("2");
@@ -312,9 +373,9 @@ fn a_program_that_never_stops_times_out_and_keeps_running() {
 fn waiting_with_no_timeout_at_all_blocks_rather_than_falling_over() {
     // `--timeout 0` is documented as "wait forever". Expressing that as a very
     // large `Duration` panicked the client: `Instant + Duration` overflows.
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("forever");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     sandbox.launch(&program);
     let blob = sandbox.json(&["--format", "json", "continue", "--wait", "--timeout", "0"]);
@@ -325,9 +386,9 @@ fn waiting_with_no_timeout_at_all_blocks_rather_than_falling_over() {
 
 #[test]
 fn a_paused_program_can_be_interrupted_after_a_timeout() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("pause");
-    let program = toolchain.build("spins.c", &sandbox.root);
+    let program = toolchain.build("spins.c");
 
     sandbox.launch(&program);
     assert_eq!(sandbox.wait("1")["state"], "timeout");
@@ -339,9 +400,9 @@ fn a_paused_program_can_be_interrupted_after_a_timeout() {
 
 #[test]
 fn a_chatty_program_s_output_arrives_whole_and_in_order() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("chat");
-    let program = toolchain.build("chatty.c", &sandbox.root);
+    let program = toolchain.build("chatty.c");
 
     sandbox.launch(&program);
     sandbox.breakpoint("chatty.c", 10);
@@ -363,9 +424,9 @@ fn a_chatty_program_s_output_arrives_whole_and_in_order() {
 
 #[test]
 fn a_wait_ends_when_the_adapter_is_killed_out_from_under_it() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("dead");
-    let program = toolchain.build("spins.c", &sandbox.root);
+    let program = toolchain.build("spins.c");
 
     sandbox.launch(&program);
     let daemon_pid = sandbox.json(&["--format", "json", "status"])["daemon_pid"]
@@ -396,9 +457,9 @@ fn a_wait_ends_when_the_adapter_is_killed_out_from_under_it() {
 
 #[test]
 fn a_multi_threaded_stop_is_coherent_about_which_threads_stopped() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("thr");
-    let program = toolchain.build("threads.c", &sandbox.root);
+    let program = toolchain.build("threads.c");
 
     sandbox.launch(&program);
     sandbox.breakpoint("threads.c", 15);
@@ -429,9 +490,9 @@ fn a_multi_threaded_stop_is_coherent_about_which_threads_stopped() {
 
 #[test]
 fn two_waits_sent_at_once_both_come_back_with_an_answer() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("queue");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     sandbox.launch(&program);
     sandbox.breakpoint("exits.c", 6);
@@ -452,13 +513,27 @@ fn two_waits_sent_at_once_both_come_back_with_an_answer() {
         );
         assert!(blob["elapsed_ms"].is_number(), "got: {blob}");
     }
+
+    // The queue means one *run* each, not one message each. The permit is held
+    // for the whole wait, so the second continue cannot start until the first
+    // has reported its stop — and therefore cannot hand back the first's stop
+    // as its own. Two waits, two different outcomes.
+    let states: Vec<&str> = [&first, &second]
+        .iter()
+        .map(|blob| blob["state"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        states.contains(&"paused")
+            && (states.contains(&"exited") || states.contains(&"terminated")),
+        "one wait should have taken the breakpoint and the other the ending, got: {states:?}",
+    );
 }
 
 #[test]
 fn a_breakpoint_set_in_one_session_applies_to_the_next_one() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("persist");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     // First session: set the breakpoint, then throw the session away.
     sandbox.launch(&program);
@@ -485,9 +560,9 @@ fn a_breakpoint_set_in_one_session_applies_to_the_next_one() {
 
 #[test]
 fn breakpoints_survive_the_daemon_that_recorded_them() {
-    let toolchain = require_toolchain!();
+    let (toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("reboot");
-    let program = toolchain.build("exits.c", &sandbox.root);
+    let program = toolchain.build("exits.c");
 
     let added = sandbox.breakpoint("exits.c", 6);
     let id = added["breakpoints"][0]["id"].clone();
@@ -513,7 +588,7 @@ fn breakpoints_survive_the_daemon_that_recorded_them() {
 fn listing_ids_feeds_removing_by_id() {
     // The composability criterion from the milestone:
     // `break --list --format ids | xargs -I{} lazydap break --remove --id {}`
-    let _toolchain = require_toolchain!();
+    let (_toolchain, _turn) = require_toolchain!();
     let sandbox = Sandbox::new("xargs");
 
     for line in [6, 7] {
