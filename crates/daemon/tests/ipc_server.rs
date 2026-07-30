@@ -5,7 +5,10 @@
 //! tests do not do is launch a debuggee — that needs a live adapter and is
 //! covered by the milestone's manual verification.
 
-use lazydap_core::{OutputCategory, OutputChunk, PauseReason, SessionId};
+use lazydap_core::{
+    BreakpointId, BreakpointSelector, NewBreakpoint, OutputCategory, OutputChunk, PauseReason,
+    SessionId,
+};
 use lazydap_daemon::client::DaemonClient;
 use lazydap_daemon::server::serve_client;
 use lazydap_daemon::state::{DaemonState, SeqEvent};
@@ -422,4 +425,156 @@ async fn connecting_to_a_socket_with_nothing_behind_it_fails_as_unreachable() {
 
     assert_eq!(error.label, "DaemonUnreachable", "got: {error}");
     assert_eq!(error.exit_code, 3);
+}
+
+/// A breakpoint set with nothing running still reaches whoever is watching.
+///
+/// The gap this closes: `lazydap break` between sessions persisted the
+/// breakpoint and announced nothing, so an open TUI's gutter went on drawing
+/// the old set indefinitely — `break --list` and the screen disagreeing, which
+/// is exactly the thing M14's success criteria forbid in the other direction.
+#[tokio::test]
+async fn a_breakpoint_set_with_no_session_is_announced_to_subscribers() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::BreakpointUpdated]).await;
+    subscriber.reply().await;
+
+    subscriber
+        .send(
+            2,
+            Request::BreakpointAdd {
+                breakpoint: NewBreakpoint {
+                    source: PathBuf::from("/p/main.c"),
+                    line: 19,
+                    column: None,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                    enabled: true,
+                },
+                dry_run: false,
+            },
+        )
+        .await;
+
+    let mut announced = None;
+    let mut answered = false;
+    for _ in 0..2 {
+        match subscriber.next().await.payload {
+            IpcPayload::Event(Event::BreakpointUpdated {
+                session_id,
+                breakpoint,
+            }) => announced = Some((session_id, breakpoint)),
+            IpcPayload::Response(Response::Breakpoints(_)) => answered = true,
+            other => unreachable!("unexpected frame: {other:?}"),
+        }
+    }
+
+    assert!(answered, "the caller still gets its own reply");
+    let (session_id, breakpoint) = announced.expect("an announcement");
+    assert_eq!(
+        session_id, None,
+        "project scope: there is no adapter opinion in this one",
+    );
+    assert_eq!(breakpoint.id, Some(BreakpointId(1)));
+    assert_eq!(breakpoint.line, Some(19));
+}
+
+/// The same for a removal, which no adapter ever reports.
+///
+/// An adapter is handed the new list for a file and says nothing at all about
+/// what is no longer in it, so a client watching only adapter events keeps
+/// drawing a breakpoint that is gone — with or without a live session.
+#[tokio::test]
+async fn a_breakpoint_removed_with_no_session_is_announced_too() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::BreakpointUpdated]).await;
+    subscriber.reply().await;
+
+    subscriber
+        .send(
+            2,
+            Request::BreakpointAdd {
+                breakpoint: NewBreakpoint {
+                    source: PathBuf::from("/p/main.c"),
+                    line: 19,
+                    column: None,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                    enabled: true,
+                },
+                dry_run: false,
+            },
+        )
+        .await;
+    // Drain the add's reply and its announcement.
+    for _ in 0..2 {
+        subscriber.next().await;
+    }
+
+    subscriber
+        .send(
+            3,
+            Request::BreakpointRemove {
+                selector: BreakpointSelector::Location {
+                    source: PathBuf::from("/p/main.c"),
+                    line: 19,
+                },
+                dry_run: false,
+            },
+        )
+        .await;
+
+    let mut announced = false;
+    for _ in 0..2 {
+        if let IpcPayload::Event(Event::BreakpointUpdated { session_id, .. }) =
+            subscriber.next().await.payload
+        {
+            assert_eq!(session_id, None);
+            announced = true;
+        }
+    }
+    assert!(
+        announced,
+        "a removal has to be announced or it is invisible"
+    );
+}
+
+/// A preview changes nothing, so it announces nothing.
+#[tokio::test]
+async fn a_dry_run_announces_nothing_because_nothing_happened() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon.subscriber(&[EventKind::BreakpointUpdated]).await;
+    subscriber.reply().await;
+
+    subscriber
+        .send(
+            2,
+            Request::BreakpointAdd {
+                breakpoint: NewBreakpoint {
+                    source: PathBuf::from("/p/main.c"),
+                    line: 19,
+                    column: None,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                    enabled: true,
+                },
+                dry_run: true,
+            },
+        )
+        .await;
+
+    match subscriber.next().await.payload {
+        IpcPayload::Response(Response::Breakpoints(report)) => assert!(report.dry_run),
+        other => unreachable!("expected the preview's reply first, got: {other:?}"),
+    }
+    // Nothing else should be waiting. `Status` is answered on the same
+    // connection, so its reply arriving next proves no event came between.
+    subscriber.send(3, Request::Status).await;
+    match subscriber.next().await.payload {
+        IpcPayload::Response(Response::Status(_)) => {}
+        other => unreachable!("a preview announced something: {other:?}"),
+    }
 }

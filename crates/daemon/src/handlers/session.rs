@@ -85,6 +85,13 @@ pub async fn launch(
     ));
     session.set_last_thread_id(launched.thread_id);
     session.record_breakpoints(&launched.breakpoints);
+    // Recorded only on the launch path, deliberately. When `attach` lands it
+    // must not do this: the process was somebody else's before we looked at
+    // it, and killing it because our adapter crashed would destroy something
+    // we never started (D045).
+    if let Some(pid) = launched.debuggee_pid {
+        session.set_debuggee(pid);
+    }
 
     session.seed_events(
         launched

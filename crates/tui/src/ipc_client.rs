@@ -7,11 +7,11 @@
 //! So the stream is split in two, a task per direction, and everything either
 //! task learns arrives at the reducer as a [`Msg`].
 //!
-//! Requests are not correlated back to their answers. They do not need to be:
-//! a [`Response`] says what it is, the daemon answers one request at a time in
-//! the order they arrive, and so the last answer of a given kind is always the
-//! freshest. The id is carried anyway, because a log line without one is
-//! impossible to follow.
+//! Requests carry an id chosen by the reducer, not by this module (D040).
+//! That is what lets an answer be matched to the thing that asked for it — a
+//! `Variables` reply is a bare list of variables with nothing in it saying
+//! which node was being expanded, and a stack trace for a stop the program has
+//! already left is indistinguishable from the current one.
 
 use crate::error::{Result, TuiError};
 use crate::msg::Msg;
@@ -23,7 +23,10 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-/// The id the handshake uses. The write pump numbers everything after it.
+/// The id the handshake uses.
+///
+/// Reserved: [`crate::state::RESERVED_IDS`] is what keeps the reducer from
+/// handing out the same one and mistaking a `Pong` for its own answer.
 const HANDSHAKE_ID: u64 = 1;
 
 /// A live connection to the daemon.
@@ -32,13 +35,13 @@ const HANDSHAKE_ID: u64 = 1;
 /// is reported as [`Msg::DaemonGone`] by the read pump, which is the one place
 /// that can tell the difference between "not yet" and "never".
 pub struct IpcClient {
-    requests: UnboundedSender<Request>,
+    requests: UnboundedSender<(u64, Request)>,
 }
 
 impl IpcClient {
-    pub fn send(&self, request: Request) {
-        if self.requests.send(request).is_err() {
-            tracing::debug!(target: "tui.ipc", "dropped a request; the connection has closed");
+    pub fn send(&self, id: u64, request: Request) {
+        if self.requests.send((id, request)).is_err() {
+            tracing::debug!(target: "tui.ipc", id, "dropped a request; the connection has closed");
         }
     }
 }
@@ -108,12 +111,9 @@ async fn handshake(
 /// Requests out, one at a time, in the order the reducer asked for them.
 async fn write_pump(
     mut writer: IpcConnection<OwnedWriteHalf>,
-    mut outgoing: UnboundedReceiver<Request>,
+    mut outgoing: UnboundedReceiver<(u64, Request)>,
 ) {
-    let mut next_id = HANDSHAKE_ID + 1;
-    while let Some(request) = outgoing.recv().await {
-        let id = next_id;
-        next_id += 1;
+    while let Some((id, request)) = outgoing.recv().await {
         tracing::debug!(target: "tui.ipc", id, ?request, "sending");
 
         if let Err(error) = writer.send(IpcMessage::request(id, request)).await {
@@ -304,9 +304,12 @@ mod tests {
             let (tx, mut rx) = mpsc::unbounded_channel();
 
             let client = connect(&socket, tx).await.expect("connect");
-            client.send(Request::Subscribe {
-                channels: vec![lazydap_protocol::EventKind::Stopped],
-            });
+            client.send(
+                2,
+                Request::Subscribe {
+                    channels: vec![lazydap_protocol::EventKind::Stopped],
+                },
+            );
 
             match rx.recv().await.expect("a snapshot") {
                 Msg::DaemonResponse { response, .. } => {

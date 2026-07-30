@@ -34,13 +34,27 @@ mod view;
 
 pub use error::{Result, TuiError};
 
-use lazydap_protocol::{EventKind, Request};
 use msg::{Cmd, Msg};
 use ratatui::crossterm::event::{self, Event};
 use state::AppState;
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
+
+/// How the TUI gets a daemon back after the one it was talking to goes away.
+///
+/// A callback rather than a call, because starting a daemon means starting a
+/// *process*, and this crate may not depend on the crate that can do that
+/// (`ARCHITECTURE.md`) — the same boundary that stops the TUI reaching the
+/// daemon's internals. `lazydap`'s entry point supplies one that runs the same
+/// `ensure_daemon_running` every subcommand takes (D003), so a TUI left open
+/// across `lazydap shutdown` recovers exactly as the next CLI command would.
+pub type EnsureDaemon = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync,
+>;
 
 /// How long the input thread waits for a key before looking around.
 ///
@@ -55,19 +69,6 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 /// to cover whatever ages on its own.
 const TICK: Duration = Duration::from_millis(100);
 
-/// What the TUI watches.
-///
-/// Deliberately not everything. `Output` is the chatty one and there is no
-/// pane to put it in until M17; `BreakpointUpdated` and `ThreadChanged` land
-/// with the panes that show them. A client that subscribed to everything would
-/// make the daemon do work nobody reads.
-const CHANNELS: [EventKind; 4] = [
-    EventKind::SessionStarted,
-    EventKind::SessionEnded,
-    EventKind::Stopped,
-    EventKind::Continued,
-];
-
 /// Run the TUI until the user quits.
 ///
 /// Connects to the daemon at `socket`, which must already be running — see
@@ -80,16 +81,20 @@ const CHANNELS: [EventKind; 4] = [
 /// panic: `ratatui::try_init` installs a hook that restores it before
 /// unwinding. A debugger that leaves your shell in raw mode when it crashes is
 /// worse than no debugger.
-pub async fn run(socket: &Path) -> Result<()> {
+pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
     tracing::debug!(target: "tui.lifecycle", socket = %socket.display(), "entering the TUI");
+    let socket = socket.to_path_buf();
     let (tx, mut rx) = mpsc::unbounded_channel();
+    // A reconnection produces a whole new client, which only the loop may
+    // install — it is what `dispatch` sends through. So the reconnecting task
+    // hands it back rather than swapping it in from another thread.
+    let (clients, mut reconnected) = mpsc::unbounded_channel();
 
-    let ipc = ipc_client::connect(socket, tx.clone()).await?;
-    // Subscribing is also how the TUI learns what is already going on: the
-    // reply is a snapshot taken at the moment the stream starts (D038).
-    ipc.send(Request::Subscribe {
-        channels: CHANNELS.to_vec(),
-    });
+    let mut ipc = ipc_client::connect(&socket, tx.clone()).await?;
+    // Subscribing is a reducer decision, not a hard-coded first move, so that
+    // a reconnection replays exactly the same opening. `Msg::Connected` is
+    // what starts it.
+    let _ = tx.send(Msg::Connected);
 
     spawn_input_pump(tx.clone());
 
@@ -112,7 +117,7 @@ pub async fn run(socket: &Path) -> Result<()> {
             break Err(error.into());
         }
 
-        // Both arms are cancellation-safe, so whichever loses the race is
+        // Every arm is cancellation-safe, so whichever loses the race is
         // dropped without losing anything (`docs/reference/tokio-patterns.md`).
         let msg = tokio::select! {
             received = rx.recv() => match received {
@@ -120,6 +125,24 @@ pub async fn run(socket: &Path) -> Result<()> {
                 // Only reachable if every sender is gone, which means the
                 // input pump died. Carrying on would be a TUI no key can quit.
                 None => break Ok(()),
+            },
+            // Installed before the reducer hears about it, so the requests it
+            // asks for in reply go down the new connection rather than the dead
+            // one — but only if this is still the attempt being waited on. A
+            // connection from an attempt that lost its race would replace a
+            // working one with an unsubscribed one, and every request after
+            // that would go somewhere nobody is listening.
+            Some((attempt, client)) = reconnected.recv() => {
+                if !state.is_awaiting(attempt) {
+                    tracing::debug!(
+                        target: "tui.ipc",
+                        attempt,
+                        "dropping a connection from a superseded reconnection",
+                    );
+                    continue;
+                }
+                ipc = client;
+                Msg::Reconnected { attempt, outcome: Ok(()) }
             },
             _ = tick.tick() => Msg::Tick,
         };
@@ -130,7 +153,14 @@ pub async fn run(socket: &Path) -> Result<()> {
         if matches!(cmd, Cmd::Quit) {
             break Ok(());
         }
-        dispatch(cmd, &tx, &ipc);
+        Dispatcher {
+            msgs: &tx,
+            ipc: &ipc,
+            socket: &socket,
+            ensure_daemon: &ensure_daemon,
+            clients: &clients,
+        }
+        .run(cmd);
     };
 
     // Unconditional: a loop that failed still borrowed the terminal.
@@ -139,26 +169,92 @@ pub async fn run(socket: &Path) -> Result<()> {
     result
 }
 
-/// Run what the reducer asked for.
+/// Everything a [`Cmd`] might need to reach the world with.
 ///
-/// Everything here is fire-and-forget: a command's *result* comes back as a
-/// [`Msg`], which is what keeps the reducer the only place state changes.
-fn dispatch(cmd: Cmd, tx: &UnboundedSender<Msg>, ipc: &ipc_client::IpcClient) {
-    match cmd {
-        Cmd::None => {}
-        // Handled by the loop, which is the only thing that can stop it.
-        Cmd::Quit => {}
-        Cmd::SendIpc(request) => ipc.send(request),
-        Cmd::LoadSource { id, path } => {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let contents = tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = tx.send(Msg::SourceLoaded { id, path, contents });
-            });
+/// A struct rather than six arguments threaded through a recursive call: the
+/// set grows every time a command needs something new, and `Cmd::Batch` passes
+/// all of it along to itself.
+struct Dispatcher<'a> {
+    msgs: &'a UnboundedSender<Msg>,
+    ipc: &'a ipc_client::IpcClient,
+    socket: &'a Path,
+    ensure_daemon: &'a EnsureDaemon,
+    /// Where a reconnection hands its new client back to the loop.
+    clients: &'a UnboundedSender<(u32, ipc_client::IpcClient)>,
+}
+
+impl Dispatcher<'_> {
+    /// Run what the reducer asked for.
+    ///
+    /// Everything here is fire-and-forget: a command's *result* comes back as
+    /// a [`Msg`], which is what keeps the reducer the only place state changes.
+    fn run(&self, cmd: Cmd) {
+        match cmd {
+            Cmd::None => {}
+            // Handled by the loop, which is the only thing that can stop it.
+            Cmd::Quit => {}
+            Cmd::Batch(cmds) => cmds.into_iter().for_each(|cmd| self.run(cmd)),
+            Cmd::SendIpc { id, request } => self.ipc.send(id, request),
+            Cmd::LoadSource { id, path } => {
+                let msgs = self.msgs.clone();
+                tokio::spawn(async move {
+                    let contents = tokio::fs::read_to_string(&path)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = msgs.send(Msg::SourceLoaded { id, path, contents });
+                });
+            }
+            Cmd::Reconnect { attempt, delay_ms } => spawn_reconnect(
+                attempt,
+                delay_ms,
+                self.socket.to_path_buf(),
+                self.msgs.clone(),
+                self.ensure_daemon.clone(),
+                self.clients.clone(),
+            ),
         }
     }
+}
+
+/// Wait, start a daemon if there is none, and connect to it (M19).
+///
+/// A task rather than an inline await: the delay is up to four seconds, and a
+/// loop that spent them blocked would stop drawing *and* stop reading keys —
+/// so the user could not even quit while it waited.
+fn spawn_reconnect(
+    attempt: u32,
+    delay_ms: u64,
+    socket: PathBuf,
+    tx: UnboundedSender<Msg>,
+    ensure_daemon: EnsureDaemon,
+    clients: UnboundedSender<(u32, ipc_client::IpcClient)>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+        if let Err(error) = ensure_daemon().await {
+            let _ = tx.send(Msg::Reconnected {
+                attempt,
+                outcome: Err(error),
+            });
+            return;
+        }
+        match ipc_client::connect(&socket, tx.clone()).await {
+            // The loop installs it and turns it into a `Msg::Reconnected`.
+            // Sent this way round because a client cannot travel in a `Msg`:
+            // messages are `Clone`, and a connection is not. The attempt rides
+            // along so the loop can tell a current one from a superseded one.
+            Ok(client) => {
+                let _ = clients.send((attempt, client));
+            }
+            Err(error) => {
+                let _ = tx.send(Msg::Reconnected {
+                    attempt,
+                    outcome: Err(error.to_string()),
+                });
+            }
+        }
+    });
 }
 
 /// Turn keystrokes into messages.

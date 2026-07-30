@@ -459,6 +459,120 @@ The PTY driver is a throwaway script rather than part of the suite (it needs a t
 
 ---
 
+## D040 — the TUI's reducer numbers its own requests, and drops answers that have been overtaken
+
+**Status:** decided (2026-07-30, with M12–M13).
+
+**Why:** Until Phase D the TUI could get away with not correlating a reply to the request that caused it. `ipc_client` said so in as many words: a `Response` says what it is, the daemon answers one request at a time in order, so the last answer of a given kind is the freshest. The scopes pane breaks that in two places.
+
+`Response::Variables` is a bare `Vec<Variable>`. Nothing in it says which node was being expanded — not even the `variables_reference` that was asked for. With two expansions in flight there is no way to tell which is which, and the pane would fill the wrong row.
+
+The second is sharper and applies to the stack too. A stack trace names **frame ids**, and the adapter only keeps those valid until the program moves. An answer for the stop before last is not merely out of date: every id in it addresses nothing, so the pane would populate, look right, and fail on the next expansion. "The last answer wins" is exactly wrong here — the last answer to *arrive* may be the older one.
+
+So `Cmd::SendIpc` carries an `id` chosen by [`AppState::next_request_id`], and the write pump sends that rather than one of its own. Ids are monotonic because every request goes through one function, which is what makes "this has been overtaken" decidable at all.
+
+**How staleness is decided.** One rule per kind of answer, keyed on the id:
+
+- `latest_stack` and `latest_scopes` hold the newest request of each kind. An answer whose id is not the latest is logged and dropped.
+- `pending_variables` maps a request id to the *index path* of the node that asked **and the generation of the tree that path was resolved against**. Review found the first version clearing the map when a new `Scopes` was *requested*, which cannot work: an expansion pressed in the gap before the answer arrives is inserted after the clear, and lands in a tree it was never about — the caller's node filled with the callee's values, at the right position, with nothing on screen to say so. The generation is the tree's own, not the newest request's, for the same reason: between asking for a frame's scopes and being given them, what is on screen is still the previous frame's.
+- **The panes are marked stale the moment a stop is reported**, not merely refreshed when its answer lands. Between the two, every frame id and `variables_reference` on screen belongs to a frame the adapter has discarded, and acting on one sent a dead handle *and* superseded the legitimate request the new stop had just made.
+- `pending_breakpoints` holds ids for the mutations `b` sends. It is not about staleness — breakpoints outlive stops — but about failure: a refused mutation leaves the gutter showing an intention the daemon did not carry out, and nothing in the error says which way it went, so the answer is to ask for the whole list again.
+
+This is the same discipline M11 already used for file reads (`latest_load`), generalised. The reserved-id floor (`RESERVED_IDS`) keeps the reducer's numbering clear of the handshake's, so a `Pong` can never be mistaken for an answer to something the reducer asked.
+
+**Consequences:** `IpcClient::send` takes an id. `Msg::Connected` exists so that *initialisation* is a reducer decision rather than something the loop hard-codes — which is what lets M19's reconnection replay the opening moves (`Subscribe` + `BreakpointList`) instead of keeping a second copy of them.
+
+---
+
+## D041 — `Cmd::Batch`, sequential and dumb
+
+**Status:** decided (2026-07-30, with M12).
+
+**Why:** One message can genuinely need two things done. A stop needs the stack *and* the scopes; `<CR>` on a stack frame needs the frame's file *and* its variables. Before Phase D every `Msg` produced at most one `Cmd`, and the two ways out of that were both worse than a list: a `Cmd` variant per pair (which grows quadratically and puts the pairing in the wrong place), or asking for the second thing only after the first answer arrives (which adds a round trip to every step of every debug session).
+
+`Cmd::Batch(Vec<Cmd>)` is deliberately the least clever option available. The loop runs the commands in order, one after another, and that is all it does — no parallelism, no dependency between elements, no result threading. Anything a batch could express that a `Vec` cannot is something that belongs in the reducer, where it is testable.
+
+Asking for two things at once does not pipeline anything at the adapter (non-negotiable 6): the daemon queues requests to one adapter regardless, so this shortens the TUI's latency without changing what the adapter sees.
+
+**Consequences:** a batch of one is never constructed — the reducer returns the bare `Cmd` instead — so a test that asserts on a single request does not have to know whether it happens to be wrapped. M16's task file already anticipated this; watches will use it.
+
+---
+
+## D042 — the TUI reconnects by calling back into the CLI, not by learning to spawn
+
+**Status:** decided (2026-07-30, with M19).
+
+**Why:** A TUI left open across `lazydap shutdown` — or across a daemon crash — used to be a dead screen with no way back. Reconnecting needs two things the TUI cannot do: start a daemon process, and take the spawn lock that stops two clients racing to start two.
+
+Neither can move into `lazydap-tui`. It may depend on `core`, `protocol` and `config` and nothing else (D037), and that boundary is the thing making non-negotiable #2 true. So `run` takes an `EnsureDaemon` callback and `crates/daemon/src/commands/tui.rs` supplies one that calls the same `ensure_daemon_running` every subcommand takes (D003) — spawn lock, stale-socket removal, version-mismatch replacement and all. A TUI reviving a daemon does it by exactly the path a CLI command would.
+
+**What the reducer owns.** The retry curve, so it is testable without waiting for it: 250 ms doubling to a 4 s ceiling. It does **not** give up — see D044, which corrects the six-attempt limit this shipped with. The delay is a `Cmd::Reconnect { attempt, delay_ms }` the loop sleeps on *in a task*, never inline: four seconds of a blocked loop is four seconds in which `q` does not work.
+
+**How the screen becomes true again.** Nothing is reconstructed. A reconnection replays the opening moves of the first connection (`Msg::Connected` → `Subscribe` + `BreakpointList`), and the `Subscribe` reply is a state snapshot taken at the moment the stream attaches (D038). A session started from another terminal while the daemon was down is therefore picked up rather than waited for.
+
+**What survives and what does not.** Everything about the session goes the moment the daemon does — marker, stack, scopes, pending fetches — because none of it can be checked any more. The breakpoints stay: they are the project's, recorded in `.lazydap/state.toml`, and clearing the gutter would suggest they had been lost when they had not. The `BreakpointList` that follows the reconnection refreshes their verification state, which correctly drops back to unverified when the new daemon has no session.
+
+---
+
+## D043 — a breakpoint change is either an adapter's opinion or the project's, and the event says which
+
+**Status:** decided (2026-07-30, review round after M12–M14/M19). **Protocol v2 → v3.**
+
+**Why:** `lazydap break` with nothing running persisted the breakpoint and announced nothing, so an open TUI's gutter went on drawing the previous set indefinitely. That is M14's "the gutter and `break --list` agree" criterion failing in the direction nobody checked. It is not only a between-sessions problem either: an adapter is handed the new list for a source file and says nothing whatever about what is no longer in it, so a *removal* is invisible to a client watching adapter events even with a session live.
+
+The fix is for every breakpoint mutation to announce itself. The question was what to announce it as, and reusing `BreakpointUpdated` unchanged would have been a lie: that event carries an `AdapterBreakpoint` — `verified`, the line the adapter moved it to — and a `lazydap break` between sessions has no adapter and therefore no opinion. A client applying those fields would be inventing a claim nobody made, and marking a breakpoint verified on the strength of a program that is not running.
+
+So `session_id` became `Option<SessionId>` and the two scopes are distinguished by it:
+
+- **`Some(id)`** — that session's adapter changed its mind. The payload is its opinion, true only while it lives.
+- **`None`** — the project's list changed. The payload names *which* breakpoint, and nothing more; the verification fields carry no information. What it means to a client is "read the list again".
+
+The TUI does exactly that: a project-scope update produces a `BreakpointList` rather than a guess. One extra round trip on a human-paced action, and it is correct for adds, removals and toggles alike without the event having to express any of them.
+
+**Why a version bump.** Two builds both claiming v2 would fail to decode each other's events, which is the exact hazard the version exists to turn into a clean restart (D032, and the same argument D038 made for not adding a variant silently). `ensure_daemon_running` already replaces a daemon whose version differs, so the cost is one automatic restart.
+
+**Consequences:** `Event::session_id()` returns `Option<SessionId>`. A `--wait` already ignores events belonging to another session, so a project-scope one is correctly not part of any wait's blob; it is broadcast but never buffered, because the buffer is a session's history and this belongs to no session.
+
+---
+
+## D044 — a reconnecting TUI never gives up, and every attempt is identified
+
+**Status:** decided (2026-07-30, review round after M19). Supersedes the give-up rule as first built.
+
+**Why:** M19 shipped with six attempts and a terminal `Lost` state. Six failures take under ten seconds; a daemon that became startable fifteen seconds later was never reached, on a screen the user was still sitting in front of, with no way back but quitting. The mistake was modelling this as a network reconnect. It is not one — every attempt runs `ensure_daemon_running`, which *starts* a daemon rather than waiting for one, so "cannot reach it" is never a settled fact about the world. The machine it would run on is the one the TUI is already on.
+
+So the ladder runs for as long as the TUI is open: 250 ms doubling to a 4 s ceiling, then 4 s forever. The ceiling is what makes that affordable — retrying every four seconds costs nothing and bounds how long the user waits once things recover. `Connection::Lost` is gone; there is nothing for it to mean.
+
+**Attempts are numbered**, and that is the other half. Without an identity on each one:
+
+- a reply from an attempt that had already been superseded was taken for the current one, and started a second ladder alongside it;
+- a `DaemonGone` arriving while an attempt was in flight — which a daemon dying just after a handshake produces — started a second ladder outright;
+- a connection handed back by whichever attempt lost the race replaced a working connection with an unsubscribed one, after which every request went somewhere nobody was listening.
+
+`Cmd::Reconnect` and `Msg::Reconnected` both carry the attempt. The reducer ignores an answer that is not the one it is waiting on, and refuses to start a second ladder while one is climbing. The loop checks the same thing before installing a connection, because *installing* is its decision and the currency test is one line of state either can read.
+
+---
+
+## D045 — a debuggee we launched dies with its debugger, even when the debugger is killed
+
+**Status:** decided (2026-07-30, review round after M12–M14/M19).
+
+**Why:** codelldb spawns the debuggee as its own child and reaps it on a clean shutdown. On an unclean one — a crash, an OOM kill, a `kill -9` — it never gets the chance: the debuggee is reparented to init and keeps running, with nothing left in the system that knows it is a debuggee. The daemon's adapter-death path (pump EOF → synthesise `AdapterDied` → kill the adapter) killed the adapter process it owns and stopped there, so the debuggee was nobody's problem.
+
+Found by counting, not by reading: 46 orphaned test fixtures had accumulated across worktrees, one per run of the suite that SIGKILLs an adapter mid-wait. The test was only the reproduction. The same thing happens to a real user's program whenever codelldb crashes — a program stopped at a breakpoint stays suspended forever, and one that was running busy-loops forever.
+
+**The daemon now records the debuggee's pid and kills it if the adapter dies without stopping it.** Three details that are not obvious:
+
+- **The pid is scraped from console output, not taken from an event.** DAP defines a `process` event carrying `systemProcessId` and that would be the right source. codelldb does not send it: the string does not appear anywhere in its binary, and a full launch-to-exit stream contains `output`, `initialized`, `module`, `continued`, `exited` and `terminated` and nothing else. What it does print is `Launched process 1234 from '/path'`, so that is where the pid comes from (quirk 9). This is best-effort by design — a parse that fails leaves things exactly as they were, and says so in the log.
+- **The line arrives during the handshake, not on the pump.** The launch's own event loop owns the transport until the session is live, so the pump never sees it — a first attempt hooked the pump's `output` handling and never fired once. The pid is read out of the launch outcome instead.
+- **Identity is checked before anything is killed.** A daemon can outlive many programs, and a recycled pid belongs to a stranger. The recorded pid is only killed when `ps` still reports the program we launched at it; otherwise it is logged and left alone. Leaking the process we were looking for is much better than killing one we were not.
+
+**Only for programs we launched.** When `attach` lands it must not record a pid: the point of attaching is that the process was somebody else's first, and killing it because our adapter crashed would destroy something we were only ever looking at. The record is set on the launch path alone, and both the field and the call site say so.
+
+**Consequences:** the synthesised `AdapterDied` ending now says what became of the program, so a user whose adapter crashed is told whether their debuggee went with it. The codelldb suite asserts in teardown that no fixture outlived its session, scoped to the running build's fixture directory so parallel worktrees do not fail on each other's processes — a leak now fails the test that caused it instead of accumulating silently across five waves of review.
+
+---
+
 ## Open decisions
 
 These need user input.

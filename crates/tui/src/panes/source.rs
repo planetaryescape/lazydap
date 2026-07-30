@@ -3,6 +3,7 @@
 //! The centrepiece of the TUI. M9 is the file and the cursor; M11 adds the
 //! marker that follows the debuggee.
 
+use lazydap_core::BreakpointStatus;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -15,6 +16,17 @@ use std::path::{Path, PathBuf};
 /// sideways when it is not.
 const MARKER: &str = "▶ ";
 const NO_MARKER: &str = "  ";
+
+/// The breakpoint signs, in the leftmost column (M14).
+///
+/// Three states rather than two because "the adapter has not confirmed it" is
+/// a real and common one: codelldb verifies lazily, and a breakpoint on a line
+/// with no code is refused *after* it has been accepted. A gutter that showed
+/// `●` for both would say a breakpoint will be hit when it will not.
+const VERIFIED: &str = "●";
+const UNVERIFIED: &str = "◯";
+const DISABLED: &str = "⊘";
+const NO_BREAKPOINT: &str = " ";
 
 /// One open file.
 ///
@@ -128,15 +140,29 @@ impl SourceView {
     /// Mutates: the pane learns its height here and nowhere else, because the
     /// height is a fact about the layout rather than about the state. That is
     /// the one exception to "no mutation in the view" (D012, M10's notes).
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        breakpoints: &[BreakpointStatus],
+        focused: bool,
+    ) {
         let block = Block::default()
             .title(format!("source · {}", self.path.display()))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(super::border_style(focused));
         let inner = block.inner(area);
 
         self.viewport_height = u32::from(inner.height);
         self.scroll_to_cursor();
+
+        // Only this file's, resolved once per draw rather than once per line:
+        // a project can hold plenty of breakpoints and only a screenful of
+        // lines is ever painted.
+        let mine: Vec<&BreakpointStatus> = breakpoints
+            .iter()
+            .filter(|status| status.breakpoint.source == self.path)
+            .collect();
 
         let gutter_width = self.line_count().to_string().len();
         let visible: Vec<Line> = self
@@ -145,7 +171,7 @@ impl SourceView {
             .enumerate()
             .skip(self.top_line.saturating_sub(1) as usize)
             .take(inner.height as usize)
-            .map(|(index, content)| self.line(index as u32 + 1, content, gutter_width))
+            .map(|(index, content)| self.line(index as u32 + 1, content, gutter_width, &mine))
             .collect();
 
         // Deliberately not wrapped. A wrapped long line would take two rows
@@ -155,8 +181,23 @@ impl SourceView {
         frame.render_widget(Paragraph::new(visible).block(block), area);
     }
 
-    fn line(&self, number: u32, content: &str, gutter_width: usize) -> Line<'static> {
+    fn line(
+        &self,
+        number: u32,
+        content: &str,
+        gutter_width: usize,
+        breakpoints: &[&BreakpointStatus],
+    ) -> Line<'static> {
         let is_marker = self.marker_line == Some(number);
+
+        // Where the debugger will actually stop, not where it was asked to:
+        // codelldb moves a breakpoint to the next line with code, and a sign
+        // on the line the user typed would point at the wrong one.
+        let sign = breakpoints
+            .iter()
+            .find(|status| status.effective_line() == number)
+            .map(|status| breakpoint_sign(status))
+            .unwrap_or((NO_BREAKPOINT, Style::default()));
 
         let marker = if is_marker {
             Span::styled(
@@ -185,7 +226,21 @@ impl SourceView {
             },
         );
 
-        Line::from(vec![marker, gutter, text])
+        Line::from(vec![Span::styled(sign.0, sign.1), marker, gutter, text])
+    }
+}
+
+/// What to draw for a breakpoint, and in what colour.
+fn breakpoint_sign(status: &BreakpointStatus) -> (&'static str, Style) {
+    if !status.breakpoint.enabled {
+        return (DISABLED, Style::default().fg(Color::DarkGray));
+    }
+    match status.verified {
+        true => (VERIFIED, Style::default().fg(Color::Red)),
+        // Yellow rather than red: it has been asked for, and nothing has
+        // confirmed that the line exists. Either no session has applied it
+        // yet, or one has and has not answered.
+        false => (UNVERIFIED, Style::default().fg(Color::Yellow)),
     }
 }
 
@@ -201,7 +256,36 @@ mod tests {
 
     /// Draw once so the pane knows how tall it is, the way the real loop does.
     fn draw(view: &mut SourceView, width: u16, height: u16) -> Vec<String> {
-        render(width, height, |frame| view.render(frame, frame.area()))
+        draw_with(view, width, height, &[])
+    }
+
+    fn draw_with(
+        view: &mut SourceView,
+        width: u16,
+        height: u16,
+        breakpoints: &[BreakpointStatus],
+    ) -> Vec<String> {
+        render(width, height, |frame| {
+            view.render(frame, frame.area(), breakpoints, true)
+        })
+    }
+
+    fn breakpoint(source: &str, line: u32, enabled: bool, verified: bool) -> BreakpointStatus {
+        BreakpointStatus {
+            breakpoint: lazydap_core::Breakpoint {
+                id: lazydap_core::BreakpointId(1),
+                source: PathBuf::from(source),
+                line,
+                column: None,
+                condition: None,
+                hit_condition: None,
+                log_message: None,
+                enabled,
+            },
+            verified,
+            adapter_line: None,
+            message: None,
+        }
     }
 
     #[test]
@@ -281,8 +365,8 @@ mod tests {
             screen[0].contains("source · /tmp/numbers.txt"),
             "got: {screen:?}",
         );
-        assert_eq!(screen[1], "│  1 line 1                      │");
-        assert_eq!(screen[3], "│  3 line 3                      │");
+        assert_eq!(screen[1], "│   1 line 1                     │");
+        assert_eq!(screen[3], "│   3 line 3                     │");
     }
 
     #[test]
@@ -310,8 +394,8 @@ mod tests {
         view.set_marker(2);
         let with = draw(&mut view, 24, 5);
 
-        assert_eq!(without[1], "│  1 line 1            │");
-        assert_eq!(with[2], "│▶ 2 line 2            │");
+        assert_eq!(without[1], "│   1 line 1           │");
+        assert_eq!(with[2], "│ ▶ 2 line 2           │");
     }
 
     #[test]
@@ -321,6 +405,84 @@ mod tests {
         let mut view = numbered(3);
         view.set_marker(99);
         assert_eq!(view.marker_line, Some(3));
+    }
+
+    #[test]
+    fn a_breakpoint_in_this_file_puts_a_sign_in_the_leftmost_column() {
+        let mut view = numbered(9);
+        let screen = draw_with(
+            &mut view,
+            24,
+            5,
+            &[breakpoint("/tmp/numbers.txt", 2, true, true)],
+        );
+
+        assert_eq!(screen[1], "│   1 line 1           │");
+        assert_eq!(screen[2], "│●  2 line 2           │");
+    }
+
+    #[test]
+    fn a_breakpoint_nothing_has_confirmed_is_drawn_differently_from_one_that_has() {
+        // The difference between "this will stop the program" and "this has
+        // been asked for", which is the whole reason the sign has three states.
+        let mut view = numbered(9);
+        let screen = draw_with(
+            &mut view,
+            24,
+            5,
+            &[breakpoint("/tmp/numbers.txt", 2, true, false)],
+        );
+        assert_eq!(screen[2], "│◯  2 line 2           │");
+
+        let screen = draw_with(
+            &mut view,
+            24,
+            5,
+            &[breakpoint("/tmp/numbers.txt", 2, false, true)],
+        );
+        assert_eq!(screen[2], "│⊘  2 line 2           │");
+    }
+
+    #[test]
+    fn a_breakpoint_in_another_file_does_not_show_up_here() {
+        let mut view = numbered(9);
+        let screen = draw_with(
+            &mut view,
+            24,
+            5,
+            &[breakpoint("/tmp/other.c", 2, true, true)],
+        );
+
+        assert_eq!(screen[2], "│   2 line 2           │");
+    }
+
+    #[test]
+    fn the_sign_follows_the_line_the_adapter_actually_used() {
+        // codelldb moves a breakpoint on a blank line to the next line with
+        // code. Signing the line the user typed would point at the wrong one.
+        let mut view = numbered(9);
+        let mut moved = breakpoint("/tmp/numbers.txt", 2, true, true);
+        moved.adapter_line = Some(4);
+
+        let screen = draw_with(&mut view, 24, 6, &[moved]);
+
+        assert_eq!(screen[2], "│   2 line 2           │");
+        assert_eq!(screen[4], "│●  4 line 4           │");
+    }
+
+    #[test]
+    fn a_breakpoint_on_the_line_the_program_is_stopped_on_shows_both() {
+        let mut view = numbered(9);
+        view.set_marker(2);
+        let screen = draw_with(
+            &mut view,
+            24,
+            5,
+            &[breakpoint("/tmp/numbers.txt", 2, true, true)],
+        );
+
+        // The marker took the cursor with it, so line 2 is at the top.
+        assert_eq!(screen[1], "│●▶ 2 line 2           │");
     }
 
     #[test]

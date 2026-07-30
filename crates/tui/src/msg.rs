@@ -13,6 +13,13 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub enum Msg {
     Key(KeyEvent),
+    /// A connection to the daemon is up, and this is the first thing the
+    /// reducer hears about it.
+    ///
+    /// Init is a reducer decision rather than something the loop hard-codes,
+    /// which is what lets a *re*-connection (M19) re-run exactly the same
+    /// opening moves as the first one instead of a second copy of them.
+    Connected,
     /// The terminal changed size. Carries no size: the next draw asks the
     /// frame for its own area, so a stored copy could only ever disagree with
     /// it. The message exists to make that draw happen now.
@@ -59,10 +66,18 @@ pub enum Msg {
         id: u64,
         error: IpcError,
     },
-    /// The connection ended. Terminal for this run of the TUI — reconnection
-    /// is a v0.1 job, and until then saying so beats a screen that has quietly
-    /// stopped being true.
+    /// The connection ended.
     DaemonGone,
+    /// A [`Cmd::Reconnect`] finished. `Err` carries what to tell the user about
+    /// the attempt that failed (M19).
+    ///
+    /// `attempt` is the one this answers. Without it a reply from an attempt
+    /// that has already been superseded would be taken for the current one, and
+    /// two ladders would climb at once.
+    Reconnected {
+        attempt: u32,
+        outcome: std::result::Result<(), String>,
+    },
 }
 
 /// Something the reducer wants done. Executed by the loop, never by the
@@ -80,5 +95,33 @@ pub enum Cmd {
     },
     /// Ask the daemon something. The answer arrives as a [`Msg`], never as a
     /// return value: the reducer does no I/O.
-    SendIpc(Request),
+    ///
+    /// The `id` is chosen by the reducer rather than by the write pump, which
+    /// is the only way a reply can be matched to the thing that asked for it
+    /// (D040). [`lazydap_protocol::Response::Variables`] is a bare list of
+    /// variables — nothing in it says which node was being expanded — and a
+    /// stack trace for a stop the program has already left looks exactly like
+    /// one for the stop it is on.
+    SendIpc {
+        id: u64,
+        request: Request,
+    },
+    /// Several commands, in order.
+    ///
+    /// Sequential and dumb: the loop runs them one after another. It exists
+    /// because one message can genuinely need two things — a stop needs both
+    /// the stack and the scopes, and jumping to a frame needs both its file
+    /// and its variables — and nesting those into one `Cmd` variant each would
+    /// be a variant per pair.
+    Batch(Vec<Cmd>),
+    /// Try to get a connection to the daemon back, starting one if there is
+    /// none (M19). Answered with [`Msg::Reconnected`].
+    Reconnect {
+        /// Which attempt this is, carried back on the answer so a reply that
+        /// has been superseded can be told from the current one.
+        attempt: u32,
+        /// How long to wait first. The reducer owns the backoff, so the shape
+        /// of the retry curve is testable without waiting for it.
+        delay_ms: u64,
+    },
 }
