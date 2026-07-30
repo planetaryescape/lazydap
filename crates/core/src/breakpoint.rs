@@ -133,6 +133,25 @@ impl BreakpointStatus {
     }
 }
 
+/// A breakpoint that does not have an id yet: what a client asks for, before
+/// the store decides what to call it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewBreakpoint {
+    /// Absolute. Resolved by the client, which is the process that knows what
+    /// the user's relative path was relative *to*.
+    pub source: PathBuf,
+    pub line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_message: Option<String>,
+    pub enabled: bool,
+}
+
 /// A `file:line` as typed on the command line.
 ///
 /// Parsed client-side so a typo fails before a daemon is started, and so the

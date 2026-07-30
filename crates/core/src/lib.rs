@@ -8,11 +8,14 @@
 
 mod breakpoint;
 mod inspect;
+mod selector;
 mod session;
 
 pub use breakpoint::{
     AdapterBreakpoint, BadLocation, Breakpoint, BreakpointId, BreakpointStatus, Location,
+    NewBreakpoint,
 };
+pub use selector::BreakpointSelector;
 pub use inspect::{
     EvalContext, EvalResult, Scope, SourceRef, StackFrame, StepKind, ThreadInfo, ThreadUpdate,
     ThreadUpdateKind, Variable, VariableFilter, WaitOutcome,

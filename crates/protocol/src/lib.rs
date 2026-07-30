@@ -18,6 +18,7 @@ mod types;
 pub use codec::IpcCodec;
 pub use connection::IpcConnection;
 pub use types::{
-    AdapterCapabilities, ErrorCode, Event, EventKind, IpcError, IpcMessage, IpcPayload,
-    LAZYDAP_PROTOCOL_VERSION, LaunchRequest, Request, Response, SessionSummary, StatusReport,
+    AdapterCapabilities, BreakpointAction, BreakpointReport, DoctorCheck, DoctorReport, ErrorCode,
+    Event, EventKind, IpcError, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, LaunchRequest,
+    Request, Response, SessionSummary, StableState, StatusReport, WaitMode,
 };

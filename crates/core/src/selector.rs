@@ -5,7 +5,7 @@
 //! the *same* breakpoints. One `pick`, called by both, is the only way to
 //! guarantee that.
 
-use lazydap_core::{Breakpoint, BreakpointId};
+use crate::{Breakpoint, BreakpointId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

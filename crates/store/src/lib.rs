@@ -12,16 +12,13 @@
 //!   mid-write must not leave half a file where the state used to be.
 
 mod file;
-mod selector;
 
-use lazydap_core::{Breakpoint, BreakpointId};
+use lazydap_core::{Breakpoint, BreakpointId, BreakpointSelector, NewBreakpoint};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
-
-pub use selector::BreakpointSelector;
 
 /// How long to wait for a burst of mutations to finish before writing.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -325,19 +322,6 @@ impl ProjectStore {
         }
         Ok(())
     }
-}
-
-/// A breakpoint that does not have an id yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewBreakpoint {
-    /// Absolute, resolved by the client.
-    pub source: PathBuf,
-    pub line: u32,
-    pub column: Option<u32>,
-    pub condition: Option<String>,
-    pub hit_condition: Option<String>,
-    pub log_message: Option<String>,
-    pub enabled: bool,
 }
 
 /// A poisoned lock here means a panic left a `Vec<Breakpoint>` mid-push, not a

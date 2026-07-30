@@ -1,4 +1,9 @@
-use lazydap_core::{AdapterKind, EndReason, OutputChunk, PauseReason, SessionId, SessionState};
+use lazydap_core::{
+    AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointSelector, BreakpointStatus, EndReason,
+    EvalContext, EvalResult, NewBreakpoint, OutputChunk, PauseReason, Scope, SessionId,
+    SessionState, StackFrame, StepKind, ThreadInfo, ThreadUpdate, Variable, VariableFilter,
+    WaitOutcome,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8,7 +13,13 @@ use std::path::PathBuf;
 /// Bumping it is a breaking change to a product surface and needs an entry in
 /// `docs/blueprint/15-decision-log.md`. Clients and daemon compare versions on
 /// the first exchange; see [`Request::Ping`].
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 (M6, D032): the stepping, inspection and breakpoint requests. A v1
+/// daemon cannot decode any of them, so the bump is what turns "old daemon
+/// still running" into a clean `VersionMismatch` the client resolves by
+/// restarting it, rather than a `BadRequest` for a command that plainly
+/// exists.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 2;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,9 +71,9 @@ pub enum IpcPayload {
 
 /// What a client can ask for.
 ///
-/// Bucketed per `ARCHITECTURE.md`: diagnostics first, then session control.
-/// M5 implements the handful below; the rest of the schema in
-/// `docs/blueprint/04-protocol.md` lands with M6 and M11.
+/// Bucketed per `ARCHITECTURE.md`: diagnostics, then session control, then
+/// project state. The full schema, including the parts still unimplemented,
+/// is `docs/blueprint/04-protocol.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     // --- Diagnostics ---
@@ -72,14 +83,99 @@ pub enum Request {
     Ping,
     Status,
     /// Ask the daemon to end every session and exit.
-    Shutdown,
+    Shutdown {
+        /// Report what would be stopped without stopping it.
+        dry_run: bool,
+    },
+    Version,
+    Doctor {
+        check_adapters: bool,
+        check_state: bool,
+    },
 
-    // --- Session ---
+    // --- Session lifecycle ---
     Launch(LaunchRequest),
     Disconnect {
         session_id: SessionId,
         /// Kill the debuggee too, rather than leaving it running detached.
         terminate: bool,
+        dry_run: bool,
+    },
+
+    // --- Stepping ---
+    /// Resume. With [`WaitMode::Wait`] the daemon answers once the program
+    /// reaches a stable state, and the answer carries everything that happened
+    /// on the way (`docs/blueprint/10-async-to-sync.md`).
+    Continue {
+        session_id: SessionId,
+        /// `None` means whichever thread is stopped.
+        thread_id: Option<i64>,
+        wait: WaitMode,
+        /// Wait for *every* thread to stop rather than returning on the first.
+        all_threads: bool,
+    },
+    Step {
+        session_id: SessionId,
+        thread_id: Option<i64>,
+        kind: StepKind,
+        wait: WaitMode,
+    },
+    Pause {
+        session_id: SessionId,
+        thread_id: Option<i64>,
+        wait: WaitMode,
+    },
+
+    // --- Inspection. Only meaningful in a stable state. ---
+    Threads {
+        session_id: SessionId,
+    },
+    StackTrace {
+        session_id: SessionId,
+        thread_id: Option<i64>,
+        start_frame: Option<u32>,
+        levels: Option<u32>,
+    },
+    Scopes {
+        session_id: SessionId,
+        /// `None` means the top frame, which is what a caller almost always
+        /// wants and would otherwise have to fetch first.
+        frame_id: Option<i64>,
+    },
+    Variables {
+        session_id: SessionId,
+        variables_reference: i64,
+        filter: VariableFilter,
+        start: Option<u32>,
+        count: Option<u32>,
+    },
+    Eval {
+        session_id: SessionId,
+        expression: String,
+        frame_id: Option<i64>,
+        context: EvalContext,
+    },
+    /// Debuggee output the daemon has buffered. A read, not a drain: calling
+    /// it twice shows the same thing.
+    Output {
+        session_id: SessionId,
+        /// Only chunks at or after this Unix-epoch millisecond.
+        since_ms: Option<u64>,
+    },
+
+    // --- Breakpoints. Project state: they exist without a session. ---
+    BreakpointList,
+    BreakpointAdd {
+        breakpoint: NewBreakpoint,
+        dry_run: bool,
+    },
+    BreakpointRemove {
+        selector: BreakpointSelector,
+        dry_run: bool,
+    },
+    BreakpointToggle {
+        selector: BreakpointSelector,
+        dry_run: bool,
     },
 
     // --- Not implemented yet ---
@@ -89,6 +185,27 @@ pub enum Request {
     Subscribe {
         channels: Vec<EventKind>,
     },
+}
+
+/// Whether a stepping request returns immediately or blocks until the program
+/// settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitMode {
+    /// Fire and forget. The TUI wants this; agents almost never do.
+    NoWait,
+    /// Block until paused, exited, terminated — or the timeout.
+    Wait {
+        /// `None` uses the daemon's default (30s). `Some(0)` means no
+        /// timeout at all, and makes the caller responsible for a program
+        /// that never stops.
+        timeout_ms: Option<u32>,
+    },
+}
+
+impl WaitMode {
+    pub fn is_waiting(&self) -> bool {
+        matches!(self, Self::Wait { .. })
+    }
 }
 
 /// Everything needed to start a debuggee under an adapter.
@@ -111,19 +228,188 @@ pub enum Response {
         uptime_ms: u64,
     },
     Status(StatusReport),
+    Version {
+        lazydap: String,
+        protocol: u32,
+    },
+    Doctor(DoctorReport),
     Launched {
         session_id: SessionId,
         state: SessionState,
         /// Present when the launch ended with the debuggee already paused,
         /// i.e. `stop_on_entry`.
         reason: Option<PauseReason>,
+        /// What the adapter actually called that reason, when we normalised
+        /// it. See [`StableState::raw_reason`].
+        raw_reason: Option<String>,
         thread_id: Option<i64>,
         capabilities: AdapterCapabilities,
+        /// The persisted breakpoints applied during the configuration phase,
+        /// with whatever the adapter made of them.
+        breakpoints: Vec<BreakpointStatus>,
     },
     Disconnected {
         session_id: SessionId,
+        dry_run: bool,
+        /// What ending it did (or would do) to the debuggee.
+        terminated_debuggee: bool,
     },
-    ShuttingDown,
+    ShuttingDown {
+        dry_run: bool,
+        /// The sessions this shutdown ends, or would.
+        sessions: Vec<SessionSummary>,
+    },
+
+    /// A stepping request that did not wait. The program is running now.
+    Continued {
+        session_id: SessionId,
+        thread_id: Option<i64>,
+    },
+    /// A stepping request that waited: one blob describing everything that
+    /// happened until the program settled.
+    Stepped(StableState),
+
+    Threads(Vec<ThreadInfo>),
+    StackTrace {
+        frames: Vec<StackFrame>,
+        /// How many frames there are in total, when the adapter says.
+        total: Option<u32>,
+    },
+    Scopes(Vec<Scope>),
+    Variables(Vec<Variable>),
+    Evaluated(EvalResult),
+    Output {
+        chunks: Vec<OutputChunk>,
+        /// Chunks lost because the buffer filled before anybody read it.
+        /// Non-zero means this is not the whole story.
+        dropped: u64,
+    },
+
+    Breakpoints(BreakpointReport),
+}
+
+/// What a `--wait` saw. The one shape agents read.
+///
+/// Every field is populated on a best-effort basis: a blob that omitted the
+/// captured output because the program also crashed would make the crash
+/// harder to diagnose, not easier. See `docs/blueprint/10-async-to-sync.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StableState {
+    pub state: WaitOutcome,
+    /// Why it stopped. Populated when `state` is `paused`.
+    pub reason: Option<PauseReason>,
+    /// The adapter's own word for `reason`, present only when the two differ.
+    ///
+    /// codelldb reports an entry stop as an `exception` with description
+    /// `signal SIGSTOP` (quirk 6). lazydap normalises that to `entry` because
+    /// the JSON schema is the product surface, and keeps the adapter's version
+    /// here so nothing is hidden. See D033.
+    pub raw_reason: Option<String>,
+    pub thread_id: Option<i64>,
+    pub all_threads_stopped: bool,
+    /// Threads that also stopped within the coalescing window (D020).
+    pub additional_stopped_threads: Vec<i64>,
+    /// Which of our breakpoints caused this stop.
+    pub hit_breakpoint_ids: Vec<BreakpointId>,
+    /// The debuggee's status, when it finished.
+    pub exit_code: Option<i32>,
+    /// The top frame, fetched for convenience whenever the program paused.
+    pub frame: Option<StackFrame>,
+    pub captured_output: Vec<OutputChunk>,
+    /// The output cap was hit and some was dropped.
+    pub output_truncated: bool,
+    pub breakpoint_updates: Vec<AdapterBreakpoint>,
+    pub thread_updates: Vec<ThreadUpdate>,
+    pub elapsed_ms: u64,
+}
+
+impl StableState {
+    /// An outcome with nothing observed yet. Every wait starts here and fills
+    /// fields in as events arrive, so a blob is never half-built.
+    pub fn new(state: WaitOutcome) -> Self {
+        Self {
+            state,
+            reason: None,
+            raw_reason: None,
+            thread_id: None,
+            all_threads_stopped: false,
+            additional_stopped_threads: Vec::new(),
+            hit_breakpoint_ids: Vec::new(),
+            exit_code: None,
+            frame: None,
+            captured_output: Vec::new(),
+            output_truncated: false,
+            breakpoint_updates: Vec::new(),
+            thread_updates: Vec::new(),
+            elapsed_ms: 0,
+        }
+    }
+}
+
+/// The answer to every breakpoint command.
+///
+/// One shape for list, add, remove and toggle so a client parses breakpoints
+/// exactly once, and so `--dry-run` is a flag on a familiar response rather
+/// than a different one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BreakpointReport {
+    pub action: BreakpointAction,
+    /// Nothing was changed; this is what *would* change.
+    pub dry_run: bool,
+    /// The breakpoints this command is about: all of them for a list, the
+    /// affected ones otherwise.
+    pub breakpoints: Vec<BreakpointStatus>,
+    /// Ids the selector named but no breakpoint matched. Empty on success;
+    /// a caller that piped ids in can tell which ones went stale.
+    pub not_found: Vec<BreakpointId>,
+    /// Whether a live session was told about the change. `false` means the
+    /// breakpoints are recorded and will apply to the next launch.
+    pub applied_to_session: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakpointAction {
+    Listed,
+    Added,
+    Removed,
+    Toggled,
+}
+
+impl BreakpointAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Listed => "listed",
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Toggled => "toggled",
+        }
+    }
+
+    /// How to describe it when nothing has happened yet.
+    pub fn would(&self) -> &'static str {
+        match self {
+            Self::Listed => "would list",
+            Self::Added => "would add",
+            Self::Removed => "would remove",
+            Self::Toggled => "would toggle",
+        }
+    }
+}
+
+/// `lazydap doctor`: what is set up, and what is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoctorReport {
+    /// `false` when any check failed, so a script can branch on one field.
+    pub ok: bool,
+    pub checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
 }
 
 /// What the daemon knows about itself. `lazydap status` prints this.
@@ -185,7 +471,11 @@ pub enum Event {
         session_id: SessionId,
         thread_id: Option<i64>,
         reason: PauseReason,
+        /// The adapter's own word for it, when we normalised the reason.
+        raw_reason: Option<String>,
         all_threads_stopped: bool,
+        /// Ours, already mapped from whatever the adapter calls them.
+        hit_breakpoint_ids: Vec<BreakpointId>,
     },
     Continued {
         session_id: SessionId,
@@ -195,6 +485,16 @@ pub enum Event {
     Output {
         session_id: SessionId,
         chunk: OutputChunk,
+    },
+    /// The adapter changed its mind about a breakpoint: verified one it had
+    /// not, or moved it to the nearest line with code.
+    BreakpointUpdated {
+        session_id: SessionId,
+        breakpoint: AdapterBreakpoint,
+    },
+    ThreadChanged {
+        session_id: SessionId,
+        update: ThreadUpdate,
     },
 }
 
@@ -206,6 +506,8 @@ impl Event {
             Self::Stopped { .. } => EventKind::Stopped,
             Self::Continued { .. } => EventKind::Continued,
             Self::Output { .. } => EventKind::Output,
+            Self::BreakpointUpdated { .. } => EventKind::BreakpointUpdated,
+            Self::ThreadChanged { .. } => EventKind::ThreadChanged,
         }
     }
 
@@ -215,7 +517,9 @@ impl Event {
             | Self::SessionEnded { session_id, .. }
             | Self::Stopped { session_id, .. }
             | Self::Continued { session_id, .. }
-            | Self::Output { session_id, .. } => *session_id,
+            | Self::Output { session_id, .. }
+            | Self::BreakpointUpdated { session_id, .. }
+            | Self::ThreadChanged { session_id, .. } => *session_id,
         }
     }
 }
@@ -229,6 +533,8 @@ pub enum EventKind {
     Stopped,
     Continued,
     Output,
+    BreakpointUpdated,
+    ThreadChanged,
 }
 
 /// A failure, always paired with the id of the request that caused it.
@@ -272,6 +578,10 @@ pub enum ErrorCode {
     AdapterTimeout,
     SessionNotFound,
     SessionAlreadyActive,
+    /// The stack, scopes and variables of a running program are undefined.
+    /// Asking for them is a caller mistake, not an adapter failure
+    /// (`docs/blueprint/10-async-to-sync.md`).
+    SessionNotPaused,
     InvalidLaunchConfig,
     InvalidProjectRoot,
     DapProtocolError,
@@ -329,10 +639,80 @@ mod tests {
             session_id,
             thread_id: Some(1),
             reason: PauseReason::Entry,
+            raw_reason: None,
             all_threads_stopped: true,
+            hit_breakpoint_ids: Vec::new(),
         };
         assert_eq!(event.kind(), EventKind::Stopped);
         assert_eq!(event.session_id(), session_id);
+    }
+
+    #[test]
+    fn a_wait_blob_round_trips_with_the_state_spelled_the_way_agents_read_it() {
+        let mut blob = StableState::new(WaitOutcome::Paused);
+        blob.reason = Some(PauseReason::Breakpoint);
+        blob.thread_id = Some(1);
+        blob.hit_breakpoint_ids = vec![BreakpointId(3)];
+        blob.captured_output = vec![OutputChunk::new(
+            lazydap_core::OutputCategory::Stdout,
+            "hello\n",
+        )];
+
+        let json = serde_json::to_string(&blob).expect("serialise");
+        assert!(json.contains(r#""state":"paused""#), "got: {json}");
+        assert!(json.contains(r#""reason":"breakpoint""#), "got: {json}");
+        assert!(json.contains(r#""hit_breakpoint_ids":[3]"#), "got: {json}");
+
+        let decoded: StableState = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(decoded, blob);
+    }
+
+    #[test]
+    fn a_wait_request_says_how_long_it_is_prepared_to_wait() {
+        let request = Request::Continue {
+            session_id: SessionId::new(),
+            thread_id: None,
+            wait: WaitMode::Wait {
+                timeout_ms: Some(5_000),
+            },
+            all_threads: false,
+        };
+        let json = serde_json::to_string(&request).expect("serialise");
+        let decoded: Request = serde_json::from_str(&json).expect("deserialise");
+
+        assert_eq!(decoded, request, "got: {json}");
+        match decoded {
+            Request::Continue { wait, .. } => assert!(wait.is_waiting()),
+            other => unreachable!("expected a continue, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_no_wait_stepping_request_is_distinguishable_from_a_defaulted_one() {
+        // `NoWait` and `Wait { timeout_ms: None }` mean opposite things — fire
+        // and forget versus block for the default 30s — so they must not
+        // collapse into the same JSON.
+        let no_wait = serde_json::to_string(&WaitMode::NoWait).expect("serialise");
+        let defaulted =
+            serde_json::to_string(&WaitMode::Wait { timeout_ms: None }).expect("serialise");
+        assert_ne!(no_wait, defaulted, "got: {no_wait} and {defaulted}");
+        assert!(!WaitMode::NoWait.is_waiting());
+    }
+
+    #[test]
+    fn a_dry_run_breakpoint_report_says_so_in_the_shape_a_real_one_uses() {
+        let report = BreakpointReport {
+            action: BreakpointAction::Removed,
+            dry_run: true,
+            breakpoints: Vec::new(),
+            not_found: vec![BreakpointId(9)],
+            applied_to_session: false,
+        };
+        let json = serde_json::to_string(&report).expect("serialise");
+
+        assert!(json.contains(r#""action":"removed""#), "got: {json}");
+        assert!(json.contains(r#""dry_run":true"#), "got: {json}");
+        assert!(json.contains(r#""not_found":[9]"#), "got: {json}");
     }
 
     #[test]
