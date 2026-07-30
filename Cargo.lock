@@ -795,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "ratatui",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

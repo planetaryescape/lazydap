@@ -28,17 +28,13 @@ pub struct SourceView {
 }
 
 impl SourceView {
-    /// Read a file from disk.
+    /// Build a pane from a file that has already been read.
     ///
-    /// Reads all of it. Source files are kilobytes; the day lazydap opens a
-    /// generated one that is not, the fix is a windowed reader, not a lazier
-    /// line split.
-    pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let path = path.into();
-        let contents = std::fs::read_to_string(&path)?;
-        Ok(Self::from_contents(path, &contents))
-    }
-
+    /// Reading it is the loop's job, not the pane's: a `Cmd::LoadSource` runs
+    /// off the render thread and comes back as a `Msg` (D012). Takes the whole
+    /// file — source files are kilobytes, and the day lazydap opens a
+    /// generated one that is not, the fix is a windowed reader rather than a
+    /// lazier line split.
     pub fn from_contents(path: impl Into<PathBuf>, contents: &str) -> Self {
         Self {
             path: path.into(),

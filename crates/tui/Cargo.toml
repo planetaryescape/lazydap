@@ -13,5 +13,9 @@ workspace = true
 
 [dependencies]
 ratatui = { workspace = true }
+# `rt` for the tasks the loop spawns, `macros` for `select!`, `time` for the
+# tick, `fs` for reading a source file off the loop's thread. Not "full": the
+# TUI has no process to spawn and no socket to listen on.
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -9,10 +9,6 @@
 use crate::error::{CliError, Result};
 
 /// Hand the terminal to the TUI.
-///
-/// Blocking, inside an async `main`. Legitimate here and nowhere else: this
-/// process does nothing but run the TUI, so there is no other task for the
-/// runtime to starve. M10 turns the loop async and the blocking call goes.
-pub fn run() -> Result<()> {
-    lazydap_tui::run().map_err(CliError::general)
+pub async fn run() -> Result<()> {
+    lazydap_tui::run().await.map_err(CliError::general)
 }
