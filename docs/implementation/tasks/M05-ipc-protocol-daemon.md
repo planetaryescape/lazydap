@@ -226,3 +226,37 @@ pgrep -f "lazydap daemon" || echo "(daemon stopped — for our purposes, OK)"
 - **Don't add subcommands beyond `launch`/`status`/`disconnect`/`daemon`/`shutdown` here.** That's M6.
 - **PID file at `{data_dir}/daemon.pid`**, socket at `{runtime_dir}/lazydap-{instance}.sock`. Define the helpers in `crates/config/src/paths.rs` (create the crate now if not yet).
 - **Connect to broadcast channel for events.** When the adapter emits `stopped`, the daemon broadcasts via `event_tx`. Subscribed clients (none in M5; TUI in M11) receive.
+
+---
+
+## Completed 2026-07-30
+
+`lazydap launch`, `status`, `disconnect`, `shutdown` and `daemon` all work against a real daemon over a real Unix socket. Verified live against codelldb 1.12.2: launch with `--stop-on-entry` returns a `Launched` response, `status` shows the paused session with its buffered output count, a second `launch` is refused with `SessionAlreadyActive`, `disconnect` leaves no codelldb or debuggee process behind, and `shutdown` removes both the socket and the PID file.
+
+### Decisions taken (all recorded in [`15-decision-log.md`](../../blueprint/15-decision-log.md))
+
+- **D024–D027** resolve the open questions O01–O04: project-root detection walks one marker tier at a time; `doctor` is stdout-only (M6); adapter discovery is config > managed dir > `PATH`, with only `PATH` implemented here; the skill ships as a sibling ZIP (M7).
+- **D028** — framing is `tokio_util`'s `LengthDelimitedCodec` (4-byte prefix, 16 MiB cap) rather than a hand-rolled `read_exact` pair. Adds `tokio-util` and `bytes`.
+- **D029** — the adapter seam is the `crates/daemon/src/adapter/` module boundary, not a `DebugAdapter` trait. One implementor is not an abstraction; M18 promotes it when debugpy gives the interface a second example. No `crates/adapter-codelldb`.
+- **D030** — `SessionId` is a UUID v4, not a ULID. Nothing sorts session ids, so sortability was not worth a dependency.
+
+### Deviations from the plan above
+
+- **The binary is `lazydap`, not `lazydap-daemon`** (D002). `crates/daemon` grew a `[lib]` and a `[[bin]] name = "lazydap"`; `main.rs` is six lines calling `run_cli`, so integration tests drive the same code the binary does.
+- **`crates/dap` gained `DapTransport::split`.** The read pump has to own reads exclusively — `read_incoming` is not cancellation-safe, which M3 recorded as a follow-up — and that is impossible while one struct owns both halves. The transport now splits the `TcpStream` at spawn time into a `DapReader` and a `DapWriter` (which also carries the child process, because killing it is a control action). Purely additive; every existing caller and example is untouched.
+- **`Request::Disconnect` takes a required `session_id`**, per D007, rather than an optional one meaning "the active session". The CLI resolves the active id with a `Status` call first, so `lazydap disconnect` still takes no arguments.
+- **`Request::Subscribe` exists but answers `Unsupported`.** It gives the version handshake a real "this build cannot do that" path to exercise, and settles the wire shape before M11 needs it.
+- **`Request::Shutdown` was added** to the Diagnostics bucket — `lazydap shutdown` needs it, and the blueprint's request list did not have one. No new bucket.
+- **`--format` accepts `table` and `json` only.** Nothing M5 prints is a list, so `jsonl`/`csv`/`ids` would be three spellings of the same single row. They land with M6.
+- **Runtime directory is `/tmp/lazydap-$UID`, not `std::env::temp_dir()`.** On macOS the latter is a ~50-character path, and a Unix socket path only gets ~104 bytes; combined with a long project name it overran. Caught by the length check, which stayed in as a guard.
+- **PID and log files are instance-scoped** (`lazydap-{instance}.pid`, not `daemon.pid`), so two projects' daemons cannot overwrite each other's.
+- **D015 fixed on the way past:** the old `main.rs` used `println!` with no subscriber. Tracing now initialises before anything else — `info` for the daemon, `warn` for subcommands so stdout stays a clean JSON pipeline.
+
+### Follow-ups discovered
+
+- **An ended session still occupies the slot.** After the debuggee exits, `launch` refuses until `disconnect` runs. That matches the lifecycle doc but is a papercut; M6 should decide whether a dead session is auto-reaped.
+- **No `Subscribe` means no live event delivery.** Events are buffered per session (1000, drop-oldest) and broadcast, but nothing consumes the broadcast until M11.
+- **Requests on one connection are handled sequentially.** Fine for a CLI that sends one and waits; M6's `--wait` should confirm a long request cannot starve a `status` on the same connection.
+- **`env` is always empty in `LaunchRequest`.** The protocol carries it, the CLI has no `--env` flag yet.
+- **Adapter discovery is `PATH`-only** (D026); the config and managed-directory tiers are M15/M18.
+- **The spawn lock is an `O_EXCL` lock file**, with a 30-second staleness cutoff, rather than `flock`. It avoids a dependency and is correct on a local filesystem; a networked `/tmp` would want the real thing.
