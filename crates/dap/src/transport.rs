@@ -176,6 +176,15 @@ impl DapTransport {
     }
 
     /// Read the next message off the socket, in receipt order, whatever it is.
+    ///
+    /// **Not cancellation-safe.** Cancelling this future — dropping it, or
+    /// wrapping it in `tokio::time::timeout` and having the timer fire — can
+    /// leave the stream mid-frame, part way through a header or a body. After
+    /// a cancelled read the transport must not be reused: the next read starts
+    /// mid-frame and misparses, and the session is corrupted from there on.
+    /// Shut the transport down instead. A dedicated read task that owns all
+    /// reads and forwards messages over a channel is the cancellation-safe
+    /// pattern, and is what the daemon uses (M5).
     pub async fn read_incoming(&mut self) -> Result<Incoming> {
         let body = self.read_message_body().await?;
         let value: serde_json::Value = serde_json::from_slice(&body)?;

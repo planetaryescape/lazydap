@@ -327,3 +327,5 @@ quirk; do not chase it in the environment.
 - A reverse request (`type: "request"` from the adapter, e.g. `runInTerminal`) is currently an
   error in `read_incoming`. Fine while we never advertise support for one; the daemon will need to
   answer them.
+- `read_incoming` is not cancellation-safe; M5's read pump must own all reads (never timeout-wrap a
+  shared transport read).

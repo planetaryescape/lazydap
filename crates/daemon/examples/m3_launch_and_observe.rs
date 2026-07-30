@@ -11,8 +11,13 @@ use lazydap_dap::{
 };
 use std::path::Path;
 use std::time::Duration;
+use tokio::time::Instant;
 
+/// Longest wait for any single message.
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest a whole read loop may run. A debuggee that emits events forever
+/// would otherwise keep resetting the per-message timer and never finish.
+const PHASE_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::main]
@@ -53,8 +58,9 @@ async fn main() -> anyhow::Result<()> {
     // Terminal condition is the `terminated` event; `exited` is optional and
     // may arrive on either side of it. A read error here means EOF — the
     // adapter died without terminating cleanly.
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     loop {
-        match next_message(&mut transport).await? {
+        match next_message(&mut transport, deadline).await? {
             Incoming::Event(event) => {
                 println!("[evt] {} {}", event.event, body_of(&event));
                 match event.event.as_str() {
@@ -131,20 +137,38 @@ fn launch_args(program: &Path, cwd: &Path) -> LaunchArgs {
     }
 }
 
-async fn next_message(transport: &mut DapTransport) -> anyhow::Result<Incoming> {
-    tokio::time::timeout(READ_TIMEOUT, transport.read_incoming())
-        .await
-        .context("timed out waiting for the adapter")?
-        .context("adapter read failed")
+/// Read the next message, bounded both per-message and by the enclosing
+/// phase's deadline. Any timeout here is terminal for the transport:
+/// `read_incoming` is not cancellation-safe, so the caller must bail rather
+/// than read again.
+async fn next_message(transport: &mut DapTransport, deadline: Instant) -> anyhow::Result<Incoming> {
+    let read_deadline = deadline.min(Instant::now() + READ_TIMEOUT);
+    match tokio::time::timeout_at(read_deadline, transport.read_incoming()).await {
+        Ok(message) => message.context("adapter read failed"),
+        Err(_) if read_deadline == deadline => bail!("phase deadline exceeded"),
+        Err(_) => bail!("timed out waiting for the adapter"),
+    }
 }
 
 /// Best-effort: the adapter may close the socket instead of answering.
 async fn drain_until_disconnected(transport: &mut DapTransport, disconnect_seq: i64) {
-    while let Ok(Ok(message)) = tokio::time::timeout(DRAIN_TIMEOUT, transport.read_incoming()).await
+    let deadline = Instant::now() + PHASE_TIMEOUT;
+    while let Ok(Ok(message)) = tokio::time::timeout_at(
+        deadline.min(Instant::now() + DRAIN_TIMEOUT),
+        transport.read_incoming(),
+    )
+    .await
     {
         match message {
             Incoming::Response(resp) if resp.request_seq == disconnect_seq => {
-                println!("[ok] disconnect acknowledged");
+                if resp.success {
+                    println!("[ok] disconnect acknowledged");
+                } else {
+                    println!(
+                        "[warn] disconnect rejected: {}",
+                        resp.message.unwrap_or_default()
+                    );
+                }
                 return;
             }
             Incoming::Response(resp) => println!("[rsp] {} success={}", resp.command, resp.success),
