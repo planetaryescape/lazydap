@@ -57,7 +57,7 @@ gcc -g -O0 examples/c-hello/main.c -o examples/c-hello/build/hello
 ./target/debug/lazydap shutdown
 ```
 
-> **Don't put a debuggee under `/tmp` on macOS.** `/tmp` is a symlink to `/private/tmp`, codelldb resolves the two differently, and your breakpoint silently fails to bind: it reports `verified: false` with `"could not be resolved, but a valid location was found at ..."` and the program runs straight through. Use a directory under `$HOME`.
+> **Don't put a debuggee under `/tmp` on macOS.** `/tmp` is a symlink to `/private/tmp`. lazydap canonicalises the source path and the compiler didn't, so codelldb gets asked about a file under a name it doesn't recognise and your breakpoint silently fails to bind: `verified: false`, a `message` reading `"could not be resolved, but a valid location was found at /tmp/..."`, and a program that runs straight through. Use a directory under `$HOME`. [Quirk 8](docs/reference/codelldb-quirks.md#8-breakpoints-never-bind-for-a-debuggee-under-tmp-on-macos).
 
 `lazydap logs` shows the daemon's log; `LAZYDAP_LOG` takes `tracing` filter directives (`LAZYDAP_LOG=dap.recv.event=debug` to watch raw adapter events), falling back to `RUST_LOG`. `lazydap daemon --foreground` keeps it in your terminal instead.
 
@@ -192,7 +192,7 @@ For a pull request:
 
 ## A note on the book
 
-lazydap is also the subject of a learn-by-LLM Rust book. The chapters under `docs/book/`, the session plan under `docs/teaching/`, the `chapter-*` git tags, and [`.github/workflows/release.yml`](.github/workflows/release.yml) that builds releases from them all belong to [`lazydap-learn`](https://github.com/planetaryescape/lazydap-learn) — edit them there, not here. In this repo they're reference: when you need to know why a piece of code is shaped the way it is, the chapter covering that milestone often explains it better than the blueprint. Product releases use [`.github/workflows/product-release.yml`](.github/workflows/product-release.yml) and `v*` tags, which are unrelated.
+lazydap is also the subject of a learn-by-LLM Rust book. The chapters under `docs/book/`, the session plan under `docs/teaching/`, the `chapter-*` git tags, and [`.github/workflows/release.yml`](.github/workflows/release.yml) that builds releases from them all belong to `lazydap-learn`, a separate and currently private repository. Edit them there, not here. In this repo they're reference: when you need to know why a piece of code is shaped the way it is, the chapter covering that milestone often explains it better than the blueprint. Product releases use [`.github/workflows/product-release.yml`](.github/workflows/product-release.yml) and `v*` tags, which are unrelated.
 
 ## Where to look next
 

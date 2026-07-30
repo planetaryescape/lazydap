@@ -236,7 +236,7 @@ Clients speak length-delimited JSON over a Unix socket to a daemon that owns the
 | What changed | [`CHANGELOG.md`](CHANGELOG.md) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 
-lazydap is also the subject of a learn-by-LLM Rust book, built in a separate repository. The chapters under [`docs/book/`](docs/book/) are a snapshot; [`lazydap-learn`](https://github.com/planetaryescape/lazydap-learn) owns them.
+lazydap is also the subject of a learn-by-LLM Rust book. The chapters under [`docs/book/`](docs/book/) are a snapshot; they are owned by `lazydap-learn`, a separate and currently private repository.
 
 ## License
 
