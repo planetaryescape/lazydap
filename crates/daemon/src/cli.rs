@@ -233,8 +233,10 @@ pub enum Command {
         #[arg(long)]
         frame: Option<i64>,
 
-        /// How the adapter should format the result.
-        #[arg(long, default_value = "repl")]
+        /// How the adapter should read the expression. `watch` and `hover`
+        /// evaluate it in the program; `repl` runs it as an adapter command,
+        /// which for codelldb means an LLDB command.
+        #[arg(long, default_value = "watch")]
         context: EvalContext,
     },
 

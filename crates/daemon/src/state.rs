@@ -423,6 +423,17 @@ impl Session {
         lock(&self.events).take_undelivered()
     }
 
+    /// Record that everything up to `seq` has been reported to a caller.
+    ///
+    /// [`take_undelivered`](Self::take_undelivered) marks what it drains, but a
+    /// wait goes on to consume events *live* for as long as it runs, and those
+    /// are just as delivered. Without this the next wait re-reports them, and
+    /// the second `continue --wait` of a session carries the first one's
+    /// output — which looks exactly like the program printing twice.
+    pub fn mark_delivered(&self, seq: u64) {
+        lock(&self.events).mark_delivered(seq);
+    }
+
     /// Buffered debuggee output, optionally from a moment onwards. A read, not
     /// a drain: `lazydap output` twice shows the same thing twice.
     pub fn buffered_output(&self, since_ms: Option<u64>) -> (Vec<OutputChunk>, u64) {
@@ -533,6 +544,10 @@ impl EventBuffer {
         // is impossible either way.
         self.delivered = self.next_seq - 1;
         (undelivered, self.delivered)
+    }
+
+    fn mark_delivered(&mut self, seq: u64) {
+        self.delivered = self.delivered.max(seq);
     }
 
     fn output(&self, since_ms: Option<u64>) -> (Vec<OutputChunk>, u64) {

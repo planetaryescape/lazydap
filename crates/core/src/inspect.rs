@@ -151,14 +151,23 @@ impl fmt::Display for StepKind {
     }
 }
 
-/// Why an expression is being evaluated. Adapters format results differently
-/// for a hover tooltip than for a REPL line.
+/// Why an expression is being evaluated.
+///
+/// Not a formatting hint. codelldb reads `repl` as "this is a line typed at
+/// the debugger console" and hands it to LLDB's *command* interpreter, where
+/// `x` is the memory-read alias rather than your variable called `x`
+/// (`docs/reference/codelldb-quirks.md`, quirk 7). `watch` and `hover` are the
+/// contexts that evaluate an expression in the program's own language.
+///
+/// `Watch` is therefore the default: `lazydap eval "x + y"` is asking about
+/// the program, not driving LLDB. `Repl` remains available for callers who do
+/// want to run an adapter command.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalContext {
     #[default]
-    Repl,
     Watch,
+    Repl,
     Hover,
 }
 
@@ -361,5 +370,25 @@ mod tests {
     fn the_all_filter_asks_the_adapter_for_no_filter_at_all() {
         assert_eq!(VariableFilter::All.as_dap(), None);
         assert_eq!(VariableFilter::Indexed.as_dap(), Some("indexed"));
+    }
+
+    #[test]
+    fn evaluating_defaults_to_asking_about_the_program_not_driving_the_debugger() {
+        // codelldb sends a `repl` expression to LLDB's command interpreter,
+        // where `x` means `memory read`. Verified live; see quirk 7.
+        assert_eq!(EvalContext::default(), EvalContext::Watch);
+    }
+
+    #[test]
+    fn an_evaluation_context_parses_from_the_word_a_person_would_type() {
+        assert_eq!(
+            "watch".parse::<EvalContext>().expect("parse"),
+            EvalContext::Watch
+        );
+        assert_eq!(
+            "REPL".parse::<EvalContext>().expect("parse"),
+            EvalContext::Repl
+        );
+        assert!("nonsense".parse::<EvalContext>().is_err());
     }
 }

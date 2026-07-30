@@ -1,5 +1,9 @@
 /target
 /examples/c-hello/build
+# lazydap's own per-project state, written when someone debugs this repo with
+# the thing this repo builds. Committing it is a supported choice for a team
+# that wants shared breakpoints (D006) — it is just not ours to make here.
+/.lazydap/
 .env
 .env.*
 !.env.example

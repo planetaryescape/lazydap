@@ -108,6 +108,10 @@ impl Wait {
             self.grace_for_exit_code().await;
         }
 
+        // Everything this wait consumed live is now reported, so the next one
+        // must not drain it out of the buffer all over again.
+        self.session.mark_delivered(self.watermark);
+
         self.blob.elapsed_ms = self.started.elapsed().as_millis() as u64;
         self.blob
     }
@@ -241,8 +245,24 @@ impl Wait {
                     self.blob.exit_code = *exit_code;
                 }
             }
+            // Latest wins, per breakpoint. codelldb sends two `breakpoint`
+            // events about twenty milliseconds apart for a single
+            // `setBreakpoints` — verified live — and a list that repeats the
+            // same breakpoint's state twice invites a reader to think it
+            // changed twice. What a caller wants is where each one ended up.
             Event::BreakpointUpdated { breakpoint, .. } => {
-                self.blob.breakpoint_updates.push(breakpoint.clone())
+                let same = |existing: &lazydap_core::AdapterBreakpoint| {
+                    match (existing.adapter_id, breakpoint.adapter_id) {
+                        (Some(existing), Some(incoming)) => existing == incoming,
+                        // No adapter id to match on: fall back to ours, and
+                        // keep both if neither is identifiable.
+                        _ => existing.id.is_some() && existing.id == breakpoint.id,
+                    }
+                };
+                match self.blob.breakpoint_updates.iter().position(same) {
+                    Some(index) => self.blob.breakpoint_updates[index] = breakpoint.clone(),
+                    None => self.blob.breakpoint_updates.push(breakpoint.clone()),
+                }
             }
             Event::ThreadChanged { update, .. } => self.blob.thread_updates.push(update.clone()),
             Event::SessionStarted { .. } | Event::Continued { .. } => {}
@@ -440,6 +460,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_wait_does_not_re_report_what_the_first_one_already_carried() {
+        // Caught live: the first `continue --wait` reported "hello", and so
+        // did the second, because only the *buffer* drain marked events
+        // delivered — everything a wait consumed live stayed undelivered.
+        let session = session();
+
+        let first = Wait::begin(&session);
+        session.emit(output(&session, "hello\n"));
+        session.emit(stopped(&session, 1, true));
+        let first = first.collect(options(2_000)).await;
+        assert_eq!(first.captured_output.len(), 1);
+
+        let second = Wait::begin(&session);
+        session.emit(output(&session, "goodbye\n"));
+        session.emit(stopped(&session, 1, true));
+        let second = second.collect(options(2_000)).await;
+
+        let texts: Vec<&str> = second
+            .captured_output
+            .iter()
+            .map(|chunk| chunk.output.as_str())
+            .collect();
+        assert_eq!(texts, vec!["goodbye\n"], "got: {texts:?}");
+    }
+
+    #[tokio::test]
     async fn a_clean_exit_carries_its_status_code() {
         let session = session();
         let wait = Wait::begin(&session);
@@ -583,6 +629,59 @@ mod tests {
         assert_eq!(blob.breakpoint_updates.len(), 1);
         assert!(blob.breakpoint_updates[0].verified);
         assert_eq!(blob.thread_updates.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_breakpoint_is_reported_once_however_often_the_adapter_mentions_it() {
+        // codelldb sends two `breakpoint` events for one `setBreakpoints`,
+        // about 20ms apart. Verified live on 2026-07-30.
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        for line in [19, 21] {
+            session.emit(Event::BreakpointUpdated {
+                session_id: session.id,
+                breakpoint: AdapterBreakpoint {
+                    id: Some(BreakpointId(1)),
+                    adapter_id: Some(1),
+                    verified: true,
+                    line: Some(line),
+                    message: None,
+                },
+            });
+        }
+        session.emit(stopped(&session, 1, true));
+
+        let blob = wait.collect(options(2_000)).await;
+        assert_eq!(blob.breakpoint_updates.len(), 1);
+        assert_eq!(
+            blob.breakpoint_updates[0].line,
+            Some(21),
+            "where it ended up, not where it passed through",
+        );
+    }
+
+    #[tokio::test]
+    async fn two_different_breakpoints_are_both_reported() {
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        for adapter_id in [1, 2] {
+            session.emit(Event::BreakpointUpdated {
+                session_id: session.id,
+                breakpoint: AdapterBreakpoint {
+                    id: Some(BreakpointId(adapter_id as u32)),
+                    adapter_id: Some(adapter_id),
+                    verified: true,
+                    line: Some(10),
+                    message: None,
+                },
+            });
+        }
+        session.emit(stopped(&session, 1, true));
+
+        let blob = wait.collect(options(2_000)).await;
+        assert_eq!(blob.breakpoint_updates.len(), 2);
     }
 
     #[tokio::test]
