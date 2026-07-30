@@ -9,22 +9,22 @@ between commands so the next one finds the program where the last one left it.
 ```console
 $ lazydap status --format json
 {
-  "daemon_pid": 2452,
+  "daemon_pid": 12102,
   "instance": "lazydap-demo-13cc8efcde46",
   "lazydap_version": "0.1.0",
-  "protocol_version": 2,
+  "protocol_version": 3,
   "session": {
     "adapter": "codelldb",
-    "buffered_events": 11,
+    "buffered_events": 9,
     "captured_output_chunks": 5,
     "dropped_events": 0,
     "exit_code": null,
     "program": "/Users/you/lazydap-demo/hello",
-    "session_id": "3a2c4335-0af9-4363-bf2e-2dc866c9045b",
+    "session_id": "47406f3c-819c-4aba-b2e8-5116357d1ecd",
     "state": "paused",
-    "uptime_ms": 41508
+    "uptime_ms": 110
   },
-  "uptime_ms": 45819
+  "uptime_ms": 4580
 }
 ```
 
@@ -77,19 +77,22 @@ program.
 ## Reading the log
 
 ```console
-$ lazydap logs --format json
+$ lazydap logs --limit 6 --format json
 {
   "lines": [
-    "2026-07-30T20:34:44.459987Z  INFO daemon.ipc: daemon listening instance=lazydap-demo-13cc8efcde46 socket=/tmp/lazydap-501/lazydap-lazydap-demo-13cc8efcde46.sock pid=43070",
-    "2026-07-30T20:34:44.516231Z  INFO daemon.session: launching session_id=8a2b018f-ecbf-4602-aaf3-17a022dc1220 program=/Users/you/lazydap-demo/hello stop_on_entry=false",
-    "2026-07-30T20:35:03.129498Z  WARN daemon.ipc: request failed request_id=3 error=DapProtocolError: the adapter rejected `variables`: Internal debugger error: Invalid variabes reference"
+    "2026-07-30T22:03:13.528327Z  INFO daemon.ipc: shutdown requested by a client",
+    "2026-07-30T22:03:13.529195Z  INFO daemon.session: ending session on shutdown session_id=5e5c0b81-2f65-48c8-aced-195681de3e48",
+    "2026-07-30T22:03:13.539788Z  INFO daemon.ipc: daemon stopped",
+    "2026-07-30T22:03:13.606147Z  INFO daemon.ipc: daemon listening instance=lazydap-demo-13cc8efcde46 socket=/tmp/lazydap-501/lazydap-lazydap-demo-13cc8efcde46.sock pid=12102",
+    "2026-07-30T22:03:17.632192Z  INFO daemon.session: launching session_id=47406f3c-819c-4aba-b2e8-5116357d1ecd program=/Users/you/lazydap-demo/hello stop_on_entry=true",
+    "2026-07-30T22:03:18.075518Z  INFO daemon.session: launched session_id=47406f3c-819c-4aba-b2e8-5116357d1ecd state=\"paused\" breakpoints=1"
   ]
 }
 ```
 
-Lines elided. That last one is a real stale-reference mistake, recorded at the moment it
-happened — the log is the first place to look when a command failed and the message was too
-short to explain why.
+That is a `shutdown` clearing an old daemon, a new one binding its socket, and a launch — the
+sequence you get after a rebuild. The log is the first place to look when a command failed
+and the message was too short to explain why.
 
 ```bash
 lazydap logs --level warn        # warnings and louder
@@ -112,7 +115,7 @@ a process manager or when watching it work.
 
 ## Version mismatches
 
-The protocol is versioned separately from the binary and is at **v2**. A daemon left running
+The protocol is versioned separately from the binary and is at **v3**. A daemon left running
 from an older build refuses new clients with `VersionMismatch` rather than half-speaking an
 older dialect:
 
@@ -128,7 +131,7 @@ Clients notice the socket has gone, retry once after 100 ms, and spawn a new dae
 survives is `.lazydap/state.toml` — your breakpoints. What does not is the live session: the
 program it was debugging is gone and you launch again.
 
-[The TUI](/getting-started/tui/) does not yet reconnect after this; restart it.
+[The TUI](/getting-started/tui/) reconnects on its own, starting a daemon if there is none.
 
 ## See also
 

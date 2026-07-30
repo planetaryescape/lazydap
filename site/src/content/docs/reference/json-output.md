@@ -227,7 +227,7 @@ non-zero when the buffer overflowed.
   "daemon_pid": 2452,
   "instance": "lazydap-demo-13cc8efcde46",
   "lazydap_version": "0.1.0",
-  "protocol_version": 2,
+  "protocol_version": 3,
   "session": {
     "adapter": "codelldb",
     "buffered_events": 11,
@@ -257,7 +257,7 @@ non-zero when the buffer overflowed.
 ```
 
 ```json
-{ "lazydap": "0.1.0", "protocol": 2 }
+{ "lazydap": "0.1.0", "protocol": 3 }
 ```
 
 The two versions move independently. The protocol one is what a daemon from an older build

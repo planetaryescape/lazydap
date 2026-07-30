@@ -46,6 +46,12 @@ Read `state`. It is always one of these, always lower-case:
 | `timeout` | Nothing settled in time | The program **is still running** |
 | `adapter_died` | codelldb went away | The session is unrecoverable. `exit_code` is `null` — the ending carries a `detail` string, not the adapter's process status |
 
+An adapter that dies never gets to stop the program it was debugging, so lazydap kills the
+debuggee itself before announcing the ending, and says so in that `detail` — "the debuggee
+(pid 4821) was left running and has been killed". You are not left with an orphaned process
+that nothing knows is being debugged. The one case it declines is a reused pid, where the
+number now belongs to something else and killing it would be worse than leaking.
+
 The command's own exit code is a different question. `lazydap continue --wait` exits `0` when
 it successfully reports that your program crashed. Read `state` for the program; read the exit
 code for the command.

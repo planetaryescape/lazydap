@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use lazydap_core::{AdapterKind, StepKind};
+use lazydap_core::{AdapterBreakpoint, AdapterKind, BreakpointId, StepKind};
 use lazydap_protocol::{
     Event, EventKind, IpcMessage, LAZYDAP_PROTOCOL_VERSION, LaunchRequest, Request, WaitMode,
 };
@@ -118,6 +118,38 @@ fn main() {
             session_id,
             thread_id: Some(27982711),
             all_threads_continued: true,
+        }),
+    );
+
+    // v3 (D043): the session id is optional here, which is the whole reason the
+    // version went up. `Some` is an adapter's opinion about a live session;
+    // `None` is a change to the project's list, which `lazydap break` can make
+    // with nothing running.
+    show(
+        "Event: BreakpointUpdated (from a session)",
+        &IpcMessage::event(Event::BreakpointUpdated {
+            session_id: Some(session_id),
+            breakpoint: AdapterBreakpoint {
+                id: Some(BreakpointId(1)),
+                adapter_id: Some(1),
+                verified: true,
+                line: Some(6),
+                message: Some("Resolved locations: 1".to_string()),
+            },
+        }),
+    );
+
+    show(
+        "Event: BreakpointUpdated (no session)",
+        &IpcMessage::event(Event::BreakpointUpdated {
+            session_id: None,
+            breakpoint: AdapterBreakpoint {
+                id: Some(BreakpointId(2)),
+                adapter_id: None,
+                verified: false,
+                line: Some(6),
+                message: None,
+            },
         }),
     );
 

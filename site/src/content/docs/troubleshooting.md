@@ -12,7 +12,7 @@ $ lazydap doctor --format json
   "checks": [
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (not created yet)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 2452, protocol v2", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 12102, protocol v3", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -172,10 +172,11 @@ lazydap pause --wait                      # stop it and look at where it got to
 
 `LAZYDAP_TIMEOUT` changes the 30-second default for every command.
 
-## The TUI is showing something stale
+## The TUI lost the daemon
 
-The TUI does not reconnect if the daemon goes away. After a `lazydap shutdown` or a crash,
-quit with `q` and start it again.
+It reconnects on its own, and starts a daemon if there is none — so a `lazydap shutdown` or a
+crash resolves itself. If it stays stuck, quit with `q` and start it again, then check
+`lazydap logs --level warn` for what the daemon made of it.
 
 ## Nothing above matches
 

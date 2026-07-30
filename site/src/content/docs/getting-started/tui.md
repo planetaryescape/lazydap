@@ -29,13 +29,12 @@ than a UI trying to render into a file.
 
 ## What is on screen
 
-One pane: the source file of the current frame, with line numbers, and a marker on the line
-the program is stopped at. When the program moves, the marker moves — the TUI subscribes to
-the daemon's event stream, so a `continue` you run from another terminal updates this one.
+Three panes. **Source** is the file of the current frame, with line numbers and a marker on
+the line the program is stopped at. **Stack** is the call stack. **Scopes** is the variables
+in view.
 
-Stack, scopes and breakpoint panes are the next milestones and are not there yet. Until then,
-run [`lazydap stack`](/reference/cli/stack/) and [`lazydap scopes`](/reference/cli/scopes/)
-in a second terminal against the same session.
+When the program moves, all three move — the TUI subscribes to the daemon's event stream, so
+a `continue` you run in another terminal updates this one.
 
 ## Keys
 
@@ -45,17 +44,21 @@ in a second terminal against the same session.
 | `F10` or `n` | Step over |
 | `F11` | Step into |
 | `Shift-F11` | Step out |
-| `j` / `k` or arrows | Move the view a line |
+| `Tab` / `Shift-Tab` | Cycle focus between the panes |
+| `<CR>` | Jump to the selected frame, or expand the selected variable |
+| `b` | Toggle a breakpoint on the cursor line (source pane) |
+| `j` / `k` or arrows | Move a line in the focused pane |
 | `<C-d>` / `<C-u>` | Half a screen down or up |
 | `gg` / `G` | Top or bottom of the file |
-| `q` | Leave the TUI |
+| `q` or `Esc` | Leave the TUI |
 
 `<C-d>` and `<C-u>` move half the *visible* height rather than a fixed ten lines, so they
 behave the same in a tall terminal as a short one.
 
 The four movement keys send the same requests the CLI's `continue`, `step`, `step-in` and
-`step-out` send. There is no TUI-only path into the debugger: if the TUI can do it, so can a
-shell script, because they are the same request on the same socket.
+`step-out` send, and `b` sends the one behind `lazydap break`. There is no TUI-only path into
+the debugger: if the TUI can do it, so can a shell script, because they are the same request
+on the same socket.
 
 ## Leaving
 
@@ -69,11 +72,14 @@ lazydap continue --wait
 
 To end the session rather than the UI, use [`lazydap disconnect`](/reference/cli/disconnect/).
 
-## Known gaps
+## When the daemon goes away
 
-The TUI does not reconnect if the daemon goes away — restart it after a
-[`lazydap shutdown`](/reference/cli/shutdown/) or a crash. Conditional breakpoints work from
-the CLI but cannot be set from the TUI yet.
+It reconnects on its own, and starts a daemon if there is none — so a
+[`lazydap shutdown`](/reference/cli/shutdown/) or a crash resolves itself without leaving the
+UI.
+
+`b` sets a plain breakpoint. Conditions, hit counts and log points are
+[CLI-only](/guides/breakpoints/) for now.
 
 ## Why it is a client
 

@@ -282,14 +282,64 @@ requests. A client must be able to read a frame it did not ask for at any point.
 }
 ```
 
+`BreakpointUpdated` is the one whose shape changed in v3, and it is why the version went up.
+Its `session_id` is optional: `Some` is an adapter's opinion about a live session, `None` is a
+change to the project's list, which `lazydap break` can make with nothing running.
+
+```json
+{
+  "version": 3,
+  "id": 0,
+  "payload": {
+    "Event": {
+      "BreakpointUpdated": {
+        "session_id": "4234e458-358b-4ba4-bf10-719a8653b0ea",
+        "breakpoint": {
+          "id": 1,
+          "adapter_id": 1,
+          "verified": true,
+          "line": 6,
+          "message": "Resolved locations: 1"
+        }
+      }
+    }
+  }
+}
+```
+
+```json
+{
+  "version": 3,
+  "id": 0,
+  "payload": {
+    "Event": {
+      "BreakpointUpdated": {
+        "session_id": null,
+        "breakpoint": {
+          "id": 2,
+          "verified": false,
+          "line": 6
+        }
+      }
+    }
+  }
+}
+```
+
+Note what the second frame leaves out. `adapter_id` and `message` are skipped when absent
+rather than sent as `null`, so a client must treat every field but `verified` as optional.
+
+Both shapes would have claimed to be v2 and failed to decode each other, which is the hazard
+the version number exists to turn into a clean `VersionMismatch` and a restart.
+
 This is exactly what [the TUI](/getting-started/tui/) does: `Subscribe` to the session events,
-then send the same `Continue` and `Step` requests the CLI sends.
+then send the same `Continue`, `Step` and breakpoint requests the CLI sends.
 
 ## Failure modes to handle
 
 | What happens | What you see |
 |---|---|
-| The adapter dies | A synthetic `SessionEnded` carrying a `detail` string; any in-flight wait resolves `adapter_died` |
+| The adapter dies | The debuggee is killed first, then a synthetic `SessionEnded` carrying a `detail` string that says so; any in-flight wait resolves `adapter_died` |
 | The daemon dies | Socket EOF. Retry `Ping`, then spawn a daemon |
 | You send an unreadable frame | `BadRequest` on id `0`, then the connection closes |
 | The adapter is missing | `AdapterNotFound`, with the searched paths in `details` |
