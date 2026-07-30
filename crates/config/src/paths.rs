@@ -5,7 +5,7 @@
 //! two projects never share a socket.
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Environment override for the instance name, per D010.
@@ -48,12 +48,15 @@ pub enum PathsError {
     #[error("cannot locate a data directory for lazydap")]
     NoDataDirectory,
 
-    #[error("runtime directory {path} is owned by uid {owner}, not by uid {expected}")]
+    #[error("directory {path} is owned by uid {owner}, not by uid {expected}")]
     RuntimeDirNotOurs {
         path: PathBuf,
         owner: u32,
         expected: u32,
     },
+
+    #[error("refusing to use {path}: {reason}")]
+    UnsafeDirectory { path: PathBuf, reason: String },
 
     #[error("socket path is {len} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte limit: {path}")]
     SocketPathTooLong { len: usize, path: PathBuf },
@@ -127,6 +130,10 @@ pub fn runtime_dir() -> Result<PathBuf> {
 }
 
 /// The directory holding PID and log files.
+///
+/// Owner-only for the same reason as the runtime directory: daemon logs record
+/// the paths of programs being debugged and whatever they printed, which is
+/// nobody else's business.
 pub fn data_dir() -> Result<PathBuf> {
     let dir = match env_path(DATA_DIR_ENV) {
         Some(dir) => dir,
@@ -134,7 +141,7 @@ pub fn data_dir() -> Result<PathBuf> {
             .ok_or(PathsError::NoDataDirectory)?
             .join("lazydap"),
     };
-    fs::create_dir_all(&dir)?;
+    ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -177,18 +184,53 @@ fn nearest_ancestor_containing(start: &Path, markers: &[&str]) -> Option<PathBuf
         .map(Path::to_path_buf)
 }
 
-/// Create `dir` owner-only, and refuse to use one that belongs to somebody
-/// else: a socket in a world-writable directory is a socket anyone can
-/// pre-empt.
+/// Create `dir` owner-only, and refuse to use anything that is not already a
+/// directory we own privately.
+///
+/// The threat is concrete. `/tmp` is world-writable, so anyone on the machine
+/// can create `/tmp/lazydap-$UID` before we do. If they make it a *symlink* to
+/// somewhere they control, a check that follows the link sees a directory we
+/// own with the right mode and passes — and lazydap then binds its control
+/// socket inside a directory the attacker can swap out from under it. A fake
+/// daemon on that socket accepts `launch`, which is arbitrary code execution
+/// under the user's own uid.
+///
+/// So: `symlink_metadata` (lstat, does not follow), and reject a symlink
+/// outright rather than inspecting its target. There is still a TOCTOU gap
+/// between this check and the bind; closing it properly needs `openat`-style
+/// directory handles, which is not worth a dependency for a local-only socket
+/// whose parent an attacker must already share.
 fn ensure_private_dir(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        fs::DirBuilder::new().recursive(true).create(dir)?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-        return Ok(());
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            // Create with the mode set, not chmod-after-create: the window
+            // between the two would leave the directory briefly world-readable.
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+            return Ok(());
+        }
+        Err(source) => return Err(source.into()),
+    };
+
+    if metadata.file_type().is_symlink() {
+        return Err(PathsError::UnsafeDirectory {
+            path: dir.to_path_buf(),
+            reason: "it is a symlink, and following it would let whoever created it \
+                     choose where lazydap puts its socket"
+                .to_string(),
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(PathsError::UnsafeDirectory {
+            path: dir.to_path_buf(),
+            reason: "it exists but is not a directory".to_string(),
+        });
     }
 
     let expected = current_uid()?;
-    let metadata = fs::metadata(dir)?;
     let owner = metadata.uid();
     if owner != expected {
         return Err(PathsError::RuntimeDirNotOurs {
@@ -404,6 +446,59 @@ mod tests {
             matches!(err, PathsError::SocketPathTooLong { .. }),
             "got: {err}",
         );
+    }
+
+    #[test]
+    fn a_symlinked_directory_is_refused_rather_than_followed() {
+        // Somebody else got to /tmp first and pointed our directory at one
+        // they control. Following it would put the daemon's control socket
+        // wherever they like.
+        let temp = TempDir::new("symlink");
+        let target = temp.mkdirs("theirs");
+        let link = temp.path().join("ours");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let err = ensure_private_dir(&link).expect_err("a symlink must not be accepted");
+        assert!(
+            matches!(err, PathsError::UnsafeDirectory { .. }),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn a_file_where_the_directory_should_be_is_refused() {
+        let temp = TempDir::new("notdir");
+        temp.touch("ours");
+
+        let err = ensure_private_dir(&temp.path().join("ours"))
+            .expect_err("a plain file must not be accepted");
+        assert!(
+            matches!(err, PathsError::UnsafeDirectory { .. }),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn a_directory_created_from_scratch_is_owner_only_immediately() {
+        let temp = TempDir::new("fresh");
+        let dir = temp.path().join("nested/runtime");
+
+        ensure_private_dir(&dir).expect("create");
+
+        let mode = fs::metadata(&dir).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "got mode: {:o}", mode & 0o777);
+    }
+
+    #[test]
+    fn loose_permissions_on_our_own_directory_are_tightened() {
+        let temp = TempDir::new("loose");
+        let dir = temp.mkdirs("runtime");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("loosen");
+
+        ensure_private_dir(&dir).expect("accept our own directory");
+
+        let mode = fs::metadata(&dir).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "got mode: {:o}", mode & 0o777);
     }
 
     #[test]
