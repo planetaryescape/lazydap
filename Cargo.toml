@@ -17,6 +17,16 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 repository = "https://github.com/planetaryescape/lazydap"
 homepage = "https://github.com/planetaryescape/lazydap"
+# The fallback for a crate that does not set its own. Every crate here does,
+# because "part of lazydap" tells a reader nothing about which part.
+description = "A scriptable, terminal-first debugger"
+# crates.io allows five keywords of at most twenty characters each. These are
+# inherited rather than repeated so a crate cannot drift into describing a
+# different product than the one it ships in.
+keywords = ["debugger", "dap", "cli", "tui", "debugging"]
+# Both are real crates.io category slugs; an invalid one is only rejected at
+# publish time, which is exactly when nobody wants to find out.
+categories = ["development-tools::debugging", "command-line-utilities"]
 
 [workspace.lints.rust]
 unsafe_code = "deny"

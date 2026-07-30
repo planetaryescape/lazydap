@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Where lazydap keeps things: project-root detection, socket, log and state paths, and the private directories they live in"
 publish = false
 
 [lints]
