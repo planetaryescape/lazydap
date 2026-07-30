@@ -93,7 +93,17 @@ pub async fn run(socket: &Path) -> Result<()> {
 
     spawn_input_pump(tx.clone());
 
-    let mut terminal = ratatui::try_init()?;
+    // `try_init` enables raw mode and enters the alternate screen *before* the
+    // step that can fail (asking the terminal its size), so returning its error
+    // straight out would leave the shell in raw mode with no prompt. Put it
+    // back first, then complain.
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            ratatui::restore();
+            return Err(error.into());
+        }
+    };
     let mut state = AppState::default();
 
     let mut tick = tokio::time::interval(TICK);
@@ -139,13 +149,13 @@ fn dispatch(cmd: Cmd, tx: &UnboundedSender<Msg>, ipc: &ipc_client::IpcClient) {
         // Handled by the loop, which is the only thing that can stop it.
         Cmd::Quit => {}
         Cmd::SendIpc(request) => ipc.send(request),
-        Cmd::LoadSource(path) => {
+        Cmd::LoadSource { id, path } => {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let contents = tokio::fs::read_to_string(&path)
                     .await
                     .map_err(|error| error.to_string());
-                let _ = tx.send(Msg::SourceLoaded { path, contents });
+                let _ = tx.send(Msg::SourceLoaded { id, path, contents });
             });
         }
     }
@@ -181,7 +191,12 @@ fn spawn_input_pump(tx: UnboundedSender<Msg>) {
                 // Nothing to read, or a mouse or focus event nothing acts on.
                 Ok(_) => continue,
                 Err(error) => {
+                    // Say so before going. The render loop holds other senders,
+                    // so it would not notice this channel's producer leaving —
+                    // it would keep drawing, in raw mode, with no key able to
+                    // reach it and therefore no way to quit.
                     tracing::warn!(target: "tui.input", %error, "stopped reading the terminal");
+                    let _ = tx.send(Msg::InputClosed);
                     return;
                 }
             };

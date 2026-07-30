@@ -245,9 +245,27 @@ pub struct SessionReservation {
 }
 
 impl SessionReservation {
+    /// Turn the reservation into a live session and announce it.
+    ///
+    /// The two happen here, in this order, and nowhere else — that ordering is
+    /// a contract with every subscriber and it used to be the caller's to get
+    /// right, which it did not. `SessionStarted` was emitted before the
+    /// session reached the map, so a client subscribing in that window missed
+    /// the event (it subscribed too late) *and* got a session-less snapshot
+    /// (the session was not there yet), leaving a TUI showing "no session"
+    /// until the program next moved.
+    ///
+    /// Announcing from inside the promotion makes the window impossible rather
+    /// than merely absent: a subscriber now either sees the session in its
+    /// snapshot or receives the event, and never neither.
     pub fn promote(mut self, session: Arc<Session>) {
-        write(&self.state.sessions).insert(self.id, Slot::Live(session));
+        write(&self.state.sessions).insert(self.id, Slot::Live(Arc::clone(&session)));
         self.promoted = true;
+
+        session.emit(Event::SessionStarted {
+            session_id: self.id,
+            adapter: session.adapter_kind,
+        });
     }
 }
 
@@ -730,6 +748,45 @@ mod tests {
             "the error should name the session in the way",
         );
         assert_eq!(error.details["state"], "launching");
+    }
+
+    #[test]
+    fn a_session_is_announced_only_once_it_can_be_found() {
+        // The bug this pins: `SessionStarted` used to be emitted before the
+        // reservation was promoted, so a client that subscribed in between got
+        // a snapshot with no session *and* had already missed the event.
+        let state = state();
+        let session_id = SessionId::new();
+        let reservation = state.reserve(session_id).expect("reserve");
+        let session = Arc::new(Session::new(
+            session_id,
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            crate::adapter::AdapterHandle::detached(),
+            state.events(),
+        ));
+
+        let mut events = state.events().subscribe();
+        assert!(
+            events.try_recv().is_err(),
+            "a reservation is not an announcement",
+        );
+        assert!(state.active_session().is_none());
+
+        reservation.promote(session);
+
+        match events.try_recv().expect("the session should be announced") {
+            SeqEvent {
+                event: Event::SessionStarted { session_id: id, .. },
+                ..
+            } => assert_eq!(id, session_id),
+            other => unreachable!("expected a session-started event, got: {other:?}"),
+        }
+        assert!(
+            state.active_session().is_some(),
+            "and be findable by anyone the announcement reaches",
+        );
     }
 
     #[test]

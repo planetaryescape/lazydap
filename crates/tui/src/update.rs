@@ -19,7 +19,11 @@ pub fn update(state: AppState, msg: Msg) -> (AppState, Cmd) {
         // next tick, which is the difference between a resize that looks
         // instant and one that looks stuck.
         Msg::Resize | Msg::Tick => (state, Cmd::None),
-        Msg::SourceLoaded { path, contents } => source_loaded(state, path, contents),
+        Msg::InputClosed => {
+            tracing::warn!(target: "tui.input", "no more input can arrive; leaving");
+            (state, Cmd::Quit)
+        }
+        Msg::SourceLoaded { id, path, contents } => source_loaded(state, id, path, contents),
         // Terminals with the kitty protocol on report releases and repeats as
         // well as presses. Acting on all three turns one keystroke into three.
         Msg::Key(key) if key.kind != KeyEventKind::Press => (state, Cmd::None),
@@ -119,6 +123,15 @@ fn execute(mut state: AppState, movement: Movement) -> (AppState, Cmd) {
 }
 
 fn daemon_event(mut state: AppState, event: Event) -> (AppState, Cmd) {
+    if !applies(&state, &event) {
+        tracing::debug!(
+            target: "tui.ipc",
+            session_id = %event.session_id(),
+            "ignoring an event that is not about the session being followed",
+        );
+        return (state, Cmd::None);
+    }
+
     match event {
         Event::SessionStarted { session_id, .. } => {
             state.session = Some(SessionSnapshot {
@@ -227,14 +240,43 @@ fn show(mut state: AppState, location: Location) -> (AppState, Cmd) {
 
     let path = location.path.clone();
     state.location = Some(location);
-    (state, Cmd::LoadSource(path))
+    let cmd = load_source(&mut state, path);
+    (state, cmd)
+}
+
+/// Ask for a file, and record that this is the read now being waited on.
+///
+/// Every read goes through here, which is what makes the id monotonic and the
+/// staleness check in [`source_loaded`] meaningful.
+fn load_source(state: &mut AppState, path: std::path::PathBuf) -> Cmd {
+    state.latest_load += 1;
+    Cmd::LoadSource {
+        id: state.latest_load,
+        path,
+    }
 }
 
 fn source_loaded(
     mut state: AppState,
+    id: u64,
     path: std::path::PathBuf,
     contents: std::result::Result<String, String>,
 ) -> (AppState, Cmd) {
+    // Overtaken. Applying it would put a file the program has already left
+    // back on screen — and, when it failed, would replace whatever the status
+    // row is currently saying with a complaint about a read nobody is waiting
+    // for any more.
+    if id != state.latest_load {
+        tracing::debug!(
+            target: "tui.source",
+            id,
+            waiting_for = state.latest_load,
+            file = %path.display(),
+            "dropping a file read that has been overtaken",
+        );
+        return (state, Cmd::None);
+    }
+
     match contents {
         Ok(contents) => {
             let mut source = SourceView::from_contents(&path, &contents);
@@ -279,6 +321,33 @@ fn frame_location(frame: &StackFrame) -> Option<Location> {
     })
 }
 
+/// Whether an event is one this TUI should act on.
+///
+/// A new session always supersedes whatever was being followed. Everything
+/// else has to be about the session being followed *and* about one that is
+/// still live, and each half catches a real way the screen goes wrong:
+///
+/// - **A different id** is an event from a previous adapter that is still
+///   dying while a new session has begun. Applied, it would hijack the live
+///   session into showing another program's position.
+/// - **A session that has ended** cannot stop or resume. A late `stopped` for
+///   it would resurrect it: the status row would say "paused" for a program
+///   that is gone, and the next F5 would be sent to an adapter that is not
+///   there.
+/// - **No session known at all** is neither of those. There is nothing to
+///   hijack and nothing to resurrect, and an event is a perfectly good way to
+///   find out a session exists — so it is adopted rather than dropped, which
+///   is what stops a missed announcement from leaving the TUI blind.
+fn applies(state: &AppState, event: &Event) -> bool {
+    if matches!(event, Event::SessionStarted { .. }) {
+        return true;
+    }
+    match state.session.as_ref() {
+        None => true,
+        Some(session) => session.id == event.session_id() && session.state.is_live(),
+    }
+}
+
 fn ended_as(reason: &EndReason) -> SessionState {
     match reason {
         EndReason::Exited { .. } => SessionState::Exited,
@@ -320,6 +389,7 @@ mod tests {
         let (state, _) = update(
             AppState::default(),
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from(FILE),
                 contents: Ok(body.join("\n")),
             },
@@ -360,6 +430,23 @@ mod tests {
             }],
             total: Some(1),
         }
+    }
+
+    /// The answer to the read the state is currently waiting for.
+    ///
+    /// Tests that want a *stale* answer pass the id by hand; everything else
+    /// goes through here so a new load in the middle of a scenario does not
+    /// silently turn a live completion into an ignored one.
+    fn deliver(state: AppState, path: &str, contents: &str) -> (AppState, Cmd) {
+        let id = state.latest_load;
+        update(
+            state,
+            Msg::SourceLoaded {
+                id,
+                path: PathBuf::from(path),
+                contents: Ok(contents.to_string()),
+            },
+        )
     }
 
     fn answer(state: AppState, response: Response) -> (AppState, Cmd) {
@@ -641,7 +728,13 @@ mod tests {
         let (state, _) = paused(20);
         let (state, cmd) = answer(state, stack_trace("/tmp/other.c", 7));
 
-        assert_eq!(cmd, Cmd::LoadSource(PathBuf::from("/tmp/other.c")));
+        assert_eq!(
+            cmd,
+            Cmd::LoadSource {
+                id: 1,
+                path: PathBuf::from("/tmp/other.c"),
+            },
+        );
         assert_eq!(
             marker(&state),
             None,
@@ -655,13 +748,7 @@ mod tests {
         // other.c is still being read off disk.
         let (state, _) = paused(20);
         let (state, _) = answer(state, stack_trace("/tmp/other.c", 7));
-        let (state, _) = update(
-            state,
-            Msg::SourceLoaded {
-                path: PathBuf::from("/tmp/other.c"),
-                contents: Ok("a\nb\nc\nd\ne\nf\ng\nh".to_string()),
-            },
-        );
+        let (state, _) = deliver(state, "/tmp/other.c", "a\nb\nc\nd\ne\nf\ng\nh");
 
         assert_eq!(marker(&state), Some(7));
     }
@@ -677,6 +764,9 @@ mod tests {
         let (state, _) = update(
             state,
             Msg::SourceLoaded {
+                // The read the first stop asked for; the second has since
+                // asked for another.
+                id: 1,
                 path: PathBuf::from("/tmp/first.c"),
                 contents: Ok("a\nb\nc\nd".to_string()),
             },
@@ -817,6 +907,139 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_that_can_no_longer_be_read_ends_the_tui() {
+        // Without this the render loop keeps drawing in raw mode with no key
+        // able to reach it — including the one that quits — and the only way
+        // out is killing the process from another terminal.
+        let (_, cmd) = update(loaded(10), Msg::InputClosed);
+        assert_eq!(cmd, Cmd::Quit);
+    }
+
+    #[test]
+    fn a_stop_arriving_after_its_session_ended_does_not_resurrect_it() {
+        // A dying adapter can emit one last `stopped`. Applied, the status row
+        // would say "paused" for a program that is gone, and the next F5 would
+        // be sent to an adapter that is not there.
+        let (state, session_id) = paused(20);
+        let (state, _) = update(
+            state,
+            Msg::DaemonEvent(Event::SessionEnded {
+                session_id,
+                reason: EndReason::Exited { exit_code: Some(0) },
+            }),
+        );
+
+        let (state, cmd) = update(state, Msg::DaemonEvent(stopped(session_id)));
+
+        assert_eq!(cmd, Cmd::None, "and it must not go asking for a stack");
+        assert_eq!(
+            state.session.expect("a session").state,
+            SessionState::Exited
+        );
+    }
+
+    #[test]
+    fn an_event_from_a_previous_session_does_not_hijack_the_current_one() {
+        let (state, old_session) = paused(20);
+        let new_session = SessionId::new();
+        let (state, _) = update(
+            state,
+            Msg::DaemonEvent(Event::SessionStarted {
+                session_id: new_session,
+                adapter: AdapterKind::Codelldb,
+            }),
+        );
+
+        // The previous adapter, still shutting down, reports a stop.
+        let (state, cmd) = update(state, Msg::DaemonEvent(stopped(old_session)));
+
+        assert_eq!(cmd, Cmd::None);
+        let session = state.session.expect("a session");
+        assert_eq!(session.id, new_session, "the live session is untouched");
+        assert_eq!(
+            session.state,
+            SessionState::Running,
+            "and is not dragged into looking paused by another program's stop",
+        );
+    }
+
+    #[test]
+    fn an_event_for_a_session_nobody_has_heard_of_is_adopted_rather_than_dropped() {
+        // The other side of the identity check. With nothing being followed
+        // there is nothing to hijack, and refusing the event would leave the
+        // TUI blind until the program next moved.
+        let session_id = SessionId::new();
+        let (state, cmd) = update(loaded(20), Msg::DaemonEvent(stopped(session_id)));
+
+        assert!(matches!(cmd, Cmd::SendIpc(Request::StackTrace { .. })));
+        assert_eq!(state.session.expect("a session").id, session_id);
+    }
+
+    #[test]
+    fn the_newest_file_read_wins_however_the_answers_come_back() {
+        // Reads finish in whatever order the filesystem manages. The first
+        // stop's file arriving *after* the second stop has been reported must
+        // not put a file the program has left back on screen.
+        let (state, _) = paused(20);
+        let (state, first) = answer(state, stack_trace("/tmp/first.c", 3));
+        let (state, second) = answer(state, stack_trace("/tmp/second.c", 9));
+
+        let (first, second) = match (first, second) {
+            (Cmd::LoadSource { id: first, .. }, Cmd::LoadSource { id: second, .. }) => {
+                (first, second)
+            }
+            other => unreachable!("both stops should ask for a file, got: {other:?}"),
+        };
+        assert!(second > first, "ids climb, so the newer one is knowable");
+
+        // Newest first, oldest second — the order that used to lose.
+        let (state, _) = update(
+            state,
+            Msg::SourceLoaded {
+                id: second,
+                path: PathBuf::from("/tmp/second.c"),
+                contents: Ok("a\nb\nc\nd\ne\nf\ng\nh\ni\nj".to_string()),
+            },
+        );
+        let (state, _) = update(
+            state,
+            Msg::SourceLoaded {
+                id: first,
+                path: PathBuf::from("/tmp/first.c"),
+                contents: Ok("a\nb\nc\nd".to_string()),
+            },
+        );
+
+        assert_eq!(
+            state.source.as_ref().expect("a file").path(),
+            PathBuf::from("/tmp/second.c"),
+        );
+        assert_eq!(marker(&state), Some(9));
+    }
+
+    #[test]
+    fn an_overtaken_read_that_failed_does_not_overwrite_what_the_status_row_says() {
+        // The failure branch of the same race: a stale read reporting "no such
+        // file" would replace a notice the user has not read yet — a daemon
+        // that went away, say.
+        let (state, _) = paused(20);
+        let (state, _) = answer(state, stack_trace("/tmp/first.c", 3));
+        let (state, _) = answer(state, stack_trace("/tmp/second.c", 9));
+        let (state, _) = update(state, Msg::DaemonGone);
+
+        let (state, _) = update(
+            state,
+            Msg::SourceLoaded {
+                id: 1,
+                path: PathBuf::from("/tmp/first.c"),
+                contents: Err("No such file or directory (os error 2)".to_string()),
+            },
+        );
+
+        assert_eq!(state.notice.as_deref(), Some("the daemon went away"));
+    }
+
+    #[test]
     fn a_refused_request_is_shown_rather_than_swallowed() {
         let (state, _) = update(
             loaded(10),
@@ -848,6 +1071,7 @@ mod tests {
         let (state, cmd) = update(
             AppState::default(),
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
                 contents: Err("No such file or directory (os error 2)".to_string()),
             },
@@ -866,6 +1090,7 @@ mod tests {
         let (state, _) = update(
             AppState::default(),
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
                 contents: Err("no".to_string()),
             },
@@ -873,6 +1098,7 @@ mod tests {
         let (state, _) = update(
             state,
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from("/tmp/there.c"),
                 contents: Ok("int main(void) {}".to_string()),
             },

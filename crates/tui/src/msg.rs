@@ -20,10 +20,23 @@ pub enum Msg {
     /// The redraw heartbeat. Nothing depends on it yet; it is what lets a
     /// pane that ages (an elapsed timer, a spinner) redraw without an input.
     Tick,
+    /// The terminal stopped producing input, so no key can ever arrive again
+    /// — including the one that quits.
+    ///
+    /// Fatal on purpose. The alternative, found in review, is a TUI spinning
+    /// in raw mode with no working quit key, which leaves the user killing it
+    /// from another terminal.
+    InputClosed,
     /// A [`Cmd::LoadSource`] finished. Carries the error rather than the file
     /// contents when it did not, because "the file is missing" is something
     /// the user needs to see and the reducer is where seeing it is decided.
+    ///
+    /// `id` is the one the [`Cmd::LoadSource`] carried. Reads finish in
+    /// whatever order the filesystem manages, not the order they were asked
+    /// for, so the reducer needs it to tell the answer it is waiting for from
+    /// one it has been overtaken by.
     SourceLoaded {
+        id: u64,
         path: PathBuf,
         contents: std::result::Result<String, String>,
     },
@@ -59,7 +72,12 @@ pub enum Cmd {
     /// Nothing to do. The overwhelmingly common answer.
     None,
     Quit,
-    LoadSource(PathBuf),
+    /// Read a file. `id` comes back on the [`Msg::SourceLoaded`] so a stale
+    /// answer can be told from the current one.
+    LoadSource {
+        id: u64,
+        path: PathBuf,
+    },
     /// Ask the daemon something. The answer arrives as a [`Msg`], never as a
     /// return value: the reducer does no I/O.
     SendIpc(Request),

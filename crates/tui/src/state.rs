@@ -38,6 +38,14 @@ pub struct AppState {
     /// main.c" before main.c has finished loading. This is the truth; the
     /// marker is what has been drawn of it.
     pub(crate) location: Option<Location>,
+    /// The id of the most recent file read asked for.
+    ///
+    /// Reads finish in whatever order the filesystem manages. Two stops in
+    /// quick succession can have the *first* file arrive last, and without a
+    /// way to tell them apart the older answer wins and the pane shows a file
+    /// the program has already left. Only an answer carrying this id is
+    /// still wanted.
+    pub(crate) latest_load: u64,
 }
 
 /// As much of the session as the TUI has been told about.

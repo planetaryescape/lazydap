@@ -103,6 +103,7 @@ mod tests {
         let (state, _) = update(
             AppState::default(),
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from("/tmp/numbers.txt"),
                 contents: Ok(body.join("\n")),
             },
@@ -222,6 +223,7 @@ mod tests {
         let (mut state, _) = update(
             AppState::default(),
             Msg::SourceLoaded {
+                id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
                 contents: Err("no such file".to_string()),
             },
