@@ -30,6 +30,10 @@ ALLOW = {
     "lazydap-protocol": {"lazydap-core"},
     # Paths and (later) config loading.
     "lazydap-config": {"lazydap-core"},
+    # Per-project state on disk (.lazydap/state.toml). Knows domain types and a
+    # file format, and nothing about sockets, adapters or the daemon — so a
+    # future client can read the same state without going through the daemon.
+    "lazydap-store": {"lazydap-core"},
     # The daemon may depend on everything except a client. DAP in particular is
     # allowed here only because the adapter module is the seam that keeps it
     # from leaking further (see crates/daemon/src/adapter/mod.rs).
@@ -38,6 +42,7 @@ ALLOW = {
         "lazydap-core",
         "lazydap-dap",
         "lazydap-protocol",
+        "lazydap-store",
     },
 }
 

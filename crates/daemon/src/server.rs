@@ -8,6 +8,7 @@ use lazydap_core::EndReason;
 use lazydap_protocol::{
     ErrorCode, IpcConnection, IpcError, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request,
 };
+use lazydap_store::ProjectStore;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -47,7 +48,17 @@ pub async fn run_daemon(instance: Instance) -> Result<()> {
         .map_err(CliError::general)?;
     write_pid_file(&instance.pid)?;
 
-    let state = DaemonState::new(instance.name.clone());
+    let store = ProjectStore::load(&instance.project_root).map_err(|source| {
+        CliError::general(anyhow::anyhow!(
+            "cannot read {}: {source}",
+            instance.project_root.display()
+        ))
+    })?;
+    // One flusher per store, for the life of the daemon. Mutations only mark
+    // the state dirty; this is what actually writes it (debounced, D006).
+    tokio::spawn(Arc::clone(&store).run_flusher());
+
+    let state = DaemonState::new(instance.name.clone(), store);
     spawn_signal_watch(Arc::clone(&state));
 
     tracing::info!(
@@ -63,6 +74,11 @@ pub async fn run_daemon(instance: Instance) -> Result<()> {
     // Teardown runs whatever the loop did, so a failure cannot leave adapters
     // running or a socket file lying around for the next client to trust.
     shut_down_sessions(&state).await;
+    // The debounce window is 500ms and the daemon is about to stop: whatever
+    // is still only in memory has to reach the disk now or never.
+    if let Err(error) = state.store.flush_now() {
+        tracing::warn!(target: "daemon.store", %error, "could not persist project state on shutdown");
+    }
     drop(listener);
     let _ = fs::remove_file(&instance.socket);
     clear_pid_file_if_ours(&instance.pid);

@@ -66,6 +66,24 @@ impl DaemonClient {
 
     /// Send one request and wait for the response with the same id.
     pub async fn request(&mut self, request: Request) -> Result<Response> {
+        self.request_within(request, Some(REQUEST_TIMEOUT)).await
+    }
+
+    /// The same, for a request the caller knows will take a while.
+    ///
+    /// `continue --wait --timeout 300` asks the daemon to block for five
+    /// minutes; a client that gave up after its own sixty seconds would report
+    /// a timeout that never happened and abandon a perfectly healthy wait.
+    ///
+    /// `None` means no client-side limit at all, for `--timeout 0`. It is an
+    /// `Option` rather than an enormous `Duration` because "an enormous
+    /// duration" is not a deadline: `Instant + Duration` panics on overflow,
+    /// and a sentinel large enough to mean "never" is large enough to do it.
+    pub async fn request_within(
+        &mut self,
+        request: Request,
+        timeout: Option<Duration>,
+    ) -> Result<Response> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -73,16 +91,21 @@ impl DaemonClient {
             .send(IpcMessage::request(id, request))
             .await?;
 
-        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
-            let message = tokio::time::timeout_at(deadline, self.connection.recv())
-                .await
-                .map_err(|_| {
-                    CliError::general(anyhow::anyhow!(
-                        "the daemon did not answer within {}s",
-                        REQUEST_TIMEOUT.as_secs()
-                    ))
-                })?
+            let received = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.connection.recv())
+                    .await
+                    .map_err(|_| {
+                        CliError::general(anyhow::anyhow!(
+                            "the daemon did not answer within {}s",
+                            timeout.unwrap_or_default().as_secs(),
+                        ))
+                    })?,
+                None => self.connection.recv().await,
+            };
+
+            let message = received
                 .map_err(|source| classify_read_error(source, id))?
                 .ok_or_else(|| {
                     CliError::unreachable(anyhow::anyhow!(

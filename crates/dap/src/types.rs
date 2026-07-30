@@ -133,6 +133,166 @@ pub struct ContinueArgs {
     pub thread_id: i64,
 }
 
+/// The response to `continue`. codelldb answers with a body; some adapters
+/// send none at all, which is why every field is defaulted.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContinueResponse {
+    pub all_threads_continued: bool,
+}
+
+/// `next`, `stepIn` and `stepOut` all take the same arguments. One struct,
+/// three commands — the command name is what differs, not the shape.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepArgs {
+    pub thread_id: i64,
+    /// `statement`, `line` or `instruction`. Omitted means the adapter's
+    /// default, which is what a source-level debugger wants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PauseArgs {
+    pub thread_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackTraceArgs {
+    pub thread_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_frame: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub levels: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StackTraceResponse {
+    pub stack_frames: Vec<DapStackFrame>,
+    pub total_frames: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DapStackFrame {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub source: Option<DapSource>,
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub column: u32,
+}
+
+/// A DAP source. `path` is absent for code the adapter can only serve by
+/// reference — disassembly, inlined or generated code.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DapSource {
+    pub name: Option<String>,
+    pub path: Option<String>,
+    /// The spec uses `0` to mean "not a reference", which is not the same as
+    /// absent; both end up as `None` here.
+    pub source_reference: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopesArgs {
+    pub frame_id: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScopesResponse {
+    pub scopes: Vec<DapScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DapScope {
+    pub name: String,
+    pub variables_reference: i64,
+    #[serde(default)]
+    pub expensive: bool,
+    #[serde(default)]
+    pub named_variables: Option<u32>,
+    #[serde(default)]
+    pub indexed_variables: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariablesArgs {
+    pub variables_reference: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VariablesResponse {
+    pub variables: Vec<DapVariable>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DapVariable {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type", default)]
+    pub type_name: Option<String>,
+    #[serde(default)]
+    pub variables_reference: i64,
+    #[serde(default)]
+    pub named_variables: Option<u32>,
+    #[serde(default)]
+    pub indexed_variables: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluateArgs {
+    pub expression: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EvaluateResponse {
+    /// DAP calls the value `result` here and `value` on a variable, for the
+    /// same thing.
+    pub result: String,
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    pub variables_reference: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ThreadsResponse {
+    pub threads: Vec<DapThread>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DapThread {
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectArgs {
@@ -317,6 +477,75 @@ mod tests {
     fn serialises_continue_args_as_camel_case() {
         let json = serde_json::to_string(&ContinueArgs { thread_id: 1 }).expect("serialise");
         assert_eq!(json, r#"{"threadId":1}"#, "got: {json}");
+    }
+
+    #[test]
+    fn deserialises_a_stack_trace_with_a_frame_that_has_no_source_on_disk() {
+        // Every stack bottoms out in something without a source file — libc,
+        // a thread trampoline — and a stack that failed to parse because of it
+        // would be no stack at all.
+        let json = r#"{"stackFrames":[
+            {"id":1,"name":"main","source":{"name":"main.c","path":"/tmp/main.c"},
+             "line":19,"column":5},
+            {"id":2,"name":"start","line":0,"column":0}
+        ],"totalFrames":2}"#;
+        let response: StackTraceResponse = serde_json::from_str(json).expect("deserialise");
+
+        assert_eq!(response.total_frames, Some(2));
+        assert_eq!(response.stack_frames[0].name, "main");
+        assert!(response.stack_frames[1].source.is_none());
+    }
+
+    #[test]
+    fn deserialises_a_variable_whose_type_field_dap_spells_differently() {
+        let json = r#"{"variables":[
+            {"name":"x","value":"5","type":"int","variablesReference":0}
+        ]}"#;
+        let response: VariablesResponse = serde_json::from_str(json).expect("deserialise");
+        let variable = &response.variables[0];
+
+        assert_eq!(variable.type_name.as_deref(), Some("int"));
+        assert_eq!(variable.variables_reference, 0, "a scalar has no children");
+    }
+
+    #[test]
+    fn deserialises_an_evaluate_response_that_carries_no_type() {
+        let json = r#"{"result":"12","variablesReference":0}"#;
+        let response: EvaluateResponse = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(response.result, "12");
+        assert!(response.type_name.is_none());
+    }
+
+    #[test]
+    fn a_continue_response_with_no_body_at_all_still_reads() {
+        // Some adapters answer `continue` with a bare success and no body.
+        let response: ContinueResponse =
+            serde_json::from_value(serde_json::json!({})).expect("deserialise");
+        assert!(!response.all_threads_continued);
+    }
+
+    #[test]
+    fn serialises_step_args_without_a_granularity_we_did_not_ask_for() {
+        let json = serde_json::to_string(&StepArgs {
+            thread_id: 1,
+            granularity: None,
+        })
+        .expect("serialise");
+        assert_eq!(json, r#"{"threadId":1}"#, "got: {json}");
+    }
+
+    #[test]
+    fn serialises_variables_args_with_only_the_fields_that_were_set() {
+        let json = serde_json::to_string(&VariablesArgs {
+            variables_reference: 1001,
+            filter: Some("indexed".into()),
+            start: Some(0),
+            count: None,
+        })
+        .expect("serialise");
+        assert!(json.contains(r#""variablesReference":1001"#), "got: {json}");
+        assert!(json.contains(r#""filter":"indexed""#), "got: {json}");
+        assert!(!json.contains("count"), "got: {json}");
     }
 
     #[test]

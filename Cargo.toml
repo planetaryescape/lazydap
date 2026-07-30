@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/config", "crates/core", "crates/daemon", "crates/dap", "crates/protocol"]
+members = [
+    "crates/config",
+    "crates/core",
+    "crates/daemon",
+    "crates/dap",
+    "crates/protocol",
+    "crates/store",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,11 +32,15 @@ tokio = { version = "1" }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+# Shell completions for `lazydap completions <shell>`. First-party to clap,
+# and generated from the same command tree, so it cannot drift from --help.
+clap_complete = "4"
 anyhow = "1"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }

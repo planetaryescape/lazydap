@@ -14,6 +14,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 4 | [`--version` flag is not recognised; use `--help`](#4---version-not-supported) | CONTRIBUTING.md authoring | codelldb 1.x |
 | 5 | [Hangs at `_dyld_start` after a macOS update](#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) | Ship-mode Wave 0 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 6 | [`--stop-on-entry` stops with reason `exception`, not `entry`](#6---stop-on-entry-reports-reason-exception-not-entry-on-macos) | M5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 7 | [`evaluate` with context `repl` runs an LLDB *command*, not an expression](#7-evaluate-with-context-repl-runs-an-lldb-command-not-an-expression) | M6 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -321,6 +322,68 @@ Raw event capture: set `LAZYDAP_LOG=dap.recv.event=debug` and read the daemon lo
 
 - Milestone: [`docs/implementation/tasks/M05-ipc-protocol-daemon.md`](../implementation/tasks/M05-ipc-protocol-daemon.md) — follow-ups
 - [`docs/blueprint/10-async-to-sync.md`](../blueprint/10-async-to-sync.md) — where the `--wait` reason semantics get decided
+
+---
+
+## 7. `evaluate` with context `repl` runs an LLDB command, not an expression
+
+### Symptom
+
+`lazydap eval "x"` on a paused C program, where `x` is an `int` holding `5`, fails:
+
+```
+error: memory read takes a start address expression with an optional end address expression.
+warning: Expressions should be quoted if they contain spaces or other special characters.
+```
+
+And `lazydap eval "x + 2"` fails differently:
+
+```
+error: invalid start address expression.
+error: address expression "+" evaluation failed
+```
+
+Both are LLDB *command* errors. `x` is LLDB's built-in alias for `memory read`, so asking
+for a variable called `x` reads memory instead — and reads it badly, because `x` on its own
+is not a valid address.
+
+### Root cause
+
+DAP's `evaluate` request takes a `context` field: `repl`, `watch`, `hover`, or absent.
+codelldb reads `repl` literally — "this is a line the user typed at the debug console" — and
+sends it to LLDB's command interpreter rather than its expression evaluator. The console
+announces this at launch, in an `output` event nobody reads:
+
+```
+Console is in 'commands' mode, prefix expressions with '?'.
+```
+
+`watch` and `hover` both evaluate the string as an expression in the debuggee's language,
+which is what "evaluate this expression" normally means.
+
+Captured live on 2026-07-30 against the `examples/c-hello` debuggee, paused at `main.c:19`:
+
+| `--context` | `eval "x"` | `eval "x + 2"` |
+|---|---|---|
+| `repl` | error (memory read) | error (address expression) |
+| `watch` | `5` (`int`) | `7` (`long long`) |
+| `hover` | `5` (`int`) | `7` (`long long`) |
+
+### Fix
+
+`lazydap eval` defaults to `--context watch`, and `EvalContext::default()` in
+`lazydap-core` matches it. `--context repl` is still there for callers who genuinely want
+to run an adapter command — with codelldb that is a real feature, not a mistake — but it is
+no longer what you get by accident. See D034.
+
+The alternative, prefixing `repl` expressions with `?` as the console suggests, was
+rejected: it is codelldb-specific syntax leaking into what a caller types, and it would
+make `lazydap eval` mean something different per adapter.
+
+### Cross-references
+
+- [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md) — D034
+- Milestone: [`docs/implementation/tasks/M06-cli-subcommands.md`](../implementation/tasks/M06-cli-subcommands.md)
 
 ---
 

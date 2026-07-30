@@ -35,7 +35,10 @@ impl TestDaemon {
 
         let socket = dir.join("lazydap.sock");
         let listener = UnixListener::bind(&socket).expect("bind the test socket");
-        let state = DaemonState::new("lazydap-test".to_string());
+        // The test directory doubles as the project root, so nothing here
+        // writes a `.lazydap/` into the repository the tests run from.
+        let store = lazydap_store::ProjectStore::load(&dir).expect("load the store");
+        let state = DaemonState::new("lazydap-test".to_string(), store);
 
         let accept_state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -189,7 +192,7 @@ async fn shutdown_crosses_protocol_versions_so_an_upgrade_can_land() {
 
     let reply = connection.recv().await.expect("recv").expect("a reply");
     match reply.payload {
-        IpcPayload::Response(response) => assert_eq!(response, Response::ShuttingDown),
+        IpcPayload::Response(Response::ShuttingDown { .. }) => {}
         other => unreachable!("expected an acknowledgement, got: {other:?}"),
     }
     assert!(daemon.state.shutdown_requested());
@@ -227,7 +230,7 @@ async fn shutdown_is_acknowledged_and_tells_the_daemon_to_stop() {
     assert!(!daemon.state.shutdown_requested());
     let response = client.request(Request::Shutdown).await.expect("shutdown");
 
-    assert_eq!(response, Response::ShuttingDown);
+    assert!(matches!(response, Response::ShuttingDown { .. }));
     assert!(daemon.state.shutdown_requested());
 }
 

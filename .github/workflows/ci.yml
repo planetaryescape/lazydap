@@ -61,3 +61,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
+
+  skill:
+    name: Skill is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `commands.md` is generated from the CLI, and the ZIP is built from the
+      # sources. Both are committed, so both can go stale the moment somebody
+      # adds a flag. Rebuilding and diffing is what stops an agent reading a
+      # reference for a command line that no longer exists.
+      #
+      # The build is reproducible by construction (see scripts/build-skill.sh),
+      # so a clean tree here means the artefact really does match its sources —
+      # not merely that it was rebuilt.
+      - run: bash scripts/build-skill.sh
+      - name: Check the committed skill matches its sources
+        run: |
+          if ! git diff --exit-code -- skill/ lazydap.skill; then
+            echo "::error::The skill is out of date. Run scripts/build-skill.sh and commit the result."
+            exit 1
+          fi
+      - name: Check the ZIP contains what the sources say
+        run: |
+          unzip -q -o lazydap.skill -d /tmp/skill-check
+          diff -r skill/ /tmp/skill-check

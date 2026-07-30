@@ -181,3 +181,85 @@ Add a `tests/integration_cli.rs` running the above against `adapter-fake` to kee
 - **Don't pipeline DAP requests** to one adapter. Per D021. One execution request in flight.
 - **`--dry-run` for breakpoint mutations** — must use the same selection logic as the actual mutation.
 - **codelldb's `setBreakpoints` replaces all breakpoints in a source file.** When you add one, you have to send the full list for that file. Don't forget breakpoints already in the file.
+
+---
+
+## Completed 2026-07-30
+
+The full subcommand surface, `--wait`, and per-project breakpoints. Four gates green plus the boundary script; 250 tests, 13 of them driving real codelldb.
+
+### What shipped
+
+- **`crates/store`** (new) — `.lazydap/state.toml` per D006: debounced 500ms, written atomically (write-then-rename), paths stored relative to the project root so the file survives a clone. State a newer lazydap wrote is carried through a rewrite rather than dropped, and a breakpoint added by hand-editing the file is adopted rather than reverted.
+- **`crates/daemon/src/wait.rs`** — the centrepiece. Every case from [`10-async-to-sync.md`](../../blueprint/10-async-to-sync.md) §"Tests required for `--wait`".
+- **Stepping**: `continue`, `step` (alias `next`), `step-in` (alias `step-into`), `step-out`, `pause` — all with `--wait`/`--timeout`.
+- **Inspection**: `stack`, `scopes`, `variables`, `eval`, `threads`, `output`.
+- **Breakpoints**: `break <file:line>`, `--list`, `--remove`, `--toggle`, with `--condition`, `--hit-condition`, `--log`, `--disabled`, `--dry-run`.
+- **Diagnostics**: `doctor`, `version`, `logs`, `completions`.
+- **Formats**: `table`, `json`, `jsonl`, `csv`, `ids`.
+
+### Decisions taken (recorded in [`15-decision-log.md`](../../blueprint/15-decision-log.md))
+
+- **D031** — `BreakpointId` is a small integer, not a UUID. It is typed, piped and read out of a TOML file; a UUID is worse at all three.
+- **D032** — protocol version 2. A v1 daemon cannot decode M6's requests, so the bump turns "BadRequest for a command that plainly exists" into a `VersionMismatch` the client already knows how to resolve. `ErrorCode` gains `SessionNotPaused`.
+- **D033** — codelldb's `SIGSTOP` entry stop is reported as `reason: "entry"`, with the adapter's own word kept in `raw_reason` (quirk 6, option 3).
+- **D034** — `eval` defaults to the `watch` context. `repl` goes to LLDB's *command* interpreter, where `x` means `memory read` (quirk 7, found live).
+- **D036** — what `--dry-run` means per command, including why `launch` has none.
+
+### The three bugs live verification found
+
+Each has a unit test now; none would have been caught by the adapter-free tests alone.
+
+1. **A second `--wait` re-reported the first one's output.** `take_undelivered` marked the *buffer drain* as delivered, but a wait goes on consuming events live for as long as it runs, and those stayed undelivered. The second `continue --wait` of a session carried the first one's `hello`, which reads exactly like the program printing twice. Fixed with `Session::mark_delivered`, called with the watermark the wait actually reached.
+2. **`eval` was unusable** — see D034.
+3. **`--timeout 0` panicked the client.** "Wait forever" was expressed as `Duration::from_secs(u64::MAX / 2)`; `Instant + Duration` panics on overflow, so the one spelling promising to block longest aborted immediately. The timeout is an `Option` end to end now. Found by the post-implementation simplify pass, not by the tests — which is its own lesson about sentinel values.
+
+### Deviations from the plan above
+
+- **Handlers and commands are directories, not single files.** `handlers/{session,inspect,breakpoints}.rs` and `commands/{session,inspect,breakpoints,diagnostics}.rs`. The task file's sketch of one file per subcommand would have made twenty files of thirty lines.
+- **`BreakpointSelector` and `NewBreakpoint` live in `lazydap-core`, not the store.** The protocol needs to name them and cannot depend on the store; they are domain vocabulary with no I/O, so core is where they belong.
+- **`--wait` holds the D021 execution permit for the DAP request and its acknowledgement only**, not for the whole wait. Holding it longer would queue `pause` — the one command that interrupts a runaway program — behind the runaway program.
+- **A finished session no longer holds the launch slot.** M5's follow-up asked whether to auto-reap one; it is reaped at the next `launch`. The slot exists to stop two adapters running at once, and a session with no adapter is not what it is protecting against.
+- **`--yes` is not implemented.** See D036.
+- **`clap_complete` was added** for `lazydap completions`, which the task file lists. First-party to clap and generated from the same command tree. Flagged for review as a dependency-budget addition.
+- **`break --list --format table` shows the effective line** — where the adapter actually put the breakpoint, when it moved it — rather than the line requested. The requested line is still what is persisted.
+
+### Follow-ups discovered
+
+- **codelldb sends two `breakpoint` events per `setBreakpoints`**, about 20ms apart, with identical content. `--wait` coalesces `breakpoint_updates` by identity so a caller does not read one change as two. Worth a quirk entry if it turns out to vary by version.
+- **`lazydap logs --level` matches on the line's text**, because the daemon log is `tracing`'s human format. A structured log file would make it exact; that is an M15 concern.
+- **`output` reads the buffer without consuming it, while `--wait` consumes.** Documented in the skill, but the two commands having different consumption semantics is the sort of thing that will need re-explaining. Revisit if `Subscribe` (M11) makes a cleaner model available.
+- **Inspection requires `paused`, and `threads` deliberately does not** — which threads exist is a fair question about a running program.
+- **The multi-threaded `additional_stopped_threads` assertion is weaker than the blueprint's.** How many threads an adapter reports as separately stopped is a race by construction — that is what the coalescing window is *for* — so the integration test asserts the invariant (the named thread is not also in the extras, and the program really is multi-threaded) and the coalescing itself is unit-tested deterministically.
+
+### Review fixes (2026-07-30, post-implementation external review)
+
+Eleven defects, adjudicated from an orchestrator + external review. Four were correctness bugs that a user would have hit.
+
+- **The execution permit was scoped to the message, not the run.** Three findings shared this root cause. A second concurrent `continue --wait` subscribed *before* queueing on the permit, so it observed the first wait's stop, resumed past it, and returned that stop as its own — reporting `paused` while the debuggee ran on. The permit is now taken by the caller (`AdapterHandle::execution_permit`, a typed guard the execution methods require), held across the whole wait, and the subscription happens inside it. `pause` and `disconnect` deliberately bypass it: both exist to end a run already under way, and queueing the thing that breaks the queue is how a runaway program becomes unstoppable.
+- **An acknowledgement timeout released the permit with the request still outstanding at the adapter.** A retry would then pipeline a second execution request — precisely what D021 and non-negotiable #6 forbid, and what deadlocks adapters that serialise internally. An adapter that cannot acknowledge a `continue` within the deadline is wedged, so it is killed and the session becomes `adapter_died` (D022).
+- **The failed-request path restored its state snapshot unconditionally.** An adapter can execute a `continue`, emit `terminated` and die before acknowledging; the pump records the ending, and the restore stamped `paused` back over it. A dead session then looked live and refused every later launch. Now a compare-and-set that only undoes its own write.
+- **The v2 protocol bump broke the upgrade escape hatch a second time.** Giving `Request::Shutdown` a `dry_run` field turned `"Shutdown"` into `{"Shutdown":{...}}`, which a v1 daemon fails to *deserialise* before it ever reaches the version exemption that exists to let that message through. It would have bitten on merge, since `main`'s daemons are v1. `Shutdown` is frozen as a unit variant with a comment asking not to be tidied, `auto_spawn` builds the frame as literal JSON rather than through `IpcMessage`, and a golden test pins the v1 bytes. `shutdown --dry-run` is answered from a `Status` call — a preview mutates nothing, so it never needed the daemon.
+
+The rest:
+
+- A wait marked its backlog delivered at `begin`, before the request had succeeded, so a rejected `continue` silently swallowed events nobody had seen. Delivery is committed only when a blob is actually returned.
+- `flush_now` cleared the dirty flag before writing, so a transient failure left the store "clean" — no retry, a no-op flush on shutdown, breakpoint lost.
+- Unknown top-level sections were parsed and then dropped, so editing one breakpoint deleted a newer build's watches and launch configs.
+- The write-then-rename temporary had a fixed name; it is per-process now.
+- Breakpoint events carried `id: None` even when the adapter id resolved, so `breakpoint_updates` could not be correlated with `break --list`.
+- Malformed `--session-id` exited 1; invalid CLI syntax is a usage error (2).
+- The codelldb suite ran adapters concurrently and timed out under load. See below.
+
+### The test flake, and what it turned out to be
+
+The 13 real-codelldb tests failed 12-of-13 for the reviewer under load while passing in isolation. Serialising them under a file-scope mutex was the obvious half of the fix and was not enough on its own.
+
+The rest was that each test compiled its fixture to a *fresh temporary path*. macOS evaluates a binary the first time a given inode is executed, and attaching a debugger to a brand-new one pays that in full: about thirteen seconds, against a fifteen-second handshake deadline. Measured directly — six hand-run launches against the same long-lived binary averaged 420ms, while the identical launch inside a test took 13s. Fixtures now build once to a stable path under `target/` and are skipped when fresh. The suite went from 271s and failing to 12s green, twice consecutively.
+
+This is the benign end of the mechanism [quirk 5](../../reference/codelldb-quirks.md#5-hangs-at-_dyld_start-after-a-macos-update-stale-gatekeeper-inode-cache) documents the pathological end of. Worth knowing before blaming the adapter.
+
+### Further follow-ups
+
+- **The store has no interprocess lock.** One daemon per project root makes it a non-issue by construction, but `LAZYDAP_INSTANCE` can put two daemons on one project, and then a concurrent write is a lost update. Mitigated (per-process temporary files, so never a corrupt file) and documented in `crates/store/src/lib.rs`; a real lock that is correct across platforms and network filesystems is its own piece of work and is deliberately not in M6.
+- **The 15-second handshake deadline is tight for a cold binary on a loaded machine.** Not changed — it is the right deadline for a healthy setup, and raising it to accommodate a pathological one would hide the failure rather than fix it. Worth revisiting if users report it.
