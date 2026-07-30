@@ -176,7 +176,7 @@ State files:
 
 ## D016 — License: MIT OR Apache-2.0
 
-**Status:** proposed (user to confirm).
+**Status:** decided (2026-07-30 — LICENSE-MIT and LICENSE-APACHE shipped at workspace setup; confirmed settled).
 
 **Why:** Rust ecosystem convention. Same as mxr. Maximises downstream usability.
 
@@ -186,7 +186,7 @@ State files:
 
 ## D017 — Repository: `github.com/planetaryescape/lazydap`
 
-**Status:** proposed (user to confirm).
+**Status:** decided (2026-07-30 — repo is live and public at this address; confirmed settled).
 
 **Why:** Same org as mxr. Discoverable next to it.
 
