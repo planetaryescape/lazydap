@@ -1,7 +1,7 @@
 use crate::client::DaemonClient;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use lazydap_protocol::{IpcConnection, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request};
+use lazydap_protocol::{IpcConnection, LAZYDAP_PROTOCOL_VERSION};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -187,19 +187,7 @@ async fn connect_until(socket: &Path, deadline: tokio::time::Instant) -> Result<
 pub(crate) async fn shut_down_other_daemon(socket: &Path, peer_version: u32) -> Result<()> {
     if let Ok(stream) = UnixStream::connect(socket).await {
         let mut connection = IpcConnection::new(stream);
-        // Stamped with the *daemon's* version, not ours. A daemon old enough
-        // to predate the rule that `Shutdown` is version-exempt will reject
-        // anything carrying a version it does not know — including the request
-        // that is supposed to replace it — and the first real upgrade would
-        // stall. A request wearing its own version number gets through either
-        // way.
-        let _ = connection
-            .send(IpcMessage {
-                version: peer_version,
-                id: 1,
-                payload: IpcPayload::Request(Request::Shutdown { dry_run: false }),
-            })
-            .await;
+        let _ = connection.send_raw(&shutdown_frame(peer_version)).await;
     }
 
     let deadline = tokio::time::Instant::now() + SHUTDOWN_DEADLINE;
@@ -214,6 +202,38 @@ pub(crate) async fn shut_down_other_daemon(socket: &Path, peer_version: u32) -> 
         "the running daemon speaks a different protocol version and did not stop when asked; \
          run `lazydap shutdown` or kill it, then try again"
     )))
+}
+
+/// The shutdown frame, built by hand and **frozen**.
+///
+/// This is the one message lazydap sends to a daemon it cannot talk to. Every
+/// other frame is a conversation between two builds of the same version; this
+/// one has to be understood by every version that has ever shipped, because
+/// its whole job is to stop a daemon whose protocol we do not speak.
+///
+/// So it is written as literal JSON rather than through [`IpcMessage`]. Going
+/// through the typed struct means the frame follows *this* build's schema, and
+/// that has broken the upgrade path twice:
+///
+/// - v1 → v2 gave `Request::Shutdown` a `dry_run` field, turning `"Shutdown"`
+///   into `{"Shutdown":{"dry_run":false}}`. A v1 daemon fails to deserialise
+///   that and hangs up — *before* reaching the version exemption that exists
+///   to let this very message through.
+/// - Earlier still, the frame carried our version rather than the daemon's,
+///   and was rejected for being from the future.
+///
+/// Both are the same mistake: letting the escape hatch track the schema.
+/// Do not "tidy" this into the typed API. The golden test below is what keeps
+/// it honest — if it fails, the fix is to restore the frame, not the test.
+///
+/// The version is the *daemon's*, not ours: a request wearing its own version
+/// number gets past a version check either way.
+fn shutdown_frame(peer_version: u32) -> serde_json::Value {
+    serde_json::json!({
+        "version": peer_version,
+        "id": 1,
+        "payload": { "Request": "Shutdown" },
+    })
 }
 
 /// Exclusive spawn permission, held for as long as the guard lives.
@@ -300,6 +320,55 @@ fn is_stale(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazydap_protocol::{IpcPayload, Request};
+
+    /// What a v1 daemon — the build on `main` today — expects on the wire.
+    ///
+    /// Written out literally rather than derived from any current type. That
+    /// is the point: if a schema change reshapes the escape hatch, this
+    /// disagrees, and the disagreement is the bug report.
+    const V1_SHUTDOWN_FRAME: &str = r#"{"id":1,"payload":{"Request":"Shutdown"},"version":1}"#;
+
+    #[test]
+    fn the_shutdown_escape_hatch_is_still_shaped_the_way_v1_daemons_read_it() {
+        let frame = shutdown_frame(1);
+        // Compared as `Value`, so key order is not part of the contract but
+        // every key and its spelling is.
+        let expected: serde_json::Value =
+            serde_json::from_str(V1_SHUTDOWN_FRAME).expect("the golden frame parses");
+
+        assert_eq!(
+            frame, expected,
+            "the shutdown frame must stay readable by every daemon ever shipped; \
+             restore the frame rather than updating this test",
+        );
+    }
+
+    #[test]
+    fn the_shutdown_frame_wears_the_daemon_s_version_not_ours() {
+        // A daemon that version-checks before exempting `Shutdown` rejects
+        // anything from a version it does not know — including this.
+        assert_eq!(shutdown_frame(7)["version"], 7);
+        assert_ne!(
+            shutdown_frame(7)["version"],
+            serde_json::json!(LAZYDAP_PROTOCOL_VERSION),
+            "sending our own version is how the upgrade path stalled before",
+        );
+    }
+
+    #[test]
+    fn this_build_still_reads_the_frozen_shutdown_frame() {
+        // The other half of the contract: a *current* daemon has to accept the
+        // shape too, or upgrading to the next version breaks in the opposite
+        // direction.
+        let message: lazydap_protocol::IpcMessage =
+            serde_json::from_str(V1_SHUTDOWN_FRAME).expect("this build reads the v1 shape");
+
+        assert!(matches!(
+            message.payload,
+            IpcPayload::Request(Request::Shutdown),
+        ));
+    }
 
     fn temp_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("lazydap-spawn-{label}-{}", std::process::id()))

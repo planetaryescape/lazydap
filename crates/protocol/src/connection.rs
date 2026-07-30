@@ -45,6 +45,23 @@ impl<S: AsyncWrite + Unpin> IpcConnection<S> {
         self.stream.write_all(&self.write_buf).await?;
         self.stream.flush().await
     }
+
+    /// Write one frame built by hand, bypassing [`IpcMessage`] entirely.
+    ///
+    /// For the one caller that must not be able to track this build's schema:
+    /// the shutdown escape hatch, which has to be understood by daemons from
+    /// versions that predate whatever `IpcMessage` looks like today. Going
+    /// through the typed struct would mean a field added years from now
+    /// silently reshapes a frame whose whole job is to stay the same shape.
+    ///
+    /// Framing is still the codec's, because framing has never changed.
+    pub async fn send_raw(&mut self, frame: &serde_json::Value) -> io::Result<()> {
+        let body = serde_json::to_vec(frame)?;
+        self.write_buf.clear();
+        self.codec.encode_raw(&body, &mut self.write_buf)?;
+        self.stream.write_all(&self.write_buf).await?;
+        self.stream.flush().await
+    }
 }
 
 impl<S: AsyncRead + Unpin> IpcConnection<S> {

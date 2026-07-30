@@ -185,14 +185,14 @@ async fn shutdown_crosses_protocol_versions_so_an_upgrade_can_land() {
         .send(IpcMessage {
             version: 9999,
             id: 1,
-            payload: IpcPayload::Request(Request::Shutdown { dry_run: false }),
+            payload: IpcPayload::Request(Request::Shutdown),
         })
         .await
         .expect("send");
 
     let reply = connection.recv().await.expect("recv").expect("a reply");
     match reply.payload {
-        IpcPayload::Response(Response::ShuttingDown { dry_run, .. }) => assert!(!dry_run),
+        IpcPayload::Response(Response::ShuttingDown { .. }) => {}
         other => unreachable!("expected an acknowledgement, got: {other:?}"),
     }
     assert!(daemon.state.shutdown_requested());
@@ -228,15 +228,9 @@ async fn shutdown_is_acknowledged_and_tells_the_daemon_to_stop() {
     let mut client = daemon.client().await;
 
     assert!(!daemon.state.shutdown_requested());
-    let response = client
-        .request(Request::Shutdown { dry_run: false })
-        .await
-        .expect("shutdown");
+    let response = client.request(Request::Shutdown).await.expect("shutdown");
 
-    assert!(matches!(
-        response,
-        Response::ShuttingDown { dry_run: false, .. }
-    ));
+    assert!(matches!(response, Response::ShuttingDown { .. }));
     assert!(daemon.state.shutdown_requested());
 }
 

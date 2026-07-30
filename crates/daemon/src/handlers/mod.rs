@@ -38,7 +38,7 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             check_adapters,
             check_state,
         } => Ok(Response::Doctor(doctor(state, check_adapters, check_state))),
-        Request::Shutdown { dry_run } => shutdown(state, dry_run),
+        Request::Shutdown => shutdown(state),
 
         // --- Session lifecycle ---
         Request::Launch(request) => session::launch(state, request).await,
@@ -147,21 +147,17 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
     }
 }
 
-fn shutdown(state: &Arc<DaemonState>, dry_run: bool) -> Result<Response> {
+/// Stop the daemon.
+///
+/// There is no dry-run here on purpose: `Request::Shutdown` is frozen as a
+/// unit variant (see its doc comment), and a preview changes nothing, so it
+/// does not need the daemon's cooperation. `lazydap shutdown --dry-run` is
+/// built from a `Status` call on the client.
+fn shutdown(state: &Arc<DaemonState>) -> Result<Response> {
     let sessions = state.summaries();
-    if dry_run {
-        return Ok(Response::ShuttingDown {
-            dry_run: true,
-            sessions,
-        });
-    }
-
     tracing::info!(target: "daemon.ipc", "shutdown requested by a client");
     state.request_shutdown();
-    Ok(Response::ShuttingDown {
-        dry_run: false,
-        sessions,
-    })
+    Ok(Response::ShuttingDown { sessions })
 }
 
 /// What is set up and what is not. Writes nothing anywhere (D025).
@@ -369,31 +365,28 @@ mod tests {
         let state = state();
         assert!(!state.shutdown_requested());
 
-        let response = dispatch(&state, Request::Shutdown { dry_run: false })
-            .await
-            .expect("ack");
+        let response = dispatch(&state, Request::Shutdown).await.expect("ack");
 
-        assert!(matches!(
-            response,
-            Response::ShuttingDown { dry_run: false, .. }
-        ));
+        assert!(matches!(response, Response::ShuttingDown { .. }));
         assert!(state.shutdown_requested(), "the accept loop must be told");
     }
 
     #[tokio::test]
-    async fn a_dry_run_shutdown_reports_what_it_would_do_and_does_nothing() {
+    async fn there_is_no_dry_run_shutdown_to_get_wrong() {
+        // `Request::Shutdown` is a frozen unit variant — it is the escape
+        // hatch for talking to a daemon whose version we do not speak, so it
+        // cannot carry flags. `lazydap shutdown --dry-run` is answered from a
+        // `Status` call on the client instead, and mutates nothing.
         let state = state();
-        let response = dispatch(&state, Request::Shutdown { dry_run: true })
-            .await
-            .expect("preview");
+        let report = match dispatch(&state, Request::Status).await.expect("status") {
+            Response::Status(report) => report,
+            other => unreachable!("expected a status report, got: {other:?}"),
+        };
 
-        assert!(matches!(
-            response,
-            Response::ShuttingDown { dry_run: true, .. }
-        ));
+        assert!(report.session.is_none());
         assert!(
             !state.shutdown_requested(),
-            "a preview that stopped the daemon would be a poor preview",
+            "asking what would happen must not make it happen",
         );
     }
 

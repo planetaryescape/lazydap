@@ -31,6 +31,17 @@ impl IpcCodec {
     }
 }
 
+impl IpcCodec {
+    /// Frame bytes that are already the JSON body.
+    ///
+    /// Used only by the shutdown escape hatch, which builds its frame by hand
+    /// so that it cannot follow this build's schema. Framing is still applied
+    /// here, because the framing is the part that has never changed.
+    pub fn encode_raw(&mut self, body: &[u8], dst: &mut BytesMut) -> std::io::Result<()> {
+        self.inner.encode(bytes::Bytes::copy_from_slice(body), dst)
+    }
+}
+
 impl Default for IpcCodec {
     fn default() -> Self {
         Self::new()

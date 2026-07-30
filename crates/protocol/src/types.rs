@@ -83,10 +83,23 @@ pub enum Request {
     Ping,
     Status,
     /// Ask the daemon to end every session and exit.
-    Shutdown {
-        /// Report what would be stopped without stopping it.
-        dry_run: bool,
-    },
+    ///
+    /// **This variant is frozen. Do not give it fields.**
+    ///
+    /// `Shutdown` is the escape hatch a new client uses to stop a daemon from
+    /// an older build before starting its own, so it is a wire-compatibility
+    /// contract with every version lazydap has ever shipped — not with the
+    /// current schema. It is version-exempt on the server precisely so it
+    /// works across a mismatch, and that exemption is useless if the frame
+    /// cannot be *deserialised* in the first place: adding a field turns
+    /// `"Shutdown"` into `{"Shutdown":{...}}`, which an older daemon rejects
+    /// before it ever reaches the exemption. That has now broken twice.
+    ///
+    /// Anything that looks like it wants a field here belongs on the client.
+    /// `lazydap shutdown --dry-run` is built from a `Status` call for exactly
+    /// this reason: a preview changes nothing, so it never needs to be a
+    /// `Shutdown` at all.
+    Shutdown,
     Version,
     Doctor {
         check_adapters: bool,
@@ -255,8 +268,7 @@ pub enum Response {
         terminated_debuggee: bool,
     },
     ShuttingDown {
-        dry_run: bool,
-        /// The sessions this shutdown ends, or would.
+        /// The sessions this shutdown is ending.
         sessions: Vec<SessionSummary>,
     },
 

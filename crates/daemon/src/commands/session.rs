@@ -180,6 +180,12 @@ pub async fn disconnect(
     .print(format)
 }
 
+/// Stop the daemon.
+///
+/// `--dry-run` is answered entirely from a `Status` call. The protocol's
+/// `Shutdown` is a frozen unit variant — it is the escape hatch for talking to
+/// a daemon whose version we do not speak, so it cannot carry flags — and a
+/// preview mutates nothing, so it never needed to be one.
 pub async fn shutdown(instance: &Instance, dry_run: bool, format: OutputFormat) -> Result<()> {
     // Deliberately not `ensure_daemon_running`: starting a daemon in order to
     // ask it to stop would be absurd.
@@ -228,27 +234,40 @@ pub async fn shutdown(instance: &Instance, dry_run: bool, format: OutputFormat) 
         }
     };
 
-    let response = client.request(Request::Shutdown { dry_run }).await?;
-    let Response::ShuttingDown { dry_run, sessions } = response else {
+    if dry_run {
+        // The same question the real path answers, asked without acting on it.
+        let report = fetch_status(&mut client).await?;
+        let sessions: Vec<_> = report.session.into_iter().collect();
+        return View::single(
+            serde_json::json!({
+                "instance": instance.name,
+                "shutting_down": false,
+                "dry_run": true,
+                "sessions": sessions,
+            }),
+            format!(
+                "would stop daemon {} (pid {}) and {} session(s)",
+                instance.name,
+                report.daemon_pid,
+                sessions.len(),
+            ),
+        )
+        .print(format);
+    }
+
+    let response = client.request(Request::Shutdown).await?;
+    let Response::ShuttingDown { sessions } = response else {
         return Err(unexpected(response));
     };
 
     View::single(
         serde_json::json!({
             "instance": instance.name,
-            "shutting_down": !dry_run,
-            "dry_run": dry_run,
+            "shutting_down": true,
+            "dry_run": false,
             "sessions": sessions,
         }),
-        if dry_run {
-            format!(
-                "would stop daemon {} and {} session(s)",
-                instance.name,
-                sessions.len(),
-            )
-        } else {
-            format!("daemon {} shutting down", instance.name)
-        },
+        format!("daemon {} shutting down", instance.name),
     )
     .print(format)
 }
