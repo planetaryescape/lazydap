@@ -5,6 +5,7 @@
 //! reducer is a pure function between them, which is what makes "add a key"
 //! mean "add a match arm" and nothing else.
 
+use lazydap_protocol::{Event, IpcError, Request, Response};
 use ratatui::crossterm::event::KeyEvent;
 use std::path::PathBuf;
 
@@ -26,6 +27,29 @@ pub enum Msg {
         path: PathBuf,
         contents: std::result::Result<String, String>,
     },
+
+    /// The daemon says something changed. Unsolicited, and the reason the TUI
+    /// never polls.
+    DaemonEvent(Event),
+    /// An answer to something the TUI asked.
+    ///
+    /// Boxed because `Response` is by far the biggest thing that can happen —
+    /// a stack trace or a page of variables — and every `Msg` on the channel
+    /// would otherwise be sized for it, `Tick` included.
+    DaemonResponse {
+        id: u64,
+        response: Box<Response>,
+    },
+    /// A request the daemon refused. Shown, not swallowed: "step" doing
+    /// nothing with no explanation is the worst kind of debugger bug.
+    DaemonFailed {
+        id: u64,
+        error: IpcError,
+    },
+    /// The connection ended. Terminal for this run of the TUI — reconnection
+    /// is a v0.1 job, and until then saying so beats a screen that has quietly
+    /// stopped being true.
+    DaemonGone,
 }
 
 /// Something the reducer wants done. Executed by the loop, never by the
@@ -36,4 +60,7 @@ pub enum Cmd {
     None,
     Quit,
     LoadSource(PathBuf),
+    /// Ask the daemon something. The answer arrives as a [`Msg`], never as a
+    /// return value: the reducer does no I/O.
+    SendIpc(Request),
 }

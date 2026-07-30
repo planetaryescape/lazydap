@@ -191,10 +191,19 @@ pub enum Request {
         dry_run: bool,
     },
 
-    // --- Not implemented yet ---
-    /// Event streaming for long-lived clients. The variant exists so the
-    /// wire format is settled; the daemon answers [`ErrorCode::Unsupported`]
-    /// until the TUI needs it at M11.
+    /// Push every event of these kinds down this connection as it happens.
+    ///
+    /// Answered with [`Response::Status`], not a variant of its own, and that
+    /// is deliberate (D038): the snapshot is taken at the moment the
+    /// subscription starts, so there is no gap between "what is the state?"
+    /// and "tell me when it changes" for an event to fall into. Nothing
+    /// buffered is replayed — the snapshot already accounts for it, and
+    /// [`Request::Output`] reads the debuggee's earlier output without
+    /// draining it.
+    ///
+    /// Sending it again replaces the set of kinds rather than adding to it.
+    /// Events arrive as ordinary event frames (id `0`), interleaved with the
+    /// replies to whatever else the client asks for.
     Subscribe {
         channels: Vec<EventKind>,
     },

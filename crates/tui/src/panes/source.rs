@@ -5,10 +5,16 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::path::{Path, PathBuf};
+
+/// What the gutter shows before the line number when the program is stopped
+/// here, and the two columns of space that keep the text from shifting
+/// sideways when it is not.
+const MARKER: &str = "▶ ";
+const NO_MARKER: &str = "  ";
 
 /// One open file.
 ///
@@ -16,15 +22,21 @@ use std::path::{Path, PathBuf};
 /// system that names a line — DAP, the breakpoint file, `file:line` on the
 /// command line — is 1-indexed, and a view that counted from zero would be the
 /// one place a translation could go wrong.
+/// Reading is direct; writing goes through the methods below. A read cannot
+/// break an invariant, and the invariants here are worth protecting: the
+/// cursor is always on a line that exists, and the scroll offset always keeps
+/// it on screen.
 pub struct SourceView {
     path: PathBuf,
     lines: Vec<String>,
-    cursor_line: u32,
+    pub(crate) cursor_line: u32,
     /// First visible line, 1-indexed.
     top_line: u32,
     /// Inner height of the last draw. Zero until the pane has been drawn once,
     /// which is why every use of it copes with zero.
     viewport_height: u32,
+    /// Where the program is stopped, when it is stopped in this file.
+    pub(crate) marker_line: Option<u32>,
 }
 
 impl SourceView {
@@ -42,6 +54,7 @@ impl SourceView {
             cursor_line: 1,
             top_line: 1,
             viewport_height: 0,
+            marker_line: None,
         }
     }
 
@@ -55,8 +68,18 @@ impl SourceView {
         (self.lines.len() as u32).max(1)
     }
 
-    pub fn cursor_line(&self) -> u32 {
-        self.cursor_line
+    /// Put the marker on a line and take the cursor there.
+    ///
+    /// Moving the cursor too is deliberate: the marker means "the program is
+    /// here", and a debugger that showed you that without scrolling to it
+    /// would make you go looking.
+    pub fn set_marker(&mut self, line: u32) {
+        self.marker_line = Some(line.clamp(1, self.line_count()));
+        self.go_to_line(line);
+    }
+
+    pub fn clear_marker(&mut self) {
+        self.marker_line = None;
     }
 
     /// Move the cursor by `delta` lines, stopping at either end.
@@ -137,9 +160,25 @@ impl SourceView {
     }
 
     fn line(&self, number: u32, content: &str, gutter_width: usize) -> Line<'static> {
+        let is_marker = self.marker_line == Some(number);
+
+        let marker = if is_marker {
+            Span::styled(
+                MARKER,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(NO_MARKER)
+        };
         let gutter = Span::styled(
             format!("{number:>gutter_width$} "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(if is_marker {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }),
         );
         let text = Span::styled(
             content.to_string(),
@@ -150,7 +189,7 @@ impl SourceView {
             },
         );
 
-        Line::from(vec![gutter, text])
+        Line::from(vec![marker, gutter, text])
     }
 }
 
@@ -179,10 +218,10 @@ mod tests {
         let mut view = numbered(3);
 
         view.move_cursor(-5);
-        assert_eq!(view.cursor_line(), 1, "there is nothing above line 1");
+        assert_eq!(view.cursor_line, 1, "there is nothing above line 1");
 
         view.move_cursor(99);
-        assert_eq!(view.cursor_line(), 3, "nor below the last line");
+        assert_eq!(view.cursor_line, 3, "nor below the last line");
     }
 
     #[test]
@@ -190,7 +229,7 @@ mod tests {
         let mut view = SourceView::from_contents("/tmp/empty.txt", "");
         view.go_to_bottom();
         assert_eq!(view.line_count(), 1);
-        assert_eq!(view.cursor_line(), 1);
+        assert_eq!(view.cursor_line, 1);
     }
 
     #[test]
@@ -220,7 +259,7 @@ mod tests {
         view.go_to_bottom();
         let screen = draw(&mut view, 20, 6);
 
-        assert_eq!(view.cursor_line(), 50);
+        assert_eq!(view.cursor_line, 50);
         assert!(screen[4].contains("50 line 50"), "got: {screen:?}");
     }
 
@@ -231,7 +270,7 @@ mod tests {
         assert_eq!(view.half_page(), 5);
 
         view.move_cursor(view.half_page());
-        assert_eq!(view.cursor_line(), 6);
+        assert_eq!(view.cursor_line, 6);
     }
 
     #[test]
@@ -251,7 +290,55 @@ mod tests {
             screen[0].contains("source · /tmp/numbers.txt"),
             "got: {screen:?}",
         );
-        assert_eq!(screen[1], "│1 line 1                        │");
-        assert_eq!(screen[3], "│3 line 3                        │");
+        assert_eq!(screen[1], "│  1 line 1                      │");
+        assert_eq!(screen[3], "│  3 line 3                      │");
+    }
+
+    #[test]
+    fn the_marker_sits_in_the_gutter_and_the_view_follows_it() {
+        let mut view = numbered(50);
+        draw(&mut view, 24, 6);
+
+        view.set_marker(40);
+        let screen = draw(&mut view, 24, 6);
+
+        assert_eq!(view.marker_line, Some(40));
+        assert_eq!(view.cursor_line, 40, "the marker takes the cursor with it");
+        assert!(
+            screen.iter().any(|row| row.contains("▶ 40 line 40")),
+            "got: {screen:?}",
+        );
+    }
+
+    #[test]
+    fn the_gutter_is_the_same_width_with_and_without_a_marker() {
+        // Or every line shifts sideways as the program steps, which reads as
+        // the whole file moving rather than the marker.
+        let mut view = numbered(9);
+        let without = draw(&mut view, 24, 5);
+        view.set_marker(2);
+        let with = draw(&mut view, 24, 5);
+
+        assert_eq!(without[1], "│  1 line 1            │");
+        assert_eq!(with[2], "│▶ 2 line 2            │");
+    }
+
+    #[test]
+    fn a_marker_past_the_end_of_the_file_lands_on_the_last_line() {
+        // An adapter reporting a line the file does not have is a real thing
+        // — a stale build — and it must not put the marker nowhere.
+        let mut view = numbered(3);
+        view.set_marker(99);
+        assert_eq!(view.marker_line, Some(3));
+    }
+
+    #[test]
+    fn clearing_the_marker_leaves_the_cursor_where_it_was() {
+        let mut view = numbered(50);
+        view.set_marker(20);
+        view.clear_marker();
+
+        assert_eq!(view.marker_line, None);
+        assert_eq!(view.cursor_line, 20, "resuming should not scroll you away");
     }
 }

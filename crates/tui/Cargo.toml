@@ -14,8 +14,13 @@ workspace = true
 [dependencies]
 ratatui = { workspace = true }
 # `rt` for the tasks the loop spawns, `macros` for `select!`, `time` for the
-# tick, `fs` for reading a source file off the loop's thread. Not "full": the
-# TUI has no process to spawn and no socket to listen on.
-tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
+# tick, `fs` for reading a source file off the loop's thread, `net` for the
+# daemon socket. Not "full": the TUI has no process to spawn and nothing to
+# listen on — it connects, it never accepts.
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "sync", "time"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# The client half of the contract, and the domain types it speaks. Not the
+# daemon, not the store, not DAP — see scripts/check_architecture_boundaries.sh.
+lazydap-core = { path = "../core" }
+lazydap-protocol = { path = "../protocol" }

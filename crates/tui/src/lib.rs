@@ -23,6 +23,7 @@
 //! small.
 
 mod error;
+mod ipc_client;
 mod msg;
 mod panes;
 mod state;
@@ -33,10 +34,11 @@ mod view;
 
 pub use error::{Result, TuiError};
 
+use lazydap_protocol::{EventKind, Request};
 use msg::{Cmd, Msg};
 use ratatui::crossterm::event::{self, Event};
 use state::AppState;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -53,26 +55,46 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 /// to cover whatever ages on its own.
 const TICK: Duration = Duration::from_millis(100);
 
-/// The file the TUI opens with.
+/// What the TUI watches.
 ///
-/// Hardcoded, and only until M11: from there the file to show is whichever one
-/// the daemon says the program is stopped in.
-const FIXTURE: &str = "examples/c-hello/main.c";
+/// Deliberately not everything. `Output` is the chatty one and there is no
+/// pane to put it in until M17; `BreakpointUpdated` and `ThreadChanged` land
+/// with the panes that show them. A client that subscribed to everything would
+/// make the daemon do work nobody reads.
+const CHANNELS: [EventKind; 4] = [
+    EventKind::SessionStarted,
+    EventKind::SessionEnded,
+    EventKind::Stopped,
+    EventKind::Continued,
+];
 
 /// Run the TUI until the user quits.
 ///
-/// Takes the terminal over — raw mode, alternate screen — and gives it back
-/// whatever happens, including a panic: `ratatui::try_init` installs a hook
-/// that restores it before unwinding. A debugger that leaves your shell in raw
-/// mode when it crashes is worse than no debugger.
-pub async fn run() -> Result<()> {
-    tracing::debug!(target: "tui.lifecycle", "entering the TUI");
+/// Connects to the daemon at `socket`, which must already be running — see
+/// [`ipc_client::connect`] for why starting one is the caller's job. Connecting
+/// happens *before* the terminal is taken over, so a daemon that cannot be
+/// reached is an ordinary error message on an ordinary terminal rather than a
+/// banner inside a UI the user then has to quit.
+///
+/// Once running, the terminal is given back whatever happens, including a
+/// panic: `ratatui::try_init` installs a hook that restores it before
+/// unwinding. A debugger that leaves your shell in raw mode when it crashes is
+/// worse than no debugger.
+pub async fn run(socket: &Path) -> Result<()> {
+    tracing::debug!(target: "tui.lifecycle", socket = %socket.display(), "entering the TUI");
     let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let ipc = ipc_client::connect(socket, tx.clone()).await?;
+    // Subscribing is also how the TUI learns what is already going on: the
+    // reply is a snapshot taken at the moment the stream starts (D038).
+    ipc.send(Request::Subscribe {
+        channels: CHANNELS.to_vec(),
+    });
+
     spawn_input_pump(tx.clone());
 
     let mut terminal = ratatui::try_init()?;
     let mut state = AppState::default();
-    dispatch(Cmd::LoadSource(PathBuf::from(FIXTURE)), &tx);
 
     let mut tick = tokio::time::interval(TICK);
     let result = loop {
@@ -98,7 +120,7 @@ pub async fn run() -> Result<()> {
         if matches!(cmd, Cmd::Quit) {
             break Ok(());
         }
-        dispatch(cmd, &tx);
+        dispatch(cmd, &tx, &ipc);
     };
 
     // Unconditional: a loop that failed still borrowed the terminal.
@@ -111,11 +133,12 @@ pub async fn run() -> Result<()> {
 ///
 /// Everything here is fire-and-forget: a command's *result* comes back as a
 /// [`Msg`], which is what keeps the reducer the only place state changes.
-fn dispatch(cmd: Cmd, tx: &UnboundedSender<Msg>) {
+fn dispatch(cmd: Cmd, tx: &UnboundedSender<Msg>, ipc: &ipc_client::IpcClient) {
     match cmd {
         Cmd::None => {}
         // Handled by the loop, which is the only thing that can stop it.
         Cmd::Quit => {}
+        Cmd::SendIpc(request) => ipc.send(request),
         Cmd::LoadSource(path) => {
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -131,14 +154,22 @@ fn dispatch(cmd: Cmd, tx: &UnboundedSender<Msg>) {
 /// Turn keystrokes into messages.
 ///
 /// `spawn_blocking` because `event::poll` blocks a whole thread, and blocking
-/// a runtime worker would stall every other task (`tokio-patterns.md`). The
-/// thread ends when the channel closes, which happens when the loop returns —
-/// within one [`INPUT_POLL`], and the process is on its way out by then
-/// anyway. There is no way to interrupt a blocking read, so this is the
-/// cleanest end available.
+/// a runtime worker would stall every other task (`tokio-patterns.md`).
+///
+/// The closed-channel check at the top of the loop is load-bearing, and was
+/// missing at first: a blocking task cannot be aborted, and dropping the
+/// runtime *waits* for it. Noticing the TUI had quit only when the next
+/// keystroke failed to send meant `q` left the process sitting there until
+/// somebody pressed another key. Polling for it costs one check per
+/// [`INPUT_POLL`] and bounds the exit at that.
 fn spawn_input_pump(tx: UnboundedSender<Msg>) {
     tokio::task::spawn_blocking(move || {
         loop {
+            if tx.is_closed() {
+                tracing::debug!(target: "tui.input", "the TUI has quit; stopping the input pump");
+                return;
+            }
+
             match event::poll(INPUT_POLL) {
                 Ok(false) => continue,
                 Ok(true) => {}

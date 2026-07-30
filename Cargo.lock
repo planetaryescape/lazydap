@@ -793,6 +793,8 @@ dependencies = [
 name = "lazydap-tui"
 version = "0.1.0"
 dependencies = [
+ "lazydap-core",
+ "lazydap-protocol",
  "ratatui",
  "thiserror 1.0.69",
  "tokio",

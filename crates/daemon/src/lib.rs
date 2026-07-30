@@ -54,7 +54,8 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
         // terminal. Anywhere else — a pipe, a CI job, `$(lazydap)` — saying
         // what exists beats taking over a terminal nobody is watching.
         if is_interactive() {
-            return commands::tui::run().await;
+            let instance = Instance::resolve(cli.instance.as_deref())?;
+            return commands::tui::run(&instance).await;
         }
         let _ = <Cli as clap::CommandFactory>::command().print_help();
         return Ok(());
@@ -75,7 +76,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
     match command {
         Command::Version | Command::Completions { .. } => unreachable!("handled above"),
         Command::Daemon { .. } => server::run_daemon(instance).await,
-        Command::Tui => commands::tui::run().await,
+        Command::Tui => commands::tui::run(&instance).await,
 
         Command::Launch {
             program,
