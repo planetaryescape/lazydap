@@ -75,7 +75,7 @@ workflow at M15.
 - Multi-session support (currently single-session-per-daemon enforced; protocol uses session IDs from M5 to keep this option open)
 - `js-debug` adapter for Node/TS
 - `delve` adapter for Go
-- Conditional breakpoints (UI + protocol)
+- Conditional breakpoints in the TUI (the CLI already ships them — `break --condition`, discovered working 2026-07-30; only the TUI can't set one)
 - Restart / disconnect-and-relaunch
 - Theming + mouse support
 - HTTP bridge (separate crate, optional binary)
