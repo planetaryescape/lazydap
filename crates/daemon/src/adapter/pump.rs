@@ -110,7 +110,9 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
                 .adapter_id
                 .and_then(|adapter_id| session.breakpoint_id_for(adapter_id));
             session.emit(Event::BreakpointUpdated {
-                session_id,
+                // This *is* an adapter's opinion, so it is scoped to the
+                // session whose adapter holds it.
+                session_id: Some(session_id),
                 breakpoint,
             });
         }

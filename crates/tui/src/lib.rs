@@ -127,11 +127,22 @@ pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
                 None => break Ok(()),
             },
             // Installed before the reducer hears about it, so the requests it
-            // asks for in reply go down the new connection rather than the
-            // dead one.
-            Some(client) = reconnected.recv() => {
+            // asks for in reply go down the new connection rather than the dead
+            // one — but only if this is still the attempt being waited on. A
+            // connection from an attempt that lost its race would replace a
+            // working one with an unsubscribed one, and every request after
+            // that would go somewhere nobody is listening.
+            Some((attempt, client)) = reconnected.recv() => {
+                if !state.is_awaiting(attempt) {
+                    tracing::debug!(
+                        target: "tui.ipc",
+                        attempt,
+                        "dropping a connection from a superseded reconnection",
+                    );
+                    continue;
+                }
                 ipc = client;
-                Msg::Reconnected(Ok(()))
+                Msg::Reconnected { attempt, outcome: Ok(()) }
             },
             _ = tick.tick() => Msg::Tick,
         };
@@ -169,7 +180,7 @@ struct Dispatcher<'a> {
     socket: &'a Path,
     ensure_daemon: &'a EnsureDaemon,
     /// Where a reconnection hands its new client back to the loop.
-    clients: &'a UnboundedSender<ipc_client::IpcClient>,
+    clients: &'a UnboundedSender<(u32, ipc_client::IpcClient)>,
 }
 
 impl Dispatcher<'_> {
@@ -193,7 +204,8 @@ impl Dispatcher<'_> {
                     let _ = msgs.send(Msg::SourceLoaded { id, path, contents });
                 });
             }
-            Cmd::Reconnect { delay_ms } => spawn_reconnect(
+            Cmd::Reconnect { attempt, delay_ms } => spawn_reconnect(
+                attempt,
                 delay_ms,
                 self.socket.to_path_buf(),
                 self.msgs.clone(),
@@ -210,28 +222,36 @@ impl Dispatcher<'_> {
 /// loop that spent them blocked would stop drawing *and* stop reading keys —
 /// so the user could not even quit while it waited.
 fn spawn_reconnect(
+    attempt: u32,
     delay_ms: u64,
     socket: PathBuf,
     tx: UnboundedSender<Msg>,
     ensure_daemon: EnsureDaemon,
-    clients: UnboundedSender<ipc_client::IpcClient>,
+    clients: UnboundedSender<(u32, ipc_client::IpcClient)>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
         if let Err(error) = ensure_daemon().await {
-            let _ = tx.send(Msg::Reconnected(Err(error)));
+            let _ = tx.send(Msg::Reconnected {
+                attempt,
+                outcome: Err(error),
+            });
             return;
         }
         match ipc_client::connect(&socket, tx.clone()).await {
             // The loop installs it and turns it into a `Msg::Reconnected`.
             // Sent this way round because a client cannot travel in a `Msg`:
-            // messages are `Clone`, and a connection is not.
+            // messages are `Clone`, and a connection is not. The attempt rides
+            // along so the loop can tell a current one from a superseded one.
             Ok(client) => {
-                let _ = clients.send(client);
+                let _ = clients.send((attempt, client));
             }
             Err(error) => {
-                let _ = tx.send(Msg::Reconnected(Err(error.to_string())));
+                let _ = tx.send(Msg::Reconnected {
+                    attempt,
+                    outcome: Err(error.to_string()),
+                });
             }
         }
     });

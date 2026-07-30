@@ -82,6 +82,20 @@ impl DaemonState {
         self.event_tx.clone()
     }
 
+    /// Announce something about the *project* rather than about a session.
+    ///
+    /// Broadcast only, never buffered: the buffer is a session's history, read
+    /// by `lazydap status` and by the start of a `--wait`, and a breakpoint
+    /// somebody set between two sessions belongs to neither. The sequence
+    /// number is `0` for the same reason — it orders a session's events, and
+    /// there is no session here to order this against. Nothing reads it: a
+    /// `--wait` skips any event whose session is not its own, which a
+    /// project-scope one never is.
+    pub fn emit_project(&self, event: Event) {
+        tracing::debug!(target: "daemon.events", ?event, "announcing a project change");
+        let _ = self.event_tx.send(SeqEvent { seq: 0, event });
+    }
+
     /// Every live session, for the shutdown preview. Does not give up slots.
     pub fn summaries(&self) -> Vec<SessionSummary> {
         read(&self.sessions)

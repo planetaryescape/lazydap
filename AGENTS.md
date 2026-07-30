@@ -279,8 +279,10 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M14 and M19. Phases A, B and C are done, and Phase D's TUI lane with them. **Next up: M15 — config file and `launch.json` import, which is the v0.1 gate.**
 
-Note the protocol is at **v2**. A daemon left running from an older build is refused with
-`VersionMismatch`; `lazydap shutdown` clears it and the next command starts a current one.
+Note the protocol is at **v3** (D043: `BreakpointUpdated` distinguishes an adapter's
+opinion from a change to the project's list). A daemon left running from an older build is
+refused with `VersionMismatch`; `lazydap shutdown` clears it and the next command starts a
+current one — and the TUI now does that for itself.
 
 If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
 point at the roadmap. Don't pretend the rest of the CLI is there.

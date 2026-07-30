@@ -37,12 +37,19 @@ the row could say is about a daemon it cannot reach and would read as current.
 
 ### Step 2 — a reducer-owned retry curve
 
-`Msg::DaemonGone` forgets the session and returns `Cmd::Reconnect { delay_ms }`. The
-backoff lives in the reducer so it is testable without waiting for it: 250 ms, doubling
-to a 4 s ceiling, six attempts, then `Connection::Lost`.
+`Msg::DaemonGone` forgets the session and returns `Cmd::Reconnect { attempt, delay_ms }`.
+The backoff lives in the reducer so it is testable without waiting for it: 250 ms,
+doubling to a 4 s ceiling, then 4 s for as long as the TUI is open.
 
-Finite on purpose. A TUI retrying for ever behind a status row nobody is reading looks
-alive while showing a screen that stopped being true.
+**It never gives up.** Every attempt runs `ensure_daemon_running`, which *starts* a daemon
+rather than waiting for one, so "cannot reach it" is never a settled fact — the machine it
+would run on is the one the TUI is already on. The ceiling is what makes retrying forever
+affordable.
+
+Each attempt is numbered, and both the reducer and the loop check that number before
+acting on anything an attempt produced: an answer from a superseded attempt is ignored, a
+second `DaemonGone` while one is in flight does not start a second ladder, and a
+connection handed back by an attempt that lost the race is dropped rather than installed.
 
 ### Step 3 — the loop runs it in a task
 
@@ -81,7 +88,9 @@ daemon was down is picked up rather than waited for.
   scopes back.
 - Breakpoints survive: they are the project's, not the session's.
 - `q` works throughout, including while a backoff is being waited out.
-- Six failed attempts end in `daemon lost` rather than an endless retry.
+- It keeps trying for as long as the TUI is open, at no worse than four seconds apart.
+- Keys that need the daemon are inert while it is away, with a notice — `b` especially,
+  since it flips the gutter before the answer comes back.
 
 ## Files
 
@@ -118,7 +127,8 @@ lazydap status      # a new daemon, started by the TUI
 - **A `Msg` cannot carry the new client.** Messages are `Clone` and a connection is not,
   so the reconnecting task hands it back over a channel of its own and the loop installs
   it *before* the reducer hears about it — otherwise the requests the reducer asks for in
-  reply would go down the dead connection.
+  reply would go down the dead connection. It installs it only if that attempt is still
+  the one being waited on.
 - **A daemon from another build** is handled for free: `ensure_daemon_running` already
   shuts it down and starts a current one.
 
@@ -179,3 +189,24 @@ project's, in `.lazydap/state.toml`) but nothing has applied it to a session yet
   more than one, so the cost is a few wasted connects.
 - **A version-mismatch replacement is handled for free** but untested here: it is
   `ensure_daemon_running`'s existing path.
+
+### Review round, 2026-07-30
+
+**The give-up was wrong and has been removed.** Six attempts take under ten seconds; a
+daemon that became startable fifteen seconds later was never reached, on a screen the user
+was still sitting in front of. The mistake was modelling this as a network reconnect — it
+is not one, because every attempt *starts* a daemon rather than waiting for one. The ladder
+now runs for as long as the TUI is open, at no worse than four seconds apart, and
+`Connection::Lost` is gone. See D044.
+
+**Attempts are numbered.** Without an identity on each, three things went wrong: a reply
+from a superseded attempt was taken for the current one and started a second ladder; a
+`DaemonGone` arriving while an attempt was in flight — which a daemon dying just after a
+handshake produces — started one outright; and a connection handed back by whichever
+attempt lost the race replaced a working connection with an unsubscribed one, after which
+every request went somewhere nobody was listening. `Cmd::Reconnect` and `Msg::Reconnected`
+both carry the attempt; the reducer and the loop each check it before acting.
+
+Verified live: pressing `b` inside the `reconnecting… (attempt 1)` window left the gutter
+untouched and `lazydap break --list` unchanged, and the TUI still brought a v3 daemon back
+on its own.

@@ -474,7 +474,8 @@ So `Cmd::SendIpc` carries an `id` chosen by [`AppState::next_request_id`], and t
 **How staleness is decided.** One rule per kind of answer, keyed on the id:
 
 - `latest_stack` and `latest_scopes` hold the newest request of each kind. An answer whose id is not the latest is logged and dropped.
-- `pending_variables` maps a request id to the *index path* of the node that asked. A reply with no entry is dropped; a new frame's `Scopes` request clears the map, because the handles the old entries name belong to a frame the program has left.
+- `pending_variables` maps a request id to the *index path* of the node that asked **and the generation of the tree that path was resolved against**. Review found the first version clearing the map when a new `Scopes` was *requested*, which cannot work: an expansion pressed in the gap before the answer arrives is inserted after the clear, and lands in a tree it was never about — the caller's node filled with the callee's values, at the right position, with nothing on screen to say so. The generation is the tree's own, not the newest request's, for the same reason: between asking for a frame's scopes and being given them, what is on screen is still the previous frame's.
+- **The panes are marked stale the moment a stop is reported**, not merely refreshed when its answer lands. Between the two, every frame id and `variables_reference` on screen belongs to a frame the adapter has discarded, and acting on one sent a dead handle *and* superseded the legitimate request the new stop had just made.
 - `pending_breakpoints` holds ids for the mutations `b` sends. It is not about staleness — breakpoints outlive stops — but about failure: a refused mutation leaves the gutter showing an intention the daemon did not carry out, and nothing in the error says which way it went, so the answer is to ask for the whole list again.
 
 This is the same discipline M11 already used for file reads (`latest_load`), generalised. The reserved-id floor (`RESERVED_IDS`) keeps the reducer's numbering clear of the handshake's, so a `Pong` can never be mistaken for an answer to something the reducer asked.
@@ -505,11 +506,50 @@ Asking for two things at once does not pipeline anything at the adapter (non-neg
 
 Neither can move into `lazydap-tui`. It may depend on `core`, `protocol` and `config` and nothing else (D037), and that boundary is the thing making non-negotiable #2 true. So `run` takes an `EnsureDaemon` callback and `crates/daemon/src/commands/tui.rs` supplies one that calls the same `ensure_daemon_running` every subcommand takes (D003) — spawn lock, stale-socket removal, version-mismatch replacement and all. A TUI reviving a daemon does it by exactly the path a CLI command would.
 
-**What the reducer owns.** The retry curve, so it is testable without waiting for it: 250 ms doubling to a 4 s ceiling, six attempts, then `Connection::Lost` and a status row that says so. Finite on purpose — a TUI retrying for ever behind a row nobody is reading looks alive while showing a screen that stopped being true. The delay is a `Cmd::Reconnect { delay_ms }` the loop sleeps on *in a task*, never inline: four seconds of a blocked loop is four seconds in which `q` does not work.
+**What the reducer owns.** The retry curve, so it is testable without waiting for it: 250 ms doubling to a 4 s ceiling. It does **not** give up — see D044, which corrects the six-attempt limit this shipped with. The delay is a `Cmd::Reconnect { attempt, delay_ms }` the loop sleeps on *in a task*, never inline: four seconds of a blocked loop is four seconds in which `q` does not work.
 
 **How the screen becomes true again.** Nothing is reconstructed. A reconnection replays the opening moves of the first connection (`Msg::Connected` → `Subscribe` + `BreakpointList`), and the `Subscribe` reply is a state snapshot taken at the moment the stream attaches (D038). A session started from another terminal while the daemon was down is therefore picked up rather than waited for.
 
 **What survives and what does not.** Everything about the session goes the moment the daemon does — marker, stack, scopes, pending fetches — because none of it can be checked any more. The breakpoints stay: they are the project's, recorded in `.lazydap/state.toml`, and clearing the gutter would suggest they had been lost when they had not. The `BreakpointList` that follows the reconnection refreshes their verification state, which correctly drops back to unverified when the new daemon has no session.
+
+---
+
+## D043 — a breakpoint change is either an adapter's opinion or the project's, and the event says which
+
+**Status:** decided (2026-07-30, review round after M12–M14/M19). **Protocol v2 → v3.**
+
+**Why:** `lazydap break` with nothing running persisted the breakpoint and announced nothing, so an open TUI's gutter went on drawing the previous set indefinitely. That is M14's "the gutter and `break --list` agree" criterion failing in the direction nobody checked. It is not only a between-sessions problem either: an adapter is handed the new list for a source file and says nothing whatever about what is no longer in it, so a *removal* is invisible to a client watching adapter events even with a session live.
+
+The fix is for every breakpoint mutation to announce itself. The question was what to announce it as, and reusing `BreakpointUpdated` unchanged would have been a lie: that event carries an `AdapterBreakpoint` — `verified`, the line the adapter moved it to — and a `lazydap break` between sessions has no adapter and therefore no opinion. A client applying those fields would be inventing a claim nobody made, and marking a breakpoint verified on the strength of a program that is not running.
+
+So `session_id` became `Option<SessionId>` and the two scopes are distinguished by it:
+
+- **`Some(id)`** — that session's adapter changed its mind. The payload is its opinion, true only while it lives.
+- **`None`** — the project's list changed. The payload names *which* breakpoint, and nothing more; the verification fields carry no information. What it means to a client is "read the list again".
+
+The TUI does exactly that: a project-scope update produces a `BreakpointList` rather than a guess. One extra round trip on a human-paced action, and it is correct for adds, removals and toggles alike without the event having to express any of them.
+
+**Why a version bump.** Two builds both claiming v2 would fail to decode each other's events, which is the exact hazard the version exists to turn into a clean restart (D032, and the same argument D038 made for not adding a variant silently). `ensure_daemon_running` already replaces a daemon whose version differs, so the cost is one automatic restart.
+
+**Consequences:** `Event::session_id()` returns `Option<SessionId>`. A `--wait` already ignores events belonging to another session, so a project-scope one is correctly not part of any wait's blob; it is broadcast but never buffered, because the buffer is a session's history and this belongs to no session.
+
+---
+
+## D044 — a reconnecting TUI never gives up, and every attempt is identified
+
+**Status:** decided (2026-07-30, review round after M19). Supersedes the give-up rule as first built.
+
+**Why:** M19 shipped with six attempts and a terminal `Lost` state. Six failures take under ten seconds; a daemon that became startable fifteen seconds later was never reached, on a screen the user was still sitting in front of, with no way back but quitting. The mistake was modelling this as a network reconnect. It is not one — every attempt runs `ensure_daemon_running`, which *starts* a daemon rather than waiting for one, so "cannot reach it" is never a settled fact about the world. The machine it would run on is the one the TUI is already on.
+
+So the ladder runs for as long as the TUI is open: 250 ms doubling to a 4 s ceiling, then 4 s forever. The ceiling is what makes that affordable — retrying every four seconds costs nothing and bounds how long the user waits once things recover. `Connection::Lost` is gone; there is nothing for it to mean.
+
+**Attempts are numbered**, and that is the other half. Without an identity on each one:
+
+- a reply from an attempt that had already been superseded was taken for the current one, and started a second ladder alongside it;
+- a `DaemonGone` arriving while an attempt was in flight — which a daemon dying just after a handshake produces — started a second ladder outright;
+- a connection handed back by whichever attempt lost the race replaced a working connection with an unsubscribed one, after which every request went somewhere nobody was listening.
+
+`Cmd::Reconnect` and `Msg::Reconnected` both carry the attempt. The reducer ignores an answer that is not the one it is waiting on, and refuses to start a second ladder while one is climbing. The loop checks the same thing before installing a connection, because *installing* is its decision and the currency test is one line of state either can read.
 
 ---
 

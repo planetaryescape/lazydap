@@ -155,3 +155,21 @@ locals, not the top frame's, which is the whole point of depending on M12:
   array opened deliberately would still arrive in one go.
 - **Errors do not show inline** as the task file suggested — a failed fetch goes to the
   status row and the row becomes openable again, so `<CR>` retries.
+
+### Review round, 2026-07-30
+
+**Variables could land in a tree they were never about.** The first version cleared the
+in-flight expansions when a new `Scopes` was *requested*, which cannot work: an expansion
+pressed in the gap before that answer arrives is inserted *after* the clear. Select the
+caller, press `<CR>` on the callee's tree still on screen, and the callee's variables
+populated the same index path in the caller's tree — right position, wrong frame, nothing
+on screen to say so.
+
+Each expansion now carries the generation of the tree its path was resolved against, and a
+reply whose generation is not the one being drawn is dropped. The generation is the
+*tree's*, not the newest request's — writing that fix with `latest_scopes` was wrong for
+exactly the reason the bug existed, and the test caught it (see `panes/scopes.rs`'s
+`generation`).
+
+Also: a scope from the previous stop can no longer be expanded, for the same reason M12's
+frames can no longer be jumped to.

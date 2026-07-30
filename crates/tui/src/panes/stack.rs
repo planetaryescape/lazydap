@@ -24,6 +24,14 @@ pub struct StackView {
     /// Index into [`Self::frames`]. Always addresses a frame when there is
     /// one, which is the invariant the methods below exist to keep.
     selected: usize,
+    /// Whether these frames still describe where the program is.
+    ///
+    /// Set the moment a new stop is reported and cleared when that stop's
+    /// trace arrives. In between, the frames on screen are the previous
+    /// stop's: still worth drawing — clearing them would make the pane blink
+    /// empty on every single step — but not worth *acting* on, because the
+    /// frame ids in them address nothing the adapter still recognises.
+    stale: bool,
     /// Inner height of the last draw, so the list can scroll like the source
     /// pane does. Zero until the pane has been drawn once.
     viewport_height: usize,
@@ -41,6 +49,17 @@ impl StackView {
         self.frames = frames;
         self.selected = 0;
         self.top = 0;
+        self.stale = false;
+    }
+
+    /// The program has moved; these frames describe where it was.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    /// Whether the selected frame is one the adapter would still recognise.
+    pub fn is_actionable(&self) -> bool {
+        !self.stale && !self.frames.is_empty()
     }
 
     pub fn clear(&mut self) {

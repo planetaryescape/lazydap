@@ -68,10 +68,16 @@ pub enum Msg {
     },
     /// The connection ended.
     DaemonGone,
-    /// A [`Cmd::Reconnect`] finished. `Err` carries what to tell the user
-    /// about the attempt that failed; the reducer decides whether that is
-    /// worth another go (M19).
-    Reconnected(std::result::Result<(), String>),
+    /// A [`Cmd::Reconnect`] finished. `Err` carries what to tell the user about
+    /// the attempt that failed (M19).
+    ///
+    /// `attempt` is the one this answers. Without it a reply from an attempt
+    /// that has already been superseded would be taken for the current one, and
+    /// two ladders would climb at once.
+    Reconnected {
+        attempt: u32,
+        outcome: std::result::Result<(), String>,
+    },
 }
 
 /// Something the reducer wants done. Executed by the loop, never by the
@@ -111,6 +117,9 @@ pub enum Cmd {
     /// Try to get a connection to the daemon back, starting one if there is
     /// none (M19). Answered with [`Msg::Reconnected`].
     Reconnect {
+        /// Which attempt this is, carried back on the answer so a reply that
+        /// has been superseded can be told from the current one.
+        attempt: u32,
         /// How long to wait first. The reducer owns the backoff, so the shape
         /// of the retry curve is testable without waiting for it.
         delay_ms: u64,

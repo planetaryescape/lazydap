@@ -183,3 +183,33 @@ Pressing `b` again on line 15 removes it, and the list drops back to `[(1, 19)]`
 - **`B` for a conditional breakpoint** is still deferred, as the task file allows.
 - **Persistence across a TUI restart** is the store's existing behaviour (D006) and was
   not re-verified here beyond `break --list` agreeing; M6 covers it.
+
+### Review round, 2026-07-30
+
+Three defects, all about the gutter telling the truth.
+
+- **`b` acted on the persisted line, the gutter drew the adapter's.** They differ exactly
+  when codelldb moves a breakpoint to the next line with code. Pressing `b` on the visible
+  sign at moved-line 12 added a *second* breakpoint; pressing it on now-blank line 10 took
+  away the sign at 12. `b` now finds a breakpoint by the line the gutter draws it on and
+  builds the removal selector from the line the store knows it by.
+- **Verification was treated as project-global.** `verified` and `adapter_line` are one
+  adapter's opinion, true only while its session lives. There was no session filter on
+  `BreakpointUpdated` and no reset when a session ended, so `●` stayed on a program that
+  had exited and a queued update from a dead session could overwrite the live one's.
+  Filtered by the session being followed, and reset on `SessionEnded` and `DaemonGone`.
+- **`b` flipped the gutter while the daemon was unreachable**, and `IpcClient::send`
+  dropped the request — a sign on screen and `.lazydap/state.toml` disagreeing for the rest
+  of the run, with nothing to put them back. Every key that needs the daemon is now inert
+  with a notice while it is away.
+
+Daemon-side, the reverse direction was broken too: a `lazydap break` with no live session
+persisted the breakpoint and announced nothing, so an open TUI's gutter stayed stale
+indefinitely. A removal was invisible even *with* a session, because an adapter is handed
+the new list for a file and says nothing about what is no longer in it. Every mutation now
+announces itself as a project-scope `BreakpointUpdated` (D043, protocol v3) and the TUI
+answers by re-reading the list — correct for adds, removals and toggles without the event
+having to express any of them.
+
+Verified live: `lazydap break examples/c-hello/main.c:6` typed in another shell made `◯ 6`
+appear in a running TUI with no keypress, and `--remove` took it away again.

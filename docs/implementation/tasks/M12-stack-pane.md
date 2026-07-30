@@ -155,3 +155,16 @@ paused at nested.c:11 · F5 continue · F10 step · b break · Tab pane · q qui
   line 5. That is what the task file asked for and what most debuggers do, but VS Code
   draws a non-top frame's marker differently (hollow). Worth a distinct sign later.
 - **Frame ranking for AI clients** remains a future feature, as the task file says.
+
+### Review round, 2026-07-30
+
+Two defects, both the same shape: D040's staleness discipline was applied to *answers* but
+not to what is on screen while one is outstanding.
+
+- **A frame from the previous stop could be jumped to.** Between a `stopped` and the trace
+  answering it, the pane still lists the previous stop's frames, whose ids the adapter has
+  discarded. `<CR>` in that gap sent a dead `frame_id` *and* the scopes request that went
+  with it superseded the legitimate one the new stop had just made — so the scopes pane
+  ended up empty rather than merely late. Both panes are now marked stale the moment a stop
+  is reported and live again only when that stop's answer lands. They keep drawing in the
+  meantime: clearing them would make both blink empty on every single step.

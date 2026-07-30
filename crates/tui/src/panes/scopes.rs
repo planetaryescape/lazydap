@@ -43,6 +43,18 @@ pub struct ScopesView {
     /// Collapsing a node above the selection can leave this past the end, so
     /// every read of it clamps.
     selected: usize,
+    /// Whether these handles are ones the adapter would still recognise. Same
+    /// discipline as the stack pane's, and for the same reason: a
+    /// `variables_reference` belongs to a frame, and a frame lasts until the
+    /// program moves.
+    stale: bool,
+    /// The id of the `Scopes` answer this tree was built from.
+    ///
+    /// What an in-flight expansion is tagged with, and the reason it is the
+    /// *tree's* generation rather than the newest request's: between asking for
+    /// a frame's scopes and being given them, the tree on screen is still the
+    /// previous frame's, and an expansion of it belongs to that one.
+    generation: u64,
     viewport_height: usize,
     top: usize,
 }
@@ -156,14 +168,30 @@ impl ScopesView {
     /// alternative — remembering which paths were open and re-expanding them —
     /// is a real feature, but it is not this milestone's, and half-doing it
     /// would leave the pane showing values from the previous stop.
-    pub fn replace(&mut self, scopes: Vec<Scope>) {
+    pub fn replace(&mut self, scopes: Vec<Scope>, generation: u64) {
         self.nodes = scopes.into_iter().map(Node::scope).collect();
         self.selected = 0;
         self.top = 0;
+        self.stale = false;
+        self.generation = generation;
+    }
+
+    /// Which answer built the tree that is on screen right now.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The program has moved; every handle in here belongs to a frame it left.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    pub fn is_actionable(&self) -> bool {
+        !self.stale
     }
 
     pub fn clear(&mut self) {
-        self.replace(Vec::new());
+        self.replace(Vec::new(), self.generation);
     }
 
     /// Every visible row, depth-first, skipping the children of collapsed
@@ -376,7 +404,7 @@ mod tests {
 
     fn locals() -> ScopesView {
         let mut view = ScopesView::default();
-        view.replace(vec![scope("Locals", 1000), scope("Globals", 1001)]);
+        view.replace(vec![scope("Locals", 1000), scope("Globals", 1001)], 1);
         view
     }
 
@@ -494,7 +522,7 @@ mod tests {
         // The tree is replaced by the next stop while a fetch for the old one
         // is still in flight.
         let mut view = locals();
-        view.replace(vec![scope("Locals", 2000)]);
+        view.replace(vec![scope("Locals", 2000)], 2);
 
         assert!(!view.populate(&[7], vec![variable("x", "5", "int", 0)]));
         assert!(view.node_at(&[0, 3]).is_none());
@@ -531,7 +559,7 @@ mod tests {
     #[test]
     fn a_long_tree_scrolls_to_keep_the_selection_on_screen() {
         let mut view = ScopesView::default();
-        view.replace(vec![scope("Locals", 1000)]);
+        view.replace(vec![scope("Locals", 1000)], 1);
         view.populate(
             &[0],
             (0..20)

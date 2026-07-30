@@ -19,7 +19,13 @@ use std::path::PathBuf;
 /// still running" into a clean `VersionMismatch` the client resolves by
 /// restarting it, rather than a `BadRequest` for a command that plainly
 /// exists.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 2;
+///
+/// v3 (M14/M19, D043): `BreakpointUpdated` carries `Option<SessionId>` so that
+/// a `lazydap break` with nothing running can be announced as a change to the
+/// project rather than as an adapter's opinion. Both shapes would otherwise
+/// claim to be v2 and fail to decode each other's events — the exact hazard the
+/// version exists to turn into a clean restart.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 3;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -507,10 +513,21 @@ pub enum Event {
         session_id: SessionId,
         chunk: OutputChunk,
     },
-    /// The adapter changed its mind about a breakpoint: verified one it had
-    /// not, or moved it to the nearest line with code.
+    /// A breakpoint changed. `session_id` says what kind of change.
+    ///
+    /// - **`Some(id)`** — the adapter for that session changed its mind:
+    ///   verified one it had not, or moved it to the nearest line with code.
+    ///   The [`AdapterBreakpoint`] is that adapter's opinion, and it is only
+    ///   true for as long as that session lives. A client that kept it past
+    ///   the session's end would be showing a claim nobody is standing behind
+    ///   any more.
+    /// - **`None`** — the *project's* list changed, because somebody ran
+    ///   `lazydap break` (add, remove or toggle). There is no adapter opinion
+    ///   in one of these: the verification fields carry no information, and a
+    ///   client that applied them would be inventing a claim nobody made. What
+    ///   it means is "the list is not what you last read; read it again".
     BreakpointUpdated {
-        session_id: SessionId,
+        session_id: Option<SessionId>,
         breakpoint: AdapterBreakpoint,
     },
     ThreadChanged {
@@ -532,15 +549,20 @@ impl Event {
         }
     }
 
-    pub fn session_id(&self) -> SessionId {
+    /// Which session this is about, when it is about one.
+    ///
+    /// `None` only for a project-scope [`Event::BreakpointUpdated`] — a
+    /// `lazydap break` is a change to the project, and belongs to no session's
+    /// history.
+    pub fn session_id(&self) -> Option<SessionId> {
         match self {
             Self::SessionStarted { session_id, .. }
             | Self::SessionEnded { session_id, .. }
             | Self::Stopped { session_id, .. }
             | Self::Continued { session_id, .. }
             | Self::Output { session_id, .. }
-            | Self::BreakpointUpdated { session_id, .. }
-            | Self::ThreadChanged { session_id, .. } => *session_id,
+            | Self::ThreadChanged { session_id, .. } => Some(*session_id),
+            Self::BreakpointUpdated { session_id, .. } => *session_id,
         }
     }
 }
@@ -665,7 +687,7 @@ mod tests {
             hit_breakpoint_ids: Vec::new(),
         };
         assert_eq!(event.kind(), EventKind::Stopped);
-        assert_eq!(event.session_id(), session_id);
+        assert_eq!(event.session_id(), Some(session_id));
     }
 
     #[test]

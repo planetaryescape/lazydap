@@ -14,8 +14,11 @@
 use super::Result;
 use crate::adapter::AdapterError;
 use crate::state::DaemonState;
-use lazydap_core::{Breakpoint, BreakpointId, BreakpointSelector, BreakpointStatus, NewBreakpoint};
-use lazydap_protocol::{BreakpointAction, BreakpointReport, Response};
+use lazydap_core::{
+    AdapterBreakpoint, Breakpoint, BreakpointId, BreakpointSelector, BreakpointStatus,
+    NewBreakpoint,
+};
+use lazydap_protocol::{BreakpointAction, BreakpointReport, Event, Response};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,6 +72,7 @@ pub async fn add(state: &Arc<DaemonState>, new: NewBreakpoint, dry_run: bool) ->
     let source = new.source.clone();
     let breakpoint = state.store.add(new);
     let applied = apply(state, &[source]).await?;
+    announce(state, std::slice::from_ref(&breakpoint));
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: BreakpointAction::Added,
@@ -99,6 +103,7 @@ pub async fn remove(
 
     let removed = state.store.remove(&selector);
     let applied = apply(state, &sources_of(&removed)).await?;
+    announce(state, &removed);
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: BreakpointAction::Removed,
@@ -144,6 +149,7 @@ pub async fn toggle(
 
     let toggled = state.store.toggle(&selector);
     let applied = apply(state, &sources_of(&toggled)).await?;
+    announce(state, &toggled);
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: BreakpointAction::Toggled,
@@ -152,6 +158,34 @@ pub async fn toggle(
         not_found,
         applied_to_session: applied,
     }))
+}
+
+/// Tell every subscriber that the project's breakpoints are not what they last
+/// read.
+///
+/// On *every* mutation, not only the ones no session saw. A live session's
+/// adapter reports its opinion of a breakpoint that was added, but nothing
+/// reports one that was removed — an adapter is told the new list for a file
+/// and simply says nothing about what is no longer in it. So a client watching
+/// only the adapter's events keeps drawing a breakpoint that is gone, and a
+/// client watching between sessions sees nothing at all.
+///
+/// Scoped to the project (`session_id: None`), because that is what it is: the
+/// verification fields carry no opinion and a client that applied them would be
+/// inventing a claim nobody made. See [`Event::BreakpointUpdated`].
+fn announce(state: &Arc<DaemonState>, changed: &[Breakpoint]) {
+    for breakpoint in changed {
+        state.emit_project(Event::BreakpointUpdated {
+            session_id: None,
+            breakpoint: AdapterBreakpoint {
+                id: Some(breakpoint.id),
+                adapter_id: None,
+                verified: false,
+                line: Some(breakpoint.line),
+                message: None,
+            },
+        });
+    }
 }
 
 /// Tell the live session about every breakpoint in each of `sources`.

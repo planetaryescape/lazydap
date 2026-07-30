@@ -18,7 +18,13 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   parallel — check for that work before editing them.
 - New decisions from Phase D's TUI lane: **D040** (the reducer numbers its own requests and drops
   answers that have been overtaken), **D041** (`Cmd::Batch`), **D042** (the TUI reconnects by
-  calling back into the CLI rather than learning to spawn).
+  calling back into the CLI rather than learning to spawn), **D043** (a breakpoint change is either
+  an adapter's opinion or the project's, and the event says which — **protocol v2 → v3**), **D044**
+  (a reconnecting TUI never gives up, and every attempt is identified).
+- A review round after M12–M14/M19 found eight defects, all fixed; the per-milestone task files
+  carry a "Review round" section describing each. The theme was staleness applied to answers but
+  not to what stays on screen while one is outstanding, and session-scoped facts treated as
+  project-global.
 - Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
   [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
   D029 (adapter seam), D030 (`SessionId` form), D031–D036 from M6/M7 (breakpoint ids, protocol

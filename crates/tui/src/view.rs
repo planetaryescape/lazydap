@@ -69,7 +69,6 @@ fn status_text(state: &AppState) -> String {
         Connection::Reconnecting { attempt } => {
             return format!("reconnecting… (attempt {attempt})");
         }
-        Connection::Lost => return "daemon lost".to_string(),
         Connection::Connected => {}
     }
     if let Some(notice) = state.notice.as_deref() {
@@ -462,11 +461,14 @@ mod tests {
             status_row(&mut state),
         );
 
+        // However many attempts in. There is no giving-up state to fall into:
+        // every attempt can start a daemon, so it keeps counting for as long as
+        // the user leaves the TUI open.
         state.connection = Connection::Reconnecting { attempt: 4 };
         assert!(status_row(&mut state).starts_with("reconnecting… (attempt 4) · "));
 
-        state.connection = Connection::Lost;
-        assert!(status_row(&mut state).starts_with("daemon lost · "));
+        state.connection = Connection::Reconnecting { attempt: 400 };
+        assert!(status_row(&mut state).starts_with("reconnecting… (attempt 400) · "));
     }
 
     #[test]

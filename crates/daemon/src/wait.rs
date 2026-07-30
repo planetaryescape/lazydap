@@ -152,7 +152,9 @@ impl Wait {
                 Err(RecvError::Closed) => return WaitOutcome::AdapterDied,
             };
 
-            if sequenced.seq <= self.watermark || sequenced.event.session_id() != self.session.id {
+            if sequenced.seq <= self.watermark
+                || sequenced.event.session_id() != Some(self.session.id)
+            {
                 continue;
             }
             self.watermark = sequenced.seq;
@@ -284,7 +286,9 @@ impl Wait {
     async fn coalesce(&mut self) {
         let until = Instant::now() + COALESCE_WINDOW;
         while let Ok(Ok(sequenced)) = tokio::time::timeout_at(until, self.events.recv()).await {
-            if sequenced.seq <= self.watermark || sequenced.event.session_id() != self.session.id {
+            if sequenced.seq <= self.watermark
+                || sequenced.event.session_id() != Some(self.session.id)
+            {
                 continue;
             }
             self.watermark = sequenced.seq;
@@ -613,7 +617,7 @@ mod tests {
         let wait = Wait::begin(&session);
 
         session.emit(Event::BreakpointUpdated {
-            session_id: session.id,
+            session_id: Some(session.id),
             breakpoint: AdapterBreakpoint {
                 id: Some(BreakpointId(1)),
                 adapter_id: Some(1),
@@ -647,7 +651,7 @@ mod tests {
 
         for line in [19, 21] {
             session.emit(Event::BreakpointUpdated {
-                session_id: session.id,
+                session_id: Some(session.id),
                 breakpoint: AdapterBreakpoint {
                     id: Some(BreakpointId(1)),
                     adapter_id: Some(1),
@@ -675,7 +679,7 @@ mod tests {
 
         for adapter_id in [1, 2] {
             session.emit(Event::BreakpointUpdated {
-                session_id: session.id,
+                session_id: Some(session.id),
                 breakpoint: AdapterBreakpoint {
                     id: Some(BreakpointId(adapter_id as u32)),
                     adapter_id: Some(adapter_id),
