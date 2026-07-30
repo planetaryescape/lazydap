@@ -61,6 +61,7 @@ workflow at M15.
 - [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
 - [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
 - [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
+- [ ] [M19 — TUI reconnects when the daemon goes away](docs/implementation/tasks/M19-tui-reconnect.md) — added 2026-07-30; M11 recorded reconnection as mandatory pre-v0.1
 - [ ] [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md) → **tag v0.1**
 
 ## Beyond v0.1 (M16–M18+)
