@@ -398,7 +398,10 @@ mod tests {
         let reloaded = project.store();
         let breakpoints = reloaded.breakpoints();
         assert_eq!(breakpoints.len(), 1);
-        assert_eq!(breakpoints[0].id, added.id, "ids are stable across restarts");
+        assert_eq!(
+            breakpoints[0].id, added.id,
+            "ids are stable across restarts"
+        );
         assert_eq!(
             breakpoints[0].source, source,
             "paths come back absolute even though they are stored relative",
@@ -575,7 +578,11 @@ mod tests {
 
         let store = project.store();
         let added = store.add(new_breakpoint(&project.root.join("b.c"), 2));
-        assert_eq!(added.id, BreakpointId(42), "ids continue past what is there");
+        assert_eq!(
+            added.id,
+            BreakpointId(42),
+            "ids continue past what is there"
+        );
     }
 
     #[tokio::test(start_paused = true)]

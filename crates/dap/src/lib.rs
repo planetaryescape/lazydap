@@ -7,5 +7,6 @@ pub use types::{
     DapResponse, DapScope, DapSource, DapStackFrame, DapThread, DapVariable, DisconnectArgs,
     EvaluateArgs, EvaluateResponse, InitializeArgs, LaunchArgs, PauseArgs, ScopesArgs,
     ScopesResponse, SetBreakpointsArgs, SetBreakpointsResponse, Source, SourceBreakpoint,
-    StackTraceArgs, StackTraceResponse, StepArgs, ThreadsResponse, VariablesArgs, VariablesResponse,
+    StackTraceArgs, StackTraceResponse, StepArgs, ThreadsResponse, VariablesArgs,
+    VariablesResponse,
 };

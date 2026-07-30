@@ -4,6 +4,7 @@ use lazydap_protocol::{ErrorCode, IpcError};
 /// part of the product surface.
 pub mod exit {
     pub const GENERAL: u8 = 1;
+    pub const USAGE: u8 = 2;
     pub const DAEMON_UNREACHABLE: u8 = 3;
     pub const ADAPTER_NOT_FOUND: u8 = 4;
 }
@@ -39,6 +40,17 @@ impl CliError {
             label: "DaemonInternalError",
             exit_code: exit::GENERAL,
             source: source.into(),
+        }
+    }
+
+    /// The command line did not make sense. Exit 2, the same as anything clap
+    /// rejects, so a script cannot tell "you cannot combine those flags" from
+    /// "there is no such flag" — and does not need to.
+    pub fn usage(message: impl Into<String>) -> Self {
+        Self {
+            label: "UsageError",
+            exit_code: exit::USAGE,
+            source: IpcError::new(ErrorCode::BadRequest, message).into(),
         }
     }
 
@@ -98,6 +110,14 @@ impl From<std::io::Error> for CliError {
     }
 }
 
+/// Failing to serialise our own output is a bug in this process, not something
+/// the daemon or the adapter did.
+impl From<serde_json::Error> for CliError {
+    fn from(source: serde_json::Error) -> Self {
+        Self::general(source)
+    }
+}
+
 impl From<lazydap_config::PathsError> for CliError {
     fn from(source: lazydap_config::PathsError) -> Self {
         Self {
@@ -122,6 +142,7 @@ fn classify(code: ErrorCode) -> (&'static str, u8) {
         ErrorCode::AdapterTimeout => ("AdapterTimeout", exit::GENERAL),
         ErrorCode::SessionNotFound => ("SessionNotFound", exit::GENERAL),
         ErrorCode::SessionAlreadyActive => ("SessionAlreadyActive", exit::GENERAL),
+        ErrorCode::SessionNotPaused => ("SessionNotPaused", exit::GENERAL),
         ErrorCode::InvalidLaunchConfig => ("InvalidLaunchConfig", exit::GENERAL),
         ErrorCode::InvalidProjectRoot => ("InvalidProjectRoot", exit::GENERAL),
         ErrorCode::DapProtocolError => ("DapProtocolError", exit::GENERAL),

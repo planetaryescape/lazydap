@@ -1,6 +1,6 @@
 use crate::output::OutputFormat;
 use clap::{Parser, Subcommand};
-use lazydap_core::AdapterKind;
+use lazydap_core::{AdapterKind, EvalContext, VariableFilter};
 use std::path::PathBuf;
 
 /// A scriptable, terminal-first debugger.
@@ -41,6 +41,10 @@ pub enum Command {
         #[arg(long)]
         cwd: Option<PathBuf>,
 
+        /// Environment for the debuggee, as KEY=VALUE. Repeatable.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
         /// Which debug adapter to use.
         #[arg(long, default_value = "codelldb")]
         adapter: AdapterKind,
@@ -63,10 +67,226 @@ pub enum Command {
         /// Leave the debuggee running instead of killing it.
         #[arg(long)]
         no_terminate: bool,
+
+        /// Report what would be ended, and end nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Stop the daemon and every session it owns.
-    Shutdown,
+    Shutdown {
+        /// Report what would be stopped, and stop nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Resume the program.
+    #[command(visible_alias = "c")]
+    Continue {
+        #[command(flatten)]
+        wait: WaitArgs,
+
+        /// Wait for every thread to stop, not just the first.
+        #[arg(long)]
+        all_threads: bool,
+
+        /// Which thread to resume. Defaults to the one that stopped last.
+        #[arg(long)]
+        thread: Option<i64>,
+    },
+
+    /// Run the next line, stepping over any call in it.
+    #[command(visible_alias = "next")]
+    Step {
+        #[command(flatten)]
+        wait: WaitArgs,
+        #[arg(long)]
+        thread: Option<i64>,
+    },
+
+    /// Step into the call on this line.
+    #[command(name = "step-in", visible_alias = "step-into")]
+    StepIn {
+        #[command(flatten)]
+        wait: WaitArgs,
+        #[arg(long)]
+        thread: Option<i64>,
+    },
+
+    /// Run until the current function returns.
+    #[command(name = "step-out")]
+    StepOut {
+        #[command(flatten)]
+        wait: WaitArgs,
+        #[arg(long)]
+        thread: Option<i64>,
+    },
+
+    /// Interrupt a running program.
+    Pause {
+        #[command(flatten)]
+        wait: WaitArgs,
+        #[arg(long)]
+        thread: Option<i64>,
+    },
+
+    /// Set, list, remove or toggle breakpoints.
+    ///
+    /// Breakpoints are project state: they are remembered in
+    /// `.lazydap/state.toml` and applied to every session you launch, whether
+    /// or not one is running when you set them.
+    #[command(name = "break", visible_alias = "b")]
+    Break {
+        /// Where to break, as `file:line`.
+        #[arg(value_name = "FILE:LINE")]
+        location: Option<String>,
+
+        /// List every breakpoint in the project.
+        #[arg(long, conflicts_with_all = ["remove", "toggle"])]
+        list: bool,
+
+        /// Remove the selected breakpoints.
+        #[arg(long, conflicts_with = "toggle")]
+        remove: bool,
+
+        /// Enable or disable the selected breakpoints.
+        #[arg(long)]
+        toggle: bool,
+
+        /// Select by id. Repeatable, and what `--format ids` output feeds.
+        #[arg(long = "id", value_name = "ID")]
+        ids: Vec<u32>,
+
+        /// Select every breakpoint in the project.
+        #[arg(long)]
+        all: bool,
+
+        /// Only break when this expression is true.
+        #[arg(long)]
+        condition: Option<String>,
+
+        /// Only break once the hit count matches, e.g. `>= 10`.
+        #[arg(long)]
+        hit_condition: Option<String>,
+
+        /// Log this message instead of pausing. Braces interpolate:
+        /// `--log "x = {x}"`.
+        #[arg(long = "log", value_name = "MESSAGE")]
+        log_message: Option<String>,
+
+        /// Record it, but leave it switched off.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Report what would change, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show the call stack of a paused program.
+    Stack {
+        /// Which thread. Defaults to the one that stopped last.
+        #[arg(long)]
+        thread: Option<i64>,
+
+        /// How many frames. Defaults to all of them.
+        #[arg(long)]
+        levels: Option<u32>,
+
+        /// Skip this many frames from the top.
+        #[arg(long)]
+        start: Option<u32>,
+    },
+
+    /// Show the variable scopes of a frame.
+    Scopes {
+        /// Which frame. Defaults to the top one.
+        #[arg(long)]
+        frame: Option<i64>,
+    },
+
+    /// Expand a scope or a structured variable.
+    Variables {
+        /// The `variables_reference` from `scopes` or a parent variable.
+        #[arg(long)]
+        reference: i64,
+
+        /// Fetch only named members or only indexed elements.
+        #[arg(long, default_value = "all")]
+        filter: VariableFilter,
+
+        /// Skip this many.
+        #[arg(long)]
+        start: Option<u32>,
+
+        /// Take at most this many.
+        #[arg(long)]
+        count: Option<u32>,
+    },
+
+    /// Evaluate an expression in the debuggee.
+    Eval {
+        /// The expression, in the debuggee's own language.
+        expression: String,
+
+        /// Which frame to evaluate in. Defaults to the top one.
+        #[arg(long)]
+        frame: Option<i64>,
+
+        /// How the adapter should format the result.
+        #[arg(long, default_value = "repl")]
+        context: EvalContext,
+    },
+
+    /// List the debuggee's threads.
+    Threads,
+
+    /// Show output the debuggee has produced.
+    Output {
+        /// Only output at or after this Unix-epoch millisecond.
+        #[arg(long)]
+        since: Option<u64>,
+    },
+
+    /// Show the daemon's log.
+    Logs {
+        /// Show at most this many lines, from the end.
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+
+        /// Only lines at this level or louder.
+        #[arg(long)]
+        level: Option<String>,
+
+        /// Keep printing as the daemon writes more.
+        #[arg(long)]
+        follow: bool,
+
+        /// Delete the log file instead of printing it.
+        #[arg(long, conflicts_with_all = ["follow", "limit"])]
+        purge: bool,
+    },
+
+    /// Check that everything lazydap needs is where it should be.
+    Doctor {
+        /// Only check the adapters.
+        #[arg(long)]
+        check_adapters: bool,
+
+        /// Only check the project state file.
+        #[arg(long)]
+        check_state: bool,
+    },
+
+    /// Print the lazydap and protocol versions.
+    Version,
+
+    /// Print a shell completion script.
+    Completions {
+        /// Which shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 
     /// Run the daemon. Normally started automatically by the first command
     /// that needs it.
@@ -77,9 +297,126 @@ pub enum Command {
     },
 }
 
+/// The `--wait` pair, shared by every command that moves the program.
+///
+/// Flattened rather than repeated so the flags cannot drift apart between
+/// `continue` and `step`, and so `--help` describes them identically.
+#[derive(Debug, Clone, clap::Args)]
+pub struct WaitArgs {
+    /// Block until the program pauses, exits or is terminated, and return one
+    /// JSON object describing everything that happened. Always use this from a
+    /// script or an agent.
+    #[arg(long)]
+    pub wait: bool,
+
+    /// How long to wait, in seconds. `0` waits forever. Defaults to 30, or to
+    /// LAZYDAP_TIMEOUT.
+    #[arg(long, requires = "wait")]
+    pub timeout: Option<u64>,
+}
+
 impl Command {
     /// Whether this command runs the daemon itself rather than talking to one.
     pub fn is_daemon(&self) -> bool {
         matches!(self, Self::Daemon { .. })
+    }
+
+    /// Whether this command can answer without a daemon at all.
+    ///
+    /// `version` and `completions` are pure output. Starting a background
+    /// process to print a version string would be absurd, and would make
+    /// `lazydap completions bash` in a shell profile spawn a daemon on every
+    /// new terminal.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Version | Self::Completions { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_command_tree_is_internally_consistent() {
+        // clap's own audit: duplicate flags, a `requires` naming an argument
+        // that does not exist, conflicting defaults. Cheap, and it fails at
+        // the exact line that broke rather than at runtime.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_timeout_without_a_wait_is_a_usage_error() {
+        // `--timeout` on a fire-and-forget command means nothing, and quietly
+        // ignoring it would leave a caller believing they had set one.
+        let error = Cli::try_parse_from(["lazydap", "continue", "--timeout", "5"])
+            .expect_err("--timeout requires --wait");
+        assert!(error.use_stderr(), "got: {error}");
+    }
+
+    #[test]
+    fn step_answers_to_the_name_half_the_world_learned_from_gdb() {
+        for spelling in ["step", "next"] {
+            let cli = Cli::try_parse_from(["lazydap", spelling]).expect("parse");
+            assert!(
+                matches!(cli.command, Some(Command::Step { .. })),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn step_in_accepts_both_spellings_the_ecosystem_uses() {
+        for spelling in ["step-in", "step-into"] {
+            let cli = Cli::try_parse_from(["lazydap", spelling]).expect("parse");
+            assert!(
+                matches!(cli.command, Some(Command::StepIn { .. })),
+                "{spelling}",
+            );
+        }
+    }
+
+    #[test]
+    fn breaking_and_listing_are_the_same_subcommand() {
+        let cli = Cli::try_parse_from(["lazydap", "break", "main.c:19"]).expect("parse");
+        match cli.command {
+            Some(Command::Break { location, list, .. }) => {
+                assert_eq!(location.as_deref(), Some("main.c:19"));
+                assert!(!list);
+            }
+            other => unreachable!("expected a break command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listing_and_removing_cannot_be_asked_for_at_once() {
+        Cli::try_parse_from(["lazydap", "break", "--list", "--remove", "--all"])
+            .expect_err("one mode at a time");
+    }
+
+    #[test]
+    fn ids_are_repeatable_so_a_pipeline_can_pass_several() {
+        let cli = Cli::try_parse_from(["lazydap", "break", "--remove", "--id", "1", "--id", "2"])
+            .expect("parse");
+        match cli.command {
+            Some(Command::Break { ids, remove, .. }) => {
+                assert_eq!(ids, vec![1, 2]);
+                assert!(remove);
+            }
+            other => unreachable!("expected a break command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn version_and_completions_do_not_need_a_daemon() {
+        assert!(Command::Version.is_local());
+        assert!(
+            Command::Completions {
+                shell: clap_complete::Shell::Bash,
+            }
+            .is_local(),
+            "a shell profile must not spawn a daemon per terminal",
+        );
+        assert!(!Command::Status.is_local());
     }
 }

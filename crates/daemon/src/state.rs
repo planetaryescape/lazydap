@@ -1,8 +1,12 @@
 use crate::adapter::AdapterHandle;
-use lazydap_core::{AdapterKind, EndReason, SessionId, SessionState};
+use lazydap_core::{
+    AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointStatus, EndReason, OutputChunk,
+    SessionId, SessionState,
+};
 use lazydap_protocol::{
     ErrorCode, Event, IpcError, LAZYDAP_PROTOCOL_VERSION, SessionSummary, StatusReport,
 };
+use lazydap_store::ProjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -22,12 +26,28 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// Everything one daemon owns.
 pub struct DaemonState {
     pub instance: String,
+    /// Per-project breakpoints and (later) watches. Outlives every session:
+    /// breakpoints are something a project has, not something a session has.
+    pub store: Arc<ProjectStore>,
     started_at: Instant,
     /// Keyed by id even though v0.1 allows one at a time (D007): the map is
     /// what makes lifting that limit a daemon-only change.
     sessions: RwLock<HashMap<SessionId, Slot>>,
-    event_tx: broadcast::Sender<Event>,
+    event_tx: broadcast::Sender<SeqEvent>,
     shutdown_tx: watch::Sender<bool>,
+}
+
+/// An event with the position it holds in its session's history.
+///
+/// The sequence number is what makes `--wait` exact. A wait subscribes, then
+/// drains whatever was buffered before it started; without a number to compare
+/// against, an event landing between those two steps would be reported twice,
+/// and one landing before the subscription would be lost. The number settles
+/// both: drain up to a watermark, ignore anything live at or below it.
+#[derive(Debug, Clone)]
+pub struct SeqEvent {
+    pub seq: u64,
+    pub event: Event,
 }
 
 /// A session, or the intent to have one.
@@ -41,11 +61,12 @@ enum Slot {
 }
 
 impl DaemonState {
-    pub fn new(instance: String) -> Arc<Self> {
+    pub fn new(instance: String, store: Arc<ProjectStore>) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let (shutdown_tx, _) = watch::channel(false);
         Arc::new(Self {
             instance,
+            store,
             started_at: Instant::now(),
             sessions: RwLock::new(HashMap::new()),
             event_tx,
@@ -57,8 +78,19 @@ impl DaemonState {
         self.started_at.elapsed().as_millis() as u64
     }
 
-    pub fn events(&self) -> broadcast::Sender<Event> {
+    pub fn events(&self) -> broadcast::Sender<SeqEvent> {
         self.event_tx.clone()
+    }
+
+    /// Every live session, for the shutdown preview. Does not give up slots.
+    pub fn summaries(&self) -> Vec<SessionSummary> {
+        read(&self.sessions)
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Live(session) => Some(session.summary()),
+                Slot::Reserved => None,
+            })
+            .collect()
     }
 
     /// Claim the single session slot, or explain why it is taken (D007).
@@ -77,6 +109,36 @@ impl DaemonState {
             id,
             promoted: false,
         })
+    }
+
+    /// Drop sessions whose program has finished, so the slot is free again.
+    ///
+    /// M5 left a finished session holding the slot, which meant a second
+    /// `lazydap launch` was refused until somebody ran `lazydap disconnect` on
+    /// a session that had no adapter left to disconnect from. The slot exists
+    /// to stop two adapters running at once (D007); a session with no adapter
+    /// is not what it is protecting against.
+    ///
+    /// Returns how many were reaped, which is only interesting to a log line.
+    pub fn reap_finished(&self) -> usize {
+        let mut sessions = write(&self.sessions);
+        let finished: Vec<SessionId> = sessions
+            .iter()
+            .filter_map(|(id, slot)| match slot {
+                Slot::Live(session) if !session.state().is_live() => Some(*id),
+                _ => None,
+            })
+            .collect();
+
+        for id in &finished {
+            tracing::debug!(
+                target: "daemon.session",
+                session_id = %id,
+                "reaping a session whose program has finished",
+            );
+            sessions.remove(id);
+        }
+        finished.len()
     }
 
     /// The live session, if there is one.
@@ -226,8 +288,16 @@ pub struct Session {
     exit_code: RwLock<Option<i32>>,
     ended: Mutex<bool>,
     events: Mutex<EventBuffer>,
-    event_tx: broadcast::Sender<Event>,
+    event_tx: broadcast::Sender<SeqEvent>,
     adapter: AdapterHandle,
+    /// The thread that stopped last, so a caller can say `lazydap continue`
+    /// without first asking which thread it means.
+    last_thread_id: RwLock<Option<i64>>,
+    /// What the adapter currently thinks of the breakpoints we gave it, keyed
+    /// by our id, plus the adapter's own id for each — the only way to read a
+    /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
+    /// adapter ids exclusively.
+    breakpoints: Mutex<BreakpointMap>,
 }
 
 impl Session {
@@ -237,7 +307,7 @@ impl Session {
         program: PathBuf,
         state: SessionState,
         adapter: AdapterHandle,
-        event_tx: broadcast::Sender<Event>,
+        event_tx: broadcast::Sender<SeqEvent>,
     ) -> Self {
         Self {
             id,
@@ -250,11 +320,65 @@ impl Session {
             events: Mutex::new(EventBuffer::new(EVENT_BUFFER_CAPACITY)),
             event_tx,
             adapter,
+            last_thread_id: RwLock::new(None),
+            breakpoints: Mutex::new(BreakpointMap::default()),
         }
     }
 
     pub fn adapter(&self) -> &AdapterHandle {
         &self.adapter
+    }
+
+    /// Live events, from now on. Subscribe *before* sending the request whose
+    /// consequences you are waiting for, or the fastest ones arrive first.
+    pub fn subscribe(&self) -> broadcast::Receiver<SeqEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn last_thread_id(&self) -> Option<i64> {
+        *read(&self.last_thread_id)
+    }
+
+    pub fn set_last_thread_id(&self, thread_id: Option<i64>) {
+        if let Some(thread_id) = thread_id {
+            *write(&self.last_thread_id) = Some(thread_id);
+        }
+    }
+
+    /// Record what the adapter made of the breakpoints in one source file.
+    pub fn record_breakpoints(&self, applied: &[AdapterBreakpoint]) {
+        lock(&self.breakpoints).record(applied);
+    }
+
+    /// Our id for an adapter's id, when we gave it one.
+    pub fn breakpoint_id_for(&self, adapter_id: i64) -> Option<BreakpointId> {
+        lock(&self.breakpoints).ours(adapter_id)
+    }
+
+    /// The adapter's current opinion of one of our breakpoints.
+    pub fn breakpoint_status(&self, id: BreakpointId) -> Option<AdapterBreakpoint> {
+        lock(&self.breakpoints).status(id)
+    }
+
+    /// Fold in a `breakpoint` event so a later `break --list` reflects it.
+    pub fn update_breakpoint(&self, update: &AdapterBreakpoint) {
+        lock(&self.breakpoints).update(update);
+    }
+
+    /// Dress our persisted breakpoints in whatever the session knows about
+    /// them.
+    pub fn decorate(&self, breakpoints: Vec<lazydap_core::Breakpoint>) -> Vec<BreakpointStatus> {
+        let map = lock(&self.breakpoints);
+        breakpoints
+            .into_iter()
+            .map(|breakpoint| {
+                let mut status = BreakpointStatus::unverified(breakpoint);
+                if let Some(update) = map.status(status.breakpoint.id) {
+                    status.apply(&update);
+                }
+                status
+            })
+            .collect()
     }
 
     pub fn state(&self) -> SessionState {
@@ -275,14 +399,34 @@ impl Session {
 
     /// Record an event and offer it to any subscriber.
     ///
-    /// The buffer is what a later `lazydap status` (and M6's `--wait`) reads;
-    /// the broadcast is for clients watching live. Both, always — a client
-    /// that connects between two CLI calls should not change what the next one
-    /// sees.
+    /// The buffer is what a later `lazydap status`, `lazydap output` and the
+    /// start of a `--wait` read; the broadcast is for whoever is watching live.
+    /// Both, always — a client that connects between two CLI calls should not
+    /// change what the next one sees.
+    ///
+    /// The sequence number is assigned under the buffer lock, so the buffered
+    /// copy and the broadcast copy of an event always carry the same one.
     pub fn emit(&self, event: Event) {
-        lock(&self.events).push(event.clone());
-        // Errors here only mean nobody is listening, which is the normal case.
-        let _ = self.event_tx.send(event);
+        let sequenced = lock(&self.events).push(event);
+        // An error here only means nobody is listening, which is the normal
+        // case between CLI invocations.
+        let _ = self.event_tx.send(sequenced);
+    }
+
+    /// Everything buffered that no `--wait` has reported yet, and the sequence
+    /// number to ignore live events at or below.
+    ///
+    /// Output a program produced between two CLI invocations belongs in the
+    /// next blob — nobody has seen it, and a `continue --wait` that dropped it
+    /// would lose the reason the program is where it is.
+    pub fn take_undelivered(&self) -> (Vec<Event>, u64) {
+        lock(&self.events).take_undelivered()
+    }
+
+    /// Buffered debuggee output, optionally from a moment onwards. A read, not
+    /// a drain: `lazydap output` twice shows the same thing twice.
+    pub fn buffered_output(&self, since_ms: Option<u64>) -> (Vec<OutputChunk>, u64) {
+        lock(&self.events).output(since_ms)
     }
 
     /// End the session exactly once.
@@ -335,11 +479,15 @@ impl Session {
     }
 }
 
-/// A bounded, drop-oldest ring of events.
+/// A bounded, drop-oldest ring of events, each with its position in the
+/// session's history.
 struct EventBuffer {
-    events: VecDeque<Event>,
+    events: VecDeque<SeqEvent>,
     capacity: usize,
     dropped: u64,
+    next_seq: u64,
+    /// The highest sequence number handed to a `--wait`.
+    delivered: u64,
 }
 
 impl EventBuffer {
@@ -348,15 +496,57 @@ impl EventBuffer {
             events: VecDeque::with_capacity(capacity.min(64)),
             capacity,
             dropped: 0,
+            next_seq: 1,
+            delivered: 0,
         }
     }
 
-    fn push(&mut self, event: Event) {
+    fn push(&mut self, event: Event) -> SeqEvent {
+        let sequenced = SeqEvent {
+            seq: self.next_seq,
+            event,
+        };
+        self.next_seq += 1;
+
         if self.events.len() == self.capacity {
-            self.events.pop_front();
+            // Whatever fell off was never delivered; a wait that reports fewer
+            // events than happened must not also claim to have seen them.
+            if let Some(lost) = self.events.pop_front() {
+                self.delivered = self.delivered.max(lost.seq);
+            }
             self.dropped += 1;
         }
-        self.events.push_back(event);
+        self.events.push_back(sequenced.clone());
+        sequenced
+    }
+
+    fn take_undelivered(&mut self) -> (Vec<Event>, u64) {
+        let undelivered: Vec<Event> = self
+            .events
+            .iter()
+            .filter(|sequenced| sequenced.seq > self.delivered)
+            .map(|sequenced| sequenced.event.clone())
+            .collect();
+
+        // Up to the newest event that exists, not merely the newest one still
+        // in the buffer: anything dropped is gone, and re-reporting it later
+        // is impossible either way.
+        self.delivered = self.next_seq - 1;
+        (undelivered, self.delivered)
+    }
+
+    fn output(&self, since_ms: Option<u64>) -> (Vec<OutputChunk>, u64) {
+        let chunks = self
+            .events
+            .iter()
+            .filter_map(|sequenced| match &sequenced.event {
+                Event::Output { chunk, .. } => Some(chunk),
+                _ => None,
+            })
+            .filter(|chunk| since_ms.is_none_or(|since| chunk.timestamp_ms >= since))
+            .cloned()
+            .collect();
+        (chunks, self.dropped)
     }
 
     fn len(&self) -> usize {
@@ -366,8 +556,63 @@ impl EventBuffer {
     fn output_chunks(&self) -> usize {
         self.events
             .iter()
-            .filter(|event| matches!(event, Event::Output { .. }))
+            .filter(|sequenced| matches!(sequenced.event, Event::Output { .. }))
             .count()
+    }
+}
+
+/// Which of our breakpoints the adapter is calling what, and what it thinks of
+/// them.
+///
+/// Two directions are needed and neither is derivable from the other: an
+/// adapter id has to become ours (a `stopped` event lists the adapter's), and
+/// one of ours has to yield its current state (`break --list` wants to say
+/// whether it verified).
+#[derive(Default)]
+struct BreakpointMap {
+    by_ours: HashMap<BreakpointId, AdapterBreakpoint>,
+}
+
+impl BreakpointMap {
+    fn record(&mut self, applied: &[AdapterBreakpoint]) {
+        for breakpoint in applied {
+            if let Some(id) = breakpoint.id {
+                self.by_ours.insert(id, breakpoint.clone());
+            }
+        }
+    }
+
+    fn ours(&self, adapter_id: i64) -> Option<BreakpointId> {
+        self.by_ours
+            .iter()
+            .find(|(_, breakpoint)| breakpoint.adapter_id == Some(adapter_id))
+            .map(|(id, _)| *id)
+    }
+
+    fn status(&self, id: BreakpointId) -> Option<AdapterBreakpoint> {
+        self.by_ours.get(&id).cloned()
+    }
+
+    /// Fold in a `breakpoint` event, which arrives keyed by the adapter's id.
+    ///
+    /// An update for a breakpoint we never set — the adapter's own, or one
+    /// from a previous session — is dropped rather than invented into the map.
+    fn update(&mut self, update: &AdapterBreakpoint) {
+        let Some(adapter_id) = update.adapter_id else {
+            return;
+        };
+        let Some(ours) = self.ours(adapter_id) else {
+            return;
+        };
+        if let Some(existing) = self.by_ours.get_mut(&ours) {
+            existing.verified = update.verified;
+            if update.line.is_some() {
+                existing.line = update.line;
+            }
+            if update.message.is_some() {
+                existing.message = update.message.clone();
+            }
+        }
     }
 }
 
@@ -394,10 +639,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazydap_core::{OutputCategory, OutputChunk};
+    use lazydap_core::OutputCategory;
 
     fn state() -> Arc<DaemonState> {
-        DaemonState::new("lazydap-test".to_string())
+        let root = std::env::temp_dir().join(format!(
+            "lazydap-state-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        std::fs::create_dir_all(&root).expect("create the project root");
+        DaemonState::new(
+            "lazydap-test".to_string(),
+            ProjectStore::load(&root).expect("load the store"),
+        )
     }
 
     /// A session whose adapter has already gone — the state every session
@@ -508,17 +762,13 @@ mod tests {
     fn the_event_buffer_keeps_the_newest_events_and_counts_output() {
         let mut buffer = EventBuffer::new(2);
         let session_id = SessionId::new();
-        let output = |text: &str| Event::Output {
-            session_id,
-            chunk: OutputChunk::new(OutputCategory::Stdout, text),
-        };
 
         buffer.push(Event::SessionStarted {
             session_id,
             adapter: AdapterKind::Codelldb,
         });
-        buffer.push(output("first"));
-        buffer.push(output("second"));
+        buffer.push(output_event(session_id, "first"));
+        buffer.push(output_event(session_id, "second"));
 
         assert_eq!(buffer.len(), 2, "the buffer is capped");
         assert_eq!(buffer.dropped, 1);
@@ -527,5 +777,149 @@ mod tests {
             2,
             "the oldest event was the one dropped"
         );
+    }
+
+    #[test]
+    fn a_wait_is_told_about_output_that_arrived_before_it_started() {
+        // Output produced between two CLI invocations has no other way to
+        // reach the caller: the next `--wait` blob is the only thing it reads.
+        let session = ended_session();
+        session.emit(output_event(session.id, "printed while nobody was asking"));
+
+        let (undelivered, watermark) = session.take_undelivered();
+        assert_eq!(undelivered.len(), 1);
+        assert_eq!(watermark, 1);
+    }
+
+    #[test]
+    fn the_same_event_is_never_reported_to_two_waits() {
+        let session = ended_session();
+        session.emit(output_event(session.id, "first"));
+
+        let (first, _) = session.take_undelivered();
+        let (second, _) = session.take_undelivered();
+
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "a second wait must not re-report what the first already carried",
+        );
+    }
+
+    #[test]
+    fn the_watermark_covers_events_the_buffer_dropped_on_the_floor() {
+        // Otherwise a wait would drain the two survivors, set the watermark to
+        // their sequence, and then treat the *next* live event as old.
+        let session = Session::new(
+            SessionId::new(),
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            crate::adapter::AdapterHandle::detached(),
+            tokio::sync::broadcast::channel(16).0,
+        );
+        for index in 0..(EVENT_BUFFER_CAPACITY + 5) {
+            session.emit(output_event(session.id, &format!("line {index}")));
+        }
+
+        let (undelivered, watermark) = session.take_undelivered();
+        assert_eq!(undelivered.len(), EVENT_BUFFER_CAPACITY);
+        assert_eq!(
+            watermark,
+            (EVENT_BUFFER_CAPACITY + 5) as u64,
+            "the watermark tracks what happened, not what survived",
+        );
+    }
+
+    #[test]
+    fn output_can_be_read_from_a_moment_onwards_without_consuming_it() {
+        let session = ended_session();
+        session.emit(output_event(session.id, "old"));
+        let cutoff = lazydap_core::now_ms() + 1;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        session.emit(output_event(session.id, "new"));
+
+        let (recent, _) = session.buffered_output(Some(cutoff));
+        assert_eq!(recent.len(), 1, "got: {recent:?}");
+        assert_eq!(recent[0].output, "new");
+
+        let (all, _) = session.buffered_output(None);
+        assert_eq!(all.len(), 2, "reading must not consume");
+    }
+
+    #[test]
+    fn an_adapter_breakpoint_id_maps_back_to_ours() {
+        let session = ended_session();
+        session.record_breakpoints(&[AdapterBreakpoint {
+            id: Some(BreakpointId(7)),
+            adapter_id: Some(3),
+            verified: false,
+            line: None,
+            message: None,
+        }]);
+
+        assert_eq!(session.breakpoint_id_for(3), Some(BreakpointId(7)));
+        assert_eq!(
+            session.breakpoint_id_for(99),
+            None,
+            "an id we never set must not resolve to one we did",
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_event_updates_what_a_later_list_reports() {
+        // codelldb verifies lazily: the response says false, an event says
+        // true and moves the line. A `break --list` afterwards has to agree
+        // with the debugger, not with the request we sent.
+        let session = ended_session();
+        session.record_breakpoints(&[AdapterBreakpoint {
+            id: Some(BreakpointId(1)),
+            adapter_id: Some(5),
+            verified: false,
+            line: None,
+            message: None,
+        }]);
+
+        session.update_breakpoint(&AdapterBreakpoint {
+            id: None,
+            adapter_id: Some(5),
+            verified: true,
+            line: Some(21),
+            message: None,
+        });
+
+        let decorated = session.decorate(vec![lazydap_core::Breakpoint {
+            id: BreakpointId(1),
+            source: PathBuf::from("/tmp/main.c"),
+            line: 19,
+            column: None,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+            enabled: true,
+        }]);
+
+        assert!(decorated[0].verified);
+        assert_eq!(decorated[0].effective_line(), 21);
+    }
+
+    #[test]
+    fn an_update_for_a_breakpoint_we_never_set_is_ignored() {
+        let session = ended_session();
+        session.update_breakpoint(&AdapterBreakpoint {
+            id: None,
+            adapter_id: Some(404),
+            verified: true,
+            line: Some(1),
+            message: None,
+        });
+        assert_eq!(session.breakpoint_id_for(404), None);
+    }
+
+    fn output_event(session_id: SessionId, text: &str) -> Event {
+        Event::Output {
+            session_id,
+            chunk: OutputChunk::new(OutputCategory::Stdout, text),
+        }
     }
 }

@@ -219,7 +219,10 @@ mod tests {
         )
         .expect("parse");
         let (_, next_id) = document.into_memory(Path::new("/p"));
-        assert_eq!(next_id, 10, "the counter cannot go backwards past a live id");
+        assert_eq!(
+            next_id, 10,
+            "the counter cannot go backwards past a live id"
+        );
     }
 
     #[test]

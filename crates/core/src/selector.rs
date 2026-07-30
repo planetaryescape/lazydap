@@ -15,7 +15,10 @@ pub enum BreakpointSelector {
     /// what it asked for against what came back.
     Ids(Vec<BreakpointId>),
     /// Everything at one `file:line`.
-    Location { source: PathBuf, line: u32 },
+    Location {
+        source: PathBuf,
+        line: u32,
+    },
     /// Every breakpoint in one file.
     Source(PathBuf),
     All,
@@ -84,7 +87,8 @@ mod tests {
 
     #[test]
     fn ids_pick_exactly_what_was_named() {
-        let picked = BreakpointSelector::Ids(vec![BreakpointId(1), BreakpointId(3)]).pick(&fixture());
+        let picked =
+            BreakpointSelector::Ids(vec![BreakpointId(1), BreakpointId(3)]).pick(&fixture());
         let ids: Vec<u32> = picked.iter().map(|breakpoint| breakpoint.id.0).collect();
         assert_eq!(ids, vec![1, 3]);
     }

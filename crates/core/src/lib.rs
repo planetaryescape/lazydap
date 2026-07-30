@@ -15,11 +15,11 @@ pub use breakpoint::{
     AdapterBreakpoint, BadLocation, Breakpoint, BreakpointId, BreakpointStatus, Location,
     NewBreakpoint,
 };
-pub use selector::BreakpointSelector;
 pub use inspect::{
-    EvalContext, EvalResult, Scope, SourceRef, StackFrame, StepKind, ThreadInfo, ThreadUpdate,
-    ThreadUpdateKind, Variable, VariableFilter, WaitOutcome,
+    BadValue, EvalContext, EvalResult, Scope, SourceRef, StackFrame, StepKind, ThreadInfo,
+    ThreadUpdate, ThreadUpdateKind, Variable, VariableFilter, WaitOutcome,
 };
+pub use selector::BreakpointSelector;
 pub use session::{
     AdapterKind, EndReason, OutputCategory, OutputChunk, PauseReason, SessionId, SessionState,
     UnknownAdapter, now_ms,

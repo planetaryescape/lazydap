@@ -16,11 +16,13 @@ pub mod instance;
 pub mod output;
 pub mod server;
 pub mod state;
+pub mod wait;
 
 use clap::Parser;
 use cli::{Cli, Command};
 use error::{CliError, Result};
 use instance::Instance;
+use lazydap_core::StepKind;
 use output::{OutputFormat, resolve_format};
 use std::process::ExitCode;
 
@@ -31,12 +33,7 @@ const LOG_ENV: &str = "LAZYDAP_LOG";
 pub async fn run_cli(args: Vec<String>) -> ExitCode {
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(error) => {
-            let _ = error.print();
-            // Help and version are successes that happen to print; everything
-            // else clap rejects is a usage error, which is exit 2.
-            return ExitCode::from(if error.use_stderr() { 2 } else { 0 });
-        }
+        Err(error) => return report_usage_error(&error, &args),
     };
 
     let format = resolve_format(cli.format);
@@ -59,23 +56,37 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
         return Ok(());
     };
 
+    // Two commands are pure output and must not start anything. Resolving an
+    // instance is harmless, but `lazydap completions bash` in a shell profile
+    // should not so much as look for a runtime directory.
+    match command {
+        Command::Version => return commands::diagnostics::version(format),
+        Command::Completions { shell } => return commands::diagnostics::completions(shell),
+        _ => {}
+    }
+
     let instance = Instance::resolve(cli.instance.as_deref())?;
+    use commands::{breakpoints, diagnostics, inspect, session};
 
     match command {
+        Command::Version | Command::Completions { .. } => unreachable!("handled above"),
         Command::Daemon { .. } => server::run_daemon(instance).await,
+
         Command::Launch {
             program,
             stop_on_entry,
             cwd,
+            env,
             adapter,
             args,
         } => {
-            commands::launch(
+            session::launch(
                 &instance,
-                commands::LaunchOptions {
+                session::LaunchOptions {
                     program,
                     args,
                     cwd,
+                    env,
                     adapter,
                     stop_on_entry,
                 },
@@ -83,13 +94,182 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             )
             .await
         }
-        Command::Status => commands::status(&instance, format).await,
+        Command::Status => session::status(&instance, format).await,
         Command::Disconnect {
             session_id,
             no_terminate,
-        } => commands::disconnect(&instance, session_id, !no_terminate, format).await,
-        Command::Shutdown => commands::shutdown(&instance, format).await,
+            dry_run,
+        } => session::disconnect(&instance, session_id, !no_terminate, dry_run, format).await,
+        Command::Shutdown { dry_run } => session::shutdown(&instance, dry_run, format).await,
+
+        Command::Continue {
+            wait,
+            all_threads,
+            thread,
+        } => {
+            session::step(
+                &instance,
+                session::Movement::Continue { all_threads },
+                thread,
+                &wait,
+                format,
+            )
+            .await
+        }
+        Command::Step { wait, thread } => {
+            session::step(
+                &instance,
+                session::Movement::Step(StepKind::Over),
+                thread,
+                &wait,
+                format,
+            )
+            .await
+        }
+        Command::StepIn { wait, thread } => {
+            session::step(
+                &instance,
+                session::Movement::Step(StepKind::In),
+                thread,
+                &wait,
+                format,
+            )
+            .await
+        }
+        Command::StepOut { wait, thread } => {
+            session::step(
+                &instance,
+                session::Movement::Step(StepKind::Out),
+                thread,
+                &wait,
+                format,
+            )
+            .await
+        }
+        Command::Pause { wait, thread } => {
+            session::step(&instance, session::Movement::Pause, thread, &wait, format).await
+        }
+
+        Command::Break {
+            location,
+            list,
+            remove,
+            toggle,
+            ids,
+            all,
+            condition,
+            hit_condition,
+            log_message,
+            disabled,
+            dry_run,
+        } => {
+            breakpoints::run(
+                &instance,
+                breakpoints::BreakArgs {
+                    location,
+                    list,
+                    remove,
+                    toggle,
+                    ids,
+                    all,
+                    condition,
+                    hit_condition,
+                    log_message,
+                    disabled,
+                    dry_run,
+                },
+                format,
+            )
+            .await
+        }
+
+        Command::Stack {
+            thread,
+            levels,
+            start,
+        } => inspect::stack(&instance, thread, start, levels, format).await,
+        Command::Scopes { frame } => inspect::scopes(&instance, frame, format).await,
+        Command::Variables {
+            reference,
+            filter,
+            start,
+            count,
+        } => inspect::variables(&instance, reference, filter, start, count, format).await,
+        Command::Eval {
+            expression,
+            frame,
+            context,
+        } => inspect::eval(&instance, &expression, frame, context, format).await,
+        Command::Threads => inspect::threads(&instance, format).await,
+        Command::Output { since } => inspect::output(&instance, since, format).await,
+
+        Command::Logs {
+            limit,
+            level,
+            follow,
+            purge,
+        } => diagnostics::logs(&instance, limit, level, follow, purge, format).await,
+        Command::Doctor {
+            check_adapters,
+            check_state,
+        } => diagnostics::doctor(&instance, check_adapters, check_state, format).await,
     }
+}
+
+/// Report a command line clap refused, in the shape the caller can read.
+///
+/// clap writes its own errors, and they are good ones — for a person. A script
+/// that asked for `--format json` gets JSON on stderr instead, in the same
+/// shape as every other lazydap error, so one parser handles both "the daemon
+/// said no" and "that is not a flag".
+///
+/// The flag is read out of the raw arguments because there is no parsed `Cli`
+/// to consult: parsing is what failed. That leaves one gap — a caller who set
+/// no `--format` and is on a terminal gets clap's human text, which is the
+/// right answer for a person anyway.
+fn report_usage_error(error: &clap::Error, args: &[String]) -> ExitCode {
+    // Help and version are successes that happen to print, and they go to
+    // stdout as themselves whatever the format.
+    if !error.use_stderr() {
+        let _ = error.print();
+        return ExitCode::SUCCESS;
+    }
+
+    if !wants_machine_output(args) {
+        let _ = error.print();
+        return ExitCode::from(error::exit::USAGE);
+    }
+
+    // `render` gives the message without clap's ANSI colouring, which would
+    // otherwise land in the middle of a JSON string.
+    let message = error.render().to_string();
+    let body = serde_json::json!({
+        "error": "UsageError",
+        "message": message.trim(),
+        "details": { "kind": format!("{:?}", error.kind()) },
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string(&body).unwrap_or_else(|_| r#"{"error":"UsageError"}"#.to_string()),
+    );
+    ExitCode::from(error::exit::USAGE)
+}
+
+/// Whether the caller asked for machine-readable output, judged from the raw
+/// arguments and where stdout is going.
+fn wants_machine_output(args: &[String]) -> bool {
+    use std::io::IsTerminal;
+
+    let explicit = args.windows(2).any(|pair| {
+        pair[0] == "--format" && matches!(pair[1].as_str(), "json" | "jsonl" | "csv" | "ids")
+    }) || args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--format=json" | "--format=jsonl" | "--format=csv" | "--format=ids"
+        )
+    });
+
+    explicit || !std::io::stdout().is_terminal()
 }
 
 /// Structured logging from the first thing `main` does (D015).
@@ -126,14 +306,19 @@ fn init_tracing(is_daemon: bool) {
     let _ = subscriber.try_init();
 }
 
+/// Errors go to stderr in whichever dialect the caller reads.
+///
+/// Every machine format gets the JSON object: `--format csv` says how to print
+/// a *result*, and an error is not one. What matters is that a caller parsing
+/// anything at all gets something parseable rather than a sentence.
 fn report(error: &CliError, format: OutputFormat) {
     match format {
-        OutputFormat::Json => eprintln!(
+        OutputFormat::Table => eprintln!("error: {:#}", error.source),
+        _ => eprintln!(
             "{}",
             serde_json::to_string(&error.as_json())
                 .unwrap_or_else(|_| format!(r#"{{"error":"{}"}}"#, error.label))
         ),
-        OutputFormat::Table => eprintln!("error: {:#}", error.source),
     }
 }
 

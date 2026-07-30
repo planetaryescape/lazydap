@@ -10,14 +10,18 @@
 //! 2. Nothing here uses a shared read loop. The handshake owns the whole
 //!    transport, and hands it to the pump only once the session is live.
 
-use super::{AdapterError, AdapterHandle, Pending, Result, discover};
-use lazydap_core::{AdapterKind, OutputCategory, OutputChunk, PauseReason, SessionState};
+use super::{AdapterError, AdapterHandle, Pending, Result, discover, translate};
+use lazydap_core::{
+    AdapterBreakpoint, AdapterKind, Breakpoint, OutputCategory, OutputChunk, PauseReason,
+    SessionState,
+};
 use lazydap_dap::{
     Capabilities, ConfigurationDoneArgs, DapEvent, DapReader, DapTransport, Incoming,
-    InitializeArgs, LaunchArgs,
+    InitializeArgs, LaunchArgs, SetBreakpointsArgs, SetBreakpointsResponse, Source,
 };
 use lazydap_protocol::{AdapterCapabilities, LaunchRequest};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -37,7 +41,11 @@ pub struct Launched {
     pub capabilities: AdapterCapabilities,
     pub state: SessionState,
     pub reason: Option<PauseReason>,
+    /// What the adapter called the stop, when we renamed it (quirk 6).
+    pub raw_reason: Option<String>,
     pub thread_id: Option<i64>,
+    /// What the adapter made of the breakpoints applied during configuration.
+    pub breakpoints: Vec<AdapterBreakpoint>,
     /// Set when the debuggee finished during its own launch.
     pub exit_code: Option<i32>,
     /// Debuggee output produced before the pump took over. Seeded into the
@@ -54,11 +62,19 @@ pub struct PumpStart {
 }
 
 /// Start `request.program` under codelldb and wait for it to settle.
-pub async fn launch(request: &LaunchRequest) -> Result<Launched> {
+///
+/// `breakpoints` are the project's, grouped by source file. They go in during
+/// the configuration phase — after `initialized`, before `configurationDone` —
+/// which is the only window DAP gives for breakpoints that must be live before
+/// the first instruction runs.
+pub async fn launch(
+    request: &LaunchRequest,
+    breakpoints: &[(PathBuf, Vec<Breakpoint>)],
+) -> Result<Launched> {
     let adapter_path = discover(AdapterKind::Codelldb)?;
     let mut transport = DapTransport::spawn(&adapter_path.to_string_lossy()).await?;
 
-    match handshake(&mut transport, request).await {
+    match handshake(&mut transport, request, breakpoints).await {
         Ok(outcome) => {
             let (reader, writer) = transport.split();
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -68,7 +84,9 @@ pub async fn launch(request: &LaunchRequest) -> Result<Launched> {
                 capabilities: outcome.capabilities,
                 state: outcome.state,
                 reason: outcome.reason,
+                raw_reason: outcome.raw_reason,
                 thread_id: outcome.thread_id,
+                breakpoints: outcome.breakpoints,
                 exit_code: outcome.exit_code,
                 output: outcome.output,
             })
@@ -87,12 +105,18 @@ struct Outcome {
     capabilities: AdapterCapabilities,
     state: SessionState,
     reason: Option<PauseReason>,
+    raw_reason: Option<String>,
     thread_id: Option<i64>,
+    breakpoints: Vec<AdapterBreakpoint>,
     exit_code: Option<i32>,
     output: Vec<OutputChunk>,
 }
 
-async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Result<Outcome> {
+async fn handshake(
+    transport: &mut DapTransport,
+    request: &LaunchRequest,
+    breakpoints: &[(PathBuf, Vec<Breakpoint>)],
+) -> Result<Outcome> {
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
 
     let capabilities: Capabilities = with_timeout(
@@ -108,21 +132,30 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
     tracing::debug!(target: "daemon.session", program = %request.program.display(), "launch sent");
 
     let mut configuration_done_seq: Option<i64> = None;
+    // Which source each outstanding `setBreakpoints` was for, so its response
+    // can be paired back up with what we asked for.
+    let mut breakpoint_seqs: HashMap<i64, usize> = HashMap::new();
     let mut launch_answered = false;
     let mut outcome = Outcome {
         capabilities: translate_capabilities(&capabilities),
         state: SessionState::Running,
         reason: None,
+        raw_reason: None,
         thread_id: None,
-        exit_code: None,
+        breakpoints: Vec::new(),
+        exit_code: Option::None,
         output: Vec::new(),
     };
 
     loop {
         // Waiting for a `stopped` we asked for is not optional: a caller that
         // said `--stop-on-entry` and got "running" back would be lied to.
+        // Neither is waiting for the breakpoints: reporting a launch as ready
+        // while the adapter has not answered whether the breakpoints took
+        // would make `verified` a race.
         let settled = launch_answered
             && configuration_done_seq.is_some()
+            && breakpoint_seqs.is_empty()
             && (!request.stop_on_entry || outcome.reason.is_some());
         if settled || outcome.state == SessionState::Terminated {
             return Ok(outcome);
@@ -130,7 +163,20 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
 
         match with_timeout("adapter message", deadline, transport.read_incoming()).await?? {
             Incoming::Event(event) => match event.event.as_str() {
+                // The configuration window. Breakpoints first, then
+                // `configurationDone` — in that order on the wire, because
+                // that order is what makes them live before the first
+                // instruction runs.
                 "initialized" => {
+                    for (index, (source, in_source)) in breakpoints.iter().enumerate() {
+                        let seq = transport
+                            .send_request(
+                                "setBreakpoints",
+                                &set_breakpoints_args(source, in_source),
+                            )
+                            .await?;
+                        breakpoint_seqs.insert(seq, index);
+                    }
                     configuration_done_seq = Some(
                         transport
                             .send_request("configurationDone", &ConfigurationDoneArgs {})
@@ -140,10 +186,14 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
                 "output" => outcome.output.extend(output_chunk(&event)),
                 "stopped" => {
                     let body = event.body.unwrap_or_default();
+                    let raw = body["reason"].as_str().unwrap_or("unknown");
+                    let description = body["description"].as_str().unwrap_or_default();
+
                     outcome.state = SessionState::Paused;
-                    outcome.reason = Some(PauseReason::from(
-                        body["reason"].as_str().unwrap_or("unknown"),
-                    ));
+                    let (reason, raw_reason) =
+                        normalise_stop(raw, description, request.stop_on_entry);
+                    outcome.reason = Some(reason);
+                    outcome.raw_reason = raw_reason;
                     outcome.thread_id = body["threadId"].as_i64();
                 }
                 // A program short enough to finish during its own launch is
@@ -176,6 +226,11 @@ async fn handshake(transport: &mut DapTransport, request: &LaunchRequest) -> Res
                 if response.request_seq == launch_seq {
                     launch_answered = true;
                 }
+                if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
+                    outcome
+                        .breakpoints
+                        .extend(applied_breakpoints(&breakpoints[index].1, response.body));
+                }
             }
         }
     }
@@ -206,6 +261,85 @@ async fn drain_for_exit_code(transport: &mut DapTransport, outcome: &mut Outcome
                 "output" => outcome.output.extend(output_chunk(&event)),
                 _ => {}
             }
+        }
+    }
+}
+
+/// What lazydap calls a stop, and what the adapter called it if those differ.
+///
+/// codelldb implements entry-stop by letting the process start and sending it
+/// `SIGSTOP`; LLDB classifies a signal stop as an exception, so a launch that
+/// did exactly what was asked reports `reason: "exception"`
+/// (`docs/reference/codelldb-quirks.md`, quirk 6). An agent reading that
+/// concludes the program crashed before `main`.
+///
+/// So the first stop of a `--stop-on-entry` launch, and only that one, is
+/// renamed to `entry` — and the adapter's own word is kept in `raw_reason`,
+/// so the normalisation is visible rather than a quiet substitution (D033).
+/// The guard is deliberately narrow: a real exception at the entry point
+/// would not carry `SIGSTOP`, and every later stop passes through untouched.
+fn normalise_stop(
+    raw: &str,
+    description: &str,
+    stop_on_entry: bool,
+) -> (PauseReason, Option<String>) {
+    let reason = PauseReason::from(raw);
+    let is_entry_signal =
+        matches!(reason, PauseReason::Exception) && description.contains("SIGSTOP");
+
+    if stop_on_entry && is_entry_signal {
+        tracing::debug!(
+            target: "daemon.session",
+            raw_reason = raw,
+            description,
+            "reporting codelldb's SIGSTOP entry stop as `entry` (quirk 6)",
+        );
+        return (PauseReason::Entry, Some(raw.to_string()));
+    }
+    (reason, None)
+}
+
+fn set_breakpoints_args(
+    source: &std::path::Path,
+    breakpoints: &[Breakpoint],
+) -> SetBreakpointsArgs {
+    SetBreakpointsArgs {
+        source: Source {
+            path: source.to_string_lossy().into_owned(),
+            name: source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        },
+        breakpoints: breakpoints
+            .iter()
+            .map(translate::source_breakpoint)
+            .collect(),
+        source_modified: None,
+    }
+}
+
+/// Read a `setBreakpoints` response body, or report nothing rather than
+/// failing the launch.
+///
+/// A launch that succeeded should not be thrown away because the adapter
+/// described its breakpoints oddly: the program is running, and unverified
+/// breakpoints are visible in `break --list` either way.
+fn applied_breakpoints(
+    requested: &[Breakpoint],
+    body: Option<serde_json::Value>,
+) -> Vec<AdapterBreakpoint> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    match serde_json::from_value::<SetBreakpointsResponse>(body) {
+        Ok(response) => translate::reconcile_breakpoints(requested, response.breakpoints),
+        Err(error) => {
+            tracing::warn!(
+                target: "daemon.session",
+                %error,
+                "could not read the adapter's setBreakpoints answer",
+            );
+            Vec::new()
         }
     }
 }
@@ -312,6 +446,71 @@ mod tests {
         assert_eq!(chunk.category, OutputCategory::Stdout);
         assert_eq!(chunk.output, "hello\n");
         assert!(chunk.category.is_debuggee());
+    }
+
+    #[test]
+    fn a_sigstop_entry_pause_is_reported_as_entry_with_the_adapter_s_word_kept() {
+        // Quirk 6: this is what codelldb actually sends for a stop-on-entry
+        // launch on macOS. An agent reading "exception" concludes the program
+        // crashed before main.
+        let (reason, raw) = normalise_stop("exception", "signal SIGSTOP", true);
+        assert_eq!(reason, PauseReason::Entry);
+        assert_eq!(raw.as_deref(), Some("exception"), "nothing is hidden");
+    }
+
+    #[test]
+    fn a_real_exception_at_the_entry_point_is_still_an_exception() {
+        let (reason, raw) = normalise_stop("exception", "EXC_BAD_ACCESS", true);
+        assert_eq!(reason, PauseReason::Exception);
+        assert_eq!(raw, None, "nothing was renamed, so nothing to disclose");
+    }
+
+    #[test]
+    fn a_sigstop_stop_nobody_asked_for_is_left_alone() {
+        // Without `--stop-on-entry` a SIGSTOP is somebody else's doing, and
+        // calling it an entry stop would be an invention.
+        let (reason, raw) = normalise_stop("exception", "signal SIGSTOP", false);
+        assert_eq!(reason, PauseReason::Exception);
+        assert_eq!(raw, None);
+    }
+
+    #[test]
+    fn an_adapter_that_follows_the_spec_needs_no_normalising() {
+        let (reason, raw) = normalise_stop("entry", "", true);
+        assert_eq!(reason, PauseReason::Entry);
+        assert_eq!(raw, None);
+    }
+
+    #[test]
+    fn breakpoints_are_sent_with_the_source_named_as_well_as_pathed() {
+        let breakpoints = [Breakpoint {
+            id: lazydap_core::BreakpointId(1),
+            source: PathBuf::from("/tmp/main.c"),
+            line: 19,
+            column: None,
+            condition: Some("x > 5".into()),
+            hit_condition: None,
+            log_message: None,
+            enabled: true,
+        }];
+        let json = serde_json::to_string(&set_breakpoints_args(
+            std::path::Path::new("/tmp/main.c"),
+            &breakpoints,
+        ))
+        .expect("serialise");
+
+        assert!(json.contains(r#""path":"/tmp/main.c""#), "got: {json}");
+        assert!(json.contains(r#""name":"main.c""#), "got: {json}");
+        assert!(json.contains(r#""condition":"x > 5""#), "got: {json}");
+    }
+
+    #[test]
+    fn a_launch_survives_an_unreadable_set_breakpoints_answer() {
+        let applied = applied_breakpoints(&[], Some(serde_json::json!({ "nonsense": true })));
+        assert!(
+            applied.is_empty(),
+            "the program is running; throwing the launch away over this would be worse",
+        );
     }
 
     #[test]

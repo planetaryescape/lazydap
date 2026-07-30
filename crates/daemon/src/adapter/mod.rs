@@ -14,10 +14,21 @@
 
 pub mod codelldb;
 mod pump;
+mod translate;
 
-use lazydap_core::AdapterKind;
-use lazydap_dap::{DapResponse, DapWriter, TransportError};
+use lazydap_core::{
+    AdapterBreakpoint, AdapterKind, Breakpoint, EvalContext, EvalResult, Scope, StackFrame,
+    StepKind, ThreadInfo, Variable, VariableFilter,
+};
+use lazydap_dap::{
+    ContinueArgs, ContinueResponse, DapResponse, DapWriter, DisconnectArgs, EvaluateArgs,
+    EvaluateResponse, PauseArgs, ScopesArgs, ScopesResponse, SetBreakpointsArgs,
+    SetBreakpointsResponse, Source, StackTraceArgs, StackTraceResponse, StepArgs, ThreadsResponse,
+    TransportError, VariablesArgs, VariablesResponse,
+};
 use lazydap_protocol::{ErrorCode, IpcError};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -52,6 +63,13 @@ pub enum AdapterError {
     #[error("the adapter rejected `{command}`: {message}")]
     Rejected { command: String, message: String },
 
+    #[error("the adapter's `{command}` answer was not the shape DAP describes: {source}")]
+    Malformed {
+        command: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("dap transport: {0}")]
     Transport(#[from] TransportError),
 }
@@ -85,6 +103,11 @@ impl AdapterError {
                     "adapter_message": message,
                 }),
             ),
+            Self::Malformed { ref command, .. } => {
+                let message = self.to_string();
+                IpcError::new(ErrorCode::DapProtocolError, message)
+                    .with_details(serde_json::json!({ "command": command }))
+            }
             Self::Transport(_) => IpcError::new(ErrorCode::AdapterCrashed, self.to_string()),
         }
     }
@@ -105,13 +128,24 @@ pub struct AdapterHandle {
     /// its response — serialising the writer alone would still let two be in
     /// flight at once.
     ///
-    /// M5's only adapter request is `disconnect`, which is execution-class, so
-    /// every request takes the permit today. M6 adds `continue`/`step`/`pause`
-    /// (execution, keep the permit) alongside `eval`/`scopes`/`stackTrace`
-    /// (not execution, and safe to run concurrently — they should take the
-    /// writer and skip this).
+    /// The permit covers the DAP request and its acknowledgement, and stops
+    /// there. A `continue --wait` goes on waiting for events without it, which
+    /// it has to: `pause` is itself an execution request, and holding the
+    /// permit for the whole wait would mean the one command that interrupts a
+    /// runaway program queues behind the program.
     execution: Mutex<()>,
     pending: Pending,
+}
+
+/// Whether a request moves the program or merely asks it about itself.
+///
+/// Only the first kind queues. Inspection is safe to run concurrently: it is
+/// synchronous within a stable state, and serialising it would make a stack
+/// query wait behind whatever else was going on for no reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Execution,
+    Query,
 }
 
 impl AdapterHandle {
@@ -137,12 +171,35 @@ impl AdapterHandle {
         }
     }
 
-    /// Send one execution request and wait for its response.
+    /// Send one request and wait for its response, typed both ways.
+    async fn call<A: Serialize, R: DeserializeOwned>(
+        &self,
+        command: &str,
+        args: &A,
+        class: Class,
+    ) -> Result<R> {
+        let body = self.request(command, args, class).await?;
+        serde_json::from_value(body).map_err(|source| AdapterError::Malformed {
+            command: command.to_string(),
+            source,
+        })
+    }
+
+    /// Send one request and wait for its response.
     ///
-    /// The permit is taken first and held for the whole cycle; see the field
-    /// comment on `execution` for why the writer lock alone is not enough.
-    async fn request(&self, command: &str, args: serde_json::Value) -> Result<serde_json::Value> {
-        let _permit = self.execution.lock().await;
+    /// An execution request takes the permit first and holds it for the whole
+    /// cycle; see the field comment on `execution` for why the writer lock
+    /// alone is not enough.
+    async fn request<A: Serialize>(
+        &self,
+        command: &str,
+        args: &A,
+        class: Class,
+    ) -> Result<serde_json::Value> {
+        let _permit = match class {
+            Class::Execution => Some(self.execution.lock().await),
+            Class::Query => None,
+        };
 
         let receiver = {
             let mut writer = self.writer.lock().await;
@@ -155,7 +212,7 @@ impl AdapterHandle {
             // the write is what unblocks it.
             let mut pending = self.pending.lock().await;
             let (sender, receiver) = oneshot::channel();
-            let seq = writer.send_request(command, &args).await?;
+            let seq = writer.send_request(command, args).await?;
             pending.insert(seq, sender);
             receiver
         };
@@ -182,14 +239,178 @@ impl AdapterHandle {
         Ok(response.body.unwrap_or(serde_json::Value::Null))
     }
 
+    // --- Execution. One at a time, per D021. ---
+
+    /// Resume. Answers as soon as the adapter acknowledges — the program is
+    /// running by then, and what it does next arrives as events.
+    pub async fn resume(&self, thread_id: i64) -> Result<bool> {
+        let response: ContinueResponse = self
+            .call("continue", &ContinueArgs { thread_id }, Class::Execution)
+            .await?;
+        Ok(response.all_threads_continued)
+    }
+
+    pub async fn step(&self, kind: StepKind, thread_id: i64) -> Result<()> {
+        self.request(
+            translate::step_command(kind),
+            &StepArgs {
+                thread_id,
+                granularity: None,
+            },
+            Class::Execution,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Ask the program to stop. The stop itself arrives as an event later, or
+    /// not at all if the program ended in the meantime.
+    pub async fn interrupt(&self, thread_id: i64) -> Result<()> {
+        self.request("pause", &PauseArgs { thread_id }, Class::Execution)
+            .await?;
+        Ok(())
+    }
+
     /// End the debug session, optionally killing the debuggee with it.
     pub async fn disconnect(&self, terminate: bool) -> Result<()> {
         self.request(
             "disconnect",
-            serde_json::json!({ "terminateDebuggee": terminate }),
+            &DisconnectArgs {
+                terminate_debuggee: terminate,
+            },
+            Class::Execution,
         )
         .await?;
         Ok(())
+    }
+
+    // --- Inspection. Safe concurrently, within a stable state. ---
+
+    pub async fn threads(&self) -> Result<Vec<ThreadInfo>> {
+        let response: ThreadsResponse = self
+            .call("threads", &serde_json::json!({}), Class::Query)
+            .await?;
+        Ok(response
+            .threads
+            .into_iter()
+            .map(translate::thread_info)
+            .collect())
+    }
+
+    /// Frames, newest first, plus the total when the adapter knows it.
+    pub async fn stack_trace(
+        &self,
+        thread_id: i64,
+        start_frame: Option<u32>,
+        levels: Option<u32>,
+    ) -> Result<(Vec<StackFrame>, Option<u32>)> {
+        let response: StackTraceResponse = self
+            .call(
+                "stackTrace",
+                &StackTraceArgs {
+                    thread_id,
+                    start_frame,
+                    levels,
+                },
+                Class::Query,
+            )
+            .await?;
+
+        let frames = response
+            .stack_frames
+            .into_iter()
+            .map(translate::stack_frame)
+            .collect();
+        Ok((frames, response.total_frames))
+    }
+
+    pub async fn scopes(&self, frame_id: i64) -> Result<Vec<Scope>> {
+        let response: ScopesResponse = self
+            .call("scopes", &ScopesArgs { frame_id }, Class::Query)
+            .await?;
+        Ok(response.scopes.into_iter().map(translate::scope).collect())
+    }
+
+    pub async fn variables(
+        &self,
+        variables_reference: i64,
+        filter: VariableFilter,
+        start: Option<u32>,
+        count: Option<u32>,
+    ) -> Result<Vec<Variable>> {
+        let response: VariablesResponse = self
+            .call(
+                "variables",
+                &VariablesArgs {
+                    variables_reference,
+                    filter: filter.as_dap().map(str::to_string),
+                    start,
+                    count,
+                },
+                Class::Query,
+            )
+            .await?;
+        Ok(response
+            .variables
+            .into_iter()
+            .map(translate::variable)
+            .collect())
+    }
+
+    pub async fn evaluate(
+        &self,
+        expression: &str,
+        frame_id: Option<i64>,
+        context: EvalContext,
+    ) -> Result<EvalResult> {
+        let response: EvaluateResponse = self
+            .call(
+                "evaluate",
+                &EvaluateArgs {
+                    expression: expression.to_string(),
+                    frame_id,
+                    context: Some(context.as_str().to_string()),
+                },
+                Class::Query,
+            )
+            .await?;
+        Ok(translate::eval_result(response))
+    }
+
+    /// Tell the adapter about every breakpoint in one source file.
+    ///
+    /// The whole file, every time: `setBreakpoints` *replaces* a source's list
+    /// rather than adding to it, so sending only the new one silently removes
+    /// the rest. See `docs/reference/dap-protocol-cheatsheet.md`.
+    pub async fn set_breakpoints(
+        &self,
+        source: &Path,
+        breakpoints: &[Breakpoint],
+    ) -> Result<Vec<AdapterBreakpoint>> {
+        let response: SetBreakpointsResponse = self
+            .call(
+                "setBreakpoints",
+                &SetBreakpointsArgs {
+                    source: Source {
+                        path: source.to_string_lossy().into_owned(),
+                        name: source
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned()),
+                    },
+                    breakpoints: breakpoints
+                        .iter()
+                        .map(translate::source_breakpoint)
+                        .collect(),
+                    source_modified: None,
+                },
+                Class::Query,
+            )
+            .await?;
+
+        Ok(translate::reconcile_breakpoints(
+            breakpoints,
+            response.breakpoints,
+        ))
     }
 
     /// Kill the adapter process and reap it.

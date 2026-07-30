@@ -197,7 +197,7 @@ pub(crate) async fn shut_down_other_daemon(socket: &Path, peer_version: u32) -> 
             .send(IpcMessage {
                 version: peer_version,
                 id: 1,
-                payload: IpcPayload::Request(Request::Shutdown),
+                payload: IpcPayload::Request(Request::Shutdown { dry_run: false }),
             })
             .await;
     }

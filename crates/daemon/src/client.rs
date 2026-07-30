@@ -66,21 +66,35 @@ impl DaemonClient {
 
     /// Send one request and wait for the response with the same id.
     pub async fn request(&mut self, request: Request) -> Result<Response> {
+        self.request_within(request, REQUEST_TIMEOUT).await
+    }
+
+    /// The same, for a request the caller knows will take a while.
+    ///
+    /// `continue --wait --timeout 300` asks the daemon to block for five
+    /// minutes; a client that gave up after its own sixty seconds would report
+    /// a timeout that never happened and abandon a perfectly healthy wait.
+    pub async fn request_within(
+        &mut self,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<Response> {
         let id = self.next_id;
         self.next_id += 1;
+        let request_timeout = timeout;
 
         self.connection
             .send(IpcMessage::request(id, request))
             .await?;
 
-        let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + request_timeout;
         loop {
             let message = tokio::time::timeout_at(deadline, self.connection.recv())
                 .await
                 .map_err(|_| {
                     CliError::general(anyhow::anyhow!(
                         "the daemon did not answer within {}s",
-                        REQUEST_TIMEOUT.as_secs()
+                        request_timeout.as_secs()
                     ))
                 })?
                 .map_err(|source| classify_read_error(source, id))?

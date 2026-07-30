@@ -178,6 +178,22 @@ impl fmt::Display for EvalContext {
     }
 }
 
+impl std::str::FromStr for EvalContext {
+    type Err = BadValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "repl" => Ok(Self::Repl),
+            "watch" => Ok(Self::Watch),
+            "hover" => Ok(Self::Hover),
+            other => Err(BadValue {
+                value: other.to_string(),
+                expected: "repl, watch or hover",
+            }),
+        }
+    }
+}
+
 /// Which half of a container to fetch. Big arrays are paged by index; structs
 /// are named.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +216,38 @@ impl VariableFilter {
         }
     }
 }
+
+impl std::str::FromStr for VariableFilter {
+    type Err = BadValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "named" => Ok(Self::Named),
+            "indexed" => Ok(Self::Indexed),
+            other => Err(BadValue {
+                value: other.to_string(),
+                expected: "all, named or indexed",
+            }),
+        }
+    }
+}
+
+/// A command-line value that is not one of the ones there are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadValue {
+    pub value: String,
+    /// What would have been accepted, phrased for a person reading an error.
+    pub expected: &'static str,
+}
+
+impl fmt::Display for BadValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}` is not one of {}", self.value, self.expected)
+    }
+}
+
+impl std::error::Error for BadValue {}
 
 /// How a `--wait` ended.
 ///
