@@ -389,6 +389,32 @@ impl Session {
         *write(&self.state) = state;
     }
 
+    /// Undo a state this code wrote, and only if nothing has moved on since.
+    ///
+    /// A failed execution request wants to put the session back the way it
+    /// found it. It must not do that blindly: the adapter can execute a
+    /// `continue`, emit `terminated`, and die before acknowledging, so by the
+    /// time the failure is handled the pump may have recorded a real ending.
+    /// Stamping `paused` over that leaves a dead session looking live, which
+    /// then refuses every later `launch` for a program that is not there.
+    ///
+    /// Compare-and-set under one lock: replaces `expected` with `previous`, or
+    /// does nothing. Returns whether it did.
+    pub fn restore_state(&self, expected: SessionState, previous: SessionState) -> bool {
+        let mut state = write(&self.state);
+        if *state != expected {
+            tracing::debug!(
+                target: "daemon.session",
+                session_id = %self.id,
+                current = state.as_str(),
+                "not restoring session state; something else moved it on",
+            );
+            return false;
+        }
+        *state = previous;
+        true
+    }
+
     pub fn set_exit_code(&self, code: Option<i32>) {
         *write(&self.exit_code) = code;
     }
@@ -419,8 +445,13 @@ impl Session {
     /// Output a program produced between two CLI invocations belongs in the
     /// next blob — nobody has seen it, and a `continue --wait` that dropped it
     /// would lose the reason the program is where it is.
-    pub fn take_undelivered(&self) -> (Vec<Event>, u64) {
-        lock(&self.events).take_undelivered()
+    ///
+    /// **Reads without consuming.** Delivery is committed by
+    /// [`mark_delivered`](Self::mark_delivered) once a blob is actually
+    /// returned: a wait whose request is rejected never reports anything, and
+    /// marking its backlog delivered would lose those events for good.
+    pub fn undelivered(&self) -> (Vec<Event>, u64) {
+        lock(&self.events).undelivered()
     }
 
     /// Record that everything up to `seq` has been reported to a caller.
@@ -531,7 +562,7 @@ impl EventBuffer {
         sequenced
     }
 
-    fn take_undelivered(&mut self) -> (Vec<Event>, u64) {
+    fn undelivered(&self) -> (Vec<Event>, u64) {
         let undelivered: Vec<Event> = self
             .events
             .iter()
@@ -539,11 +570,10 @@ impl EventBuffer {
             .map(|sequenced| sequenced.event.clone())
             .collect();
 
-        // Up to the newest event that exists, not merely the newest one still
-        // in the buffer: anything dropped is gone, and re-reporting it later
-        // is impossible either way.
-        self.delivered = self.next_seq - 1;
-        (undelivered, self.delivered)
+        // The watermark is the newest event that exists, not merely the newest
+        // one still in the buffer: anything dropped is gone, and re-reporting
+        // it later is impossible either way.
+        (undelivered, self.next_seq - 1)
     }
 
     fn mark_delivered(&mut self, seq: u64) {
@@ -801,23 +831,43 @@ mod tests {
         let session = ended_session();
         session.emit(output_event(session.id, "printed while nobody was asking"));
 
-        let (undelivered, watermark) = session.take_undelivered();
+        let (undelivered, watermark) = session.undelivered();
         assert_eq!(undelivered.len(), 1);
         assert_eq!(watermark, 1);
     }
 
     #[test]
-    fn the_same_event_is_never_reported_to_two_waits() {
+    fn the_same_event_is_never_reported_to_two_waits_that_both_finished() {
         let session = ended_session();
         session.emit(output_event(session.id, "first"));
 
-        let (first, _) = session.take_undelivered();
-        let (second, _) = session.take_undelivered();
+        let (first, watermark) = session.undelivered();
+        session.mark_delivered(watermark);
+        let (second, _) = session.undelivered();
 
         assert_eq!(first.len(), 1);
         assert!(
             second.is_empty(),
             "a second wait must not re-report what the first already carried",
+        );
+    }
+
+    #[test]
+    fn a_wait_that_never_returned_a_blob_leaves_its_backlog_for_the_next_one() {
+        // Reading the backlog is not the same as reporting it. A `continue`
+        // the adapter rejects produces no blob, and marking those events
+        // delivered would lose them with nobody having seen them.
+        let session = ended_session();
+        session.emit(output_event(session.id, "nobody has seen this"));
+
+        let (peeked, _) = session.undelivered();
+        assert_eq!(peeked.len(), 1, "the failed wait read it");
+
+        let (still_there, _) = session.undelivered();
+        assert_eq!(
+            still_there.len(),
+            1,
+            "and left it, because it never reported anything",
         );
     }
 
@@ -837,7 +887,7 @@ mod tests {
             session.emit(output_event(session.id, &format!("line {index}")));
         }
 
-        let (undelivered, watermark) = session.take_undelivered();
+        let (undelivered, watermark) = session.undelivered();
         assert_eq!(undelivered.len(), EVENT_BUFFER_CAPACITY);
         assert_eq!(
             watermark,
@@ -860,6 +910,36 @@ mod tests {
 
         let (all, _) = session.buffered_output(None);
         assert_eq!(all.len(), 2, "reading must not consume");
+    }
+
+    #[test]
+    fn a_failed_request_puts_back_only_the_state_it_wrote() {
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+
+        assert!(
+            session.restore_state(SessionState::Running, SessionState::Paused),
+            "nothing else had touched it",
+        );
+        assert_eq!(session.state(), SessionState::Paused);
+    }
+
+    #[test]
+    fn a_failed_request_does_not_resurrect_a_session_that_has_since_ended() {
+        // The adapter can execute a `continue`, emit `terminated` and die
+        // before acknowledging. By the time the failure is handled the pump
+        // has recorded the ending, and stamping `paused` over it would leave a
+        // dead session looking live — refusing every later launch for a
+        // program that is not there.
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+        session.end_once(EndReason::Exited { exit_code: Some(0) });
+
+        assert!(
+            !session.restore_state(SessionState::Running, SessionState::Paused),
+            "the pump moved it on; the restore must decline",
+        );
+        assert_eq!(session.state(), SessionState::Exited);
     }
 
     #[test]

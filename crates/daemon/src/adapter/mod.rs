@@ -123,29 +123,34 @@ pub struct AdapterHandle {
     /// The execution queue (D021, non-negotiable #6).
     ///
     /// Some adapters serialise execution requests internally and can deadlock
-    /// if a second arrives while the first is outstanding (ptvsd #1502), so an
-    /// execution request holds this permit across the write *and* the wait for
-    /// its response — serialising the writer alone would still let two be in
-    /// flight at once.
+    /// if a second arrives while the first is outstanding (ptvsd #1502).
     ///
-    /// The permit covers the DAP request and its acknowledgement, and stops
-    /// there. A `continue --wait` goes on waiting for events without it, which
-    /// it has to: `pause` is itself an execution request, and holding the
-    /// permit for the whole wait would mean the one command that interrupts a
-    /// runaway program queues behind the program.
+    /// The permit is taken by the *caller*, not by the methods below, and held
+    /// for the whole run — send, acknowledgement, and the wait for the program
+    /// to settle. Releasing it at the acknowledgement is not enough: a second
+    /// `continue --wait` would then take it while the first is still waiting,
+    /// resume the program past the stop the first was about to report, and
+    /// hand that stop back as its own. "One in flight" has to mean one *run*,
+    /// not one message.
+    ///
+    /// [`interrupt`](AdapterHandle::interrupt) and
+    /// [`disconnect`](AdapterHandle::disconnect) deliberately do not take it.
+    /// Both exist to end a run that is already under way, and a queue is
+    /// exactly the wrong place for the thing that breaks the queue.
     execution: Mutex<()>,
     pending: Pending,
 }
 
-/// Whether a request moves the program or merely asks it about itself.
+/// Proof that the holder may move the program.
 ///
-/// Only the first kind queues. Inspection is safe to run concurrently: it is
-/// synchronous within a stable state, and serialising it would make a stack
-/// query wait behind whatever else was going on for no reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Execution,
-    Query,
+/// Taking it is how a caller joins the execution queue; holding it is what
+/// the type system checks. It is a parameter on the execution methods rather
+/// than something they acquire themselves so that the *caller* controls the
+/// ordering — specifically, so a `--wait` can subscribe to events after taking
+/// the permit but before sending, which is the only ordering that is free of
+/// both a lost stop and a stolen one.
+pub struct ExecutionPermit<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl AdapterHandle {
@@ -171,36 +176,55 @@ impl AdapterHandle {
         }
     }
 
+    /// Join the execution queue. Held until the returned permit is dropped.
+    pub async fn execution_permit(&self) -> ExecutionPermit<'_> {
+        ExecutionPermit {
+            _guard: self.execution.lock().await,
+        }
+    }
+
     /// Send one request and wait for its response, typed both ways.
-    async fn call<A: Serialize, R: DeserializeOwned>(
-        &self,
-        command: &str,
-        args: &A,
-        class: Class,
-    ) -> Result<R> {
-        let body = self.request(command, args, class).await?;
-        serde_json::from_value(body).map_err(|source| AdapterError::Malformed {
-            command: command.to_string(),
-            source,
-        })
+    async fn call<A: Serialize, R: DeserializeOwned>(&self, command: &str, args: &A) -> Result<R> {
+        let body = self.request(command, args).await?;
+        decode(command, body)
+    }
+
+    /// Send one execution request, and give up on the adapter if it does not
+    /// answer.
+    ///
+    /// An acknowledgement timeout is not retryable. The request is still
+    /// outstanding at the adapter, so sending another would put two execution
+    /// requests in flight — the exact thing D021 and non-negotiable #6 exist
+    /// to prevent, and the one that deadlocks adapters which serialise
+    /// internally. There is also no way to withdraw the first.
+    ///
+    /// So the adapter is treated as gone: killed here, which makes the pump's
+    /// next read fail and turns the session into `adapter_died` (D022). A
+    /// debug adapter that cannot acknowledge a `continue` within the deadline
+    /// is wedged, and an honest failure beats a poisoned session that looks
+    /// usable.
+    async fn execute<A: Serialize>(&self, command: &str, args: &A) -> Result<serde_json::Value> {
+        match self.request(command, args).await {
+            Err(AdapterError::Timeout { command, timeout }) => {
+                tracing::warn!(
+                    target: "daemon.session",
+                    command,
+                    timeout_s = timeout.as_secs(),
+                    "the adapter did not acknowledge an execution request; killing it",
+                );
+                self.kill().await;
+                Err(AdapterError::Timeout { command, timeout })
+            }
+            other => other,
+        }
     }
 
     /// Send one request and wait for its response.
     ///
-    /// An execution request takes the permit first and holds it for the whole
-    /// cycle; see the field comment on `execution` for why the writer lock
-    /// alone is not enough.
-    async fn request<A: Serialize>(
-        &self,
-        command: &str,
-        args: &A,
-        class: Class,
-    ) -> Result<serde_json::Value> {
-        let _permit = match class {
-            Class::Execution => Some(self.execution.lock().await),
-            Class::Query => None,
-        };
-
+    /// Deliberately does *not* touch the execution permit: whether this
+    /// request needs one, and for how long, is the caller's decision. See the
+    /// field comment on `execution`.
+    async fn request<A: Serialize>(&self, command: &str, args: &A) -> Result<serde_json::Value> {
         let receiver = {
             let mut writer = self.writer.lock().await;
             let writer = writer.as_mut().ok_or(AdapterError::Gone)?;
@@ -239,25 +263,33 @@ impl AdapterHandle {
         Ok(response.body.unwrap_or(serde_json::Value::Null))
     }
 
-    // --- Execution. One at a time, per D021. ---
+    // --- Execution. One run at a time, per D021. ---
 
     /// Resume. Answers as soon as the adapter acknowledges — the program is
     /// running by then, and what it does next arrives as events.
-    pub async fn resume(&self, thread_id: i64) -> Result<bool> {
-        let response: ContinueResponse = self
-            .call("continue", &ContinueArgs { thread_id }, Class::Execution)
+    ///
+    /// The permit is a parameter rather than something taken here: the caller
+    /// holds it across the whole run, not just this message.
+    pub async fn resume(&self, _permit: &ExecutionPermit<'_>, thread_id: i64) -> Result<bool> {
+        let body = self
+            .execute("continue", &ContinueArgs { thread_id })
             .await?;
+        let response: ContinueResponse = decode("continue", body)?;
         Ok(response.all_threads_continued)
     }
 
-    pub async fn step(&self, kind: StepKind, thread_id: i64) -> Result<()> {
-        self.request(
+    pub async fn step(
+        &self,
+        _permit: &ExecutionPermit<'_>,
+        kind: StepKind,
+        thread_id: i64,
+    ) -> Result<()> {
+        self.execute(
             translate::step_command(kind),
             &StepArgs {
                 thread_id,
                 granularity: None,
             },
-            Class::Execution,
         )
         .await?;
         Ok(())
@@ -265,20 +297,25 @@ impl AdapterHandle {
 
     /// Ask the program to stop. The stop itself arrives as an event later, or
     /// not at all if the program ended in the meantime.
+    ///
+    /// Takes no permit. `pause` exists to interrupt a run that is already
+    /// under way, so queueing it behind that run would mean the only way to
+    /// stop a runaway program is to wait for it to stop.
     pub async fn interrupt(&self, thread_id: i64) -> Result<()> {
-        self.request("pause", &PauseArgs { thread_id }, Class::Execution)
-            .await?;
+        self.request("pause", &PauseArgs { thread_id }).await?;
         Ok(())
     }
 
     /// End the debug session, optionally killing the debuggee with it.
+    ///
+    /// Takes no permit, for the same reason `interrupt` does not: giving up on
+    /// a session must not queue behind the session.
     pub async fn disconnect(&self, terminate: bool) -> Result<()> {
         self.request(
             "disconnect",
             &DisconnectArgs {
                 terminate_debuggee: terminate,
             },
-            Class::Execution,
         )
         .await?;
         Ok(())
@@ -287,9 +324,7 @@ impl AdapterHandle {
     // --- Inspection. Safe concurrently, within a stable state. ---
 
     pub async fn threads(&self) -> Result<Vec<ThreadInfo>> {
-        let response: ThreadsResponse = self
-            .call("threads", &serde_json::json!({}), Class::Query)
-            .await?;
+        let response: ThreadsResponse = self.call("threads", &serde_json::json!({})).await?;
         Ok(response
             .threads
             .into_iter()
@@ -312,7 +347,6 @@ impl AdapterHandle {
                     start_frame,
                     levels,
                 },
-                Class::Query,
             )
             .await?;
 
@@ -325,9 +359,7 @@ impl AdapterHandle {
     }
 
     pub async fn scopes(&self, frame_id: i64) -> Result<Vec<Scope>> {
-        let response: ScopesResponse = self
-            .call("scopes", &ScopesArgs { frame_id }, Class::Query)
-            .await?;
+        let response: ScopesResponse = self.call("scopes", &ScopesArgs { frame_id }).await?;
         Ok(response.scopes.into_iter().map(translate::scope).collect())
     }
 
@@ -347,7 +379,6 @@ impl AdapterHandle {
                     start,
                     count,
                 },
-                Class::Query,
             )
             .await?;
         Ok(response
@@ -371,7 +402,6 @@ impl AdapterHandle {
                     frame_id,
                     context: Some(context.as_str().to_string()),
                 },
-                Class::Query,
             )
             .await?;
         Ok(translate::eval_result(response))
@@ -403,7 +433,6 @@ impl AdapterHandle {
                         .collect(),
                     source_modified: None,
                 },
-                Class::Query,
             )
             .await?;
 
@@ -425,6 +454,18 @@ impl AdapterHandle {
             tracing::warn!(target: "daemon.session", %error, "could not kill the adapter");
         }
     }
+}
+
+/// Read a response body as the shape DAP says it is.
+///
+/// One place, so an execution request and a query report a malformed answer
+/// the same way — and name the command that sent it, which is the only part
+/// of a `serde` error a reader can act on.
+fn decode<R: DeserializeOwned>(command: &str, body: serde_json::Value) -> Result<R> {
+    serde_json::from_value(body).map_err(|source| AdapterError::Malformed {
+        command: command.to_string(),
+        source,
+    })
 }
 
 /// Find the binary for `kind`.

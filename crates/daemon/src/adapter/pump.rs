@@ -100,8 +100,15 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
         // as broadcast, so a `break --list` between sessions-worth of events
         // reports what the debugger will actually do.
         "breakpoint" => {
-            let breakpoint = adapter_breakpoint(&body["breakpoint"]);
+            let mut breakpoint = adapter_breakpoint(&body["breakpoint"]);
             session.update_breakpoint(&breakpoint);
+            // Fill in our own id before the event goes out. The adapter only
+            // knows its own, and a `breakpoint_updates` entry a caller cannot
+            // match against the ids `break --list` gave them is an update
+            // about nothing they can name.
+            breakpoint.id = breakpoint
+                .adapter_id
+                .and_then(|adapter_id| session.breakpoint_id_for(adapter_id));
             session.emit(Event::BreakpointUpdated {
                 session_id,
                 breakpoint,

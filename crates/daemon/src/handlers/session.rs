@@ -201,10 +201,19 @@ pub async fn disconnect(
 
 /// Move the program, and — if asked — wait for it to settle.
 ///
-/// The order below is the whole point of this function. The wait subscribes
-/// *before* the request goes out, because a fast program can hit its
-/// breakpoint before the adapter has even acknowledged the `continue`, and a
-/// subscription taken afterwards would miss the stop it exists to catch.
+/// The order below is the whole point of this function, and all three steps
+/// have to happen in it:
+///
+/// 1. **Take the execution permit** (D021). Holding it for the whole run, not
+///    just the message, is what stops a second `continue --wait` from resuming
+///    the program past the stop this one is waiting for and returning that
+///    stop as its own.
+/// 2. **Subscribe**, inside the permit. A fast program can hit its breakpoint
+///    before the adapter has acknowledged the `continue`, so a subscription
+///    taken after the send would miss the stop it exists to catch.
+/// 3. **Send.**
+///
+/// `pause` skips step 1 — see [`AdapterHandle::interrupt`].
 pub async fn execute(
     state: &Arc<DaemonState>,
     session_id: SessionId,
@@ -216,6 +225,14 @@ pub async fn execute(
     let session = live_session(state, session_id)?;
     let thread_id = resolve_thread(&session, thread_id).await?;
 
+    // Step 1. Dropped at the end of this function, so it covers the wait too.
+    let permit = match movement {
+        Movement::Pause => None,
+        _ => Some(session.adapter().execution_permit().await),
+    };
+
+    // Step 2. After the permit, so nothing observed here belongs to an earlier
+    // run; before the send, so nothing this run causes is missed.
     let waiting = wait.is_waiting().then(|| Wait::begin(&session));
 
     let previous = session.state();
@@ -226,8 +243,14 @@ pub async fn execute(
         session.set_state(SessionState::Running);
     }
 
-    if let Err(error) = send(&session, movement, thread_id).await {
-        session.set_state(previous);
+    // Step 3.
+    if let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await {
+        // Put back only the state *we* wrote. By now the pump may have
+        // recorded a real ending — an adapter can execute the request, emit
+        // `terminated` and die before acknowledging — and stamping `paused`
+        // over that would leave a dead session looking live, refusing every
+        // later launch.
+        session.restore_state(SessionState::Running, previous);
         return Err(error.into_ipc());
     }
 
@@ -256,13 +279,31 @@ pub async fn execute(
     Ok(Response::Stepped(blob))
 }
 
-async fn send(session: &Arc<Session>, movement: Movement, thread_id: i64) -> adapter::Result<()> {
-    match movement {
-        Movement::Continue => {
-            session.adapter().resume(thread_id).await?;
+async fn send(
+    session: &Arc<Session>,
+    permit: Option<&adapter::ExecutionPermit<'_>>,
+    movement: Movement,
+    thread_id: i64,
+) -> adapter::Result<()> {
+    match (movement, permit) {
+        (Movement::Continue, Some(permit)) => {
+            session.adapter().resume(permit, thread_id).await?;
         }
-        Movement::Step(kind) => session.adapter().step(kind, thread_id).await?,
-        Movement::Pause => session.adapter().interrupt(thread_id).await?,
+        (Movement::Step(kind), Some(permit)) => {
+            session.adapter().step(permit, kind, thread_id).await?
+        }
+        (Movement::Pause, _) => session.adapter().interrupt(thread_id).await?,
+        // `execute` takes a permit for everything that is not a pause, so this
+        // cannot happen — and saying so is better than an `unwrap` that would
+        // be wrong in a way nobody could see from the panic.
+        (movement, None) => {
+            tracing::error!(
+                target: "daemon.session",
+                movement = movement.description(),
+                "an execution request reached the adapter without a permit",
+            );
+            return Err(adapter::AdapterError::Gone);
+        }
     }
     Ok(())
 }

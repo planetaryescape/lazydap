@@ -68,14 +68,19 @@ pub struct Wait {
 }
 
 impl Wait {
-    /// Subscribe, and take everything buffered that no earlier wait reported.
+    /// Subscribe, and read everything buffered that no earlier wait reported.
+    ///
+    /// Reading, not consuming: nothing is marked delivered until
+    /// [`collect`](Self::collect) actually returns a blob. A wait whose
+    /// request is rejected reports nothing, and its backlog has to still be
+    /// there for the next one.
     pub fn begin(session: &Arc<Session>) -> Self {
         // Subscription first. An event that arrives between these two lines is
         // seen twice — once here, once live — and the watermark is what
         // resolves that. An event arriving between them the other way round
         // would simply be lost.
         let events = session.subscribe();
-        let (pending, watermark) = session.take_undelivered();
+        let (pending, watermark) = session.undelivered();
 
         let mut wait = Self {
             session: Arc::clone(session),
@@ -108,8 +113,10 @@ impl Wait {
             self.grace_for_exit_code().await;
         }
 
-        // Everything this wait consumed live is now reported, so the next one
-        // must not drain it out of the buffer all over again.
+        // Commit delivery here and nowhere else: this is the point at which a
+        // blob is certainly being returned. That covers the backlog read at
+        // `begin` as well as everything consumed live, and it means a wait
+        // that never got this far has silently cost nothing.
         self.session.mark_delivered(self.watermark);
 
         self.blob.elapsed_ms = self.started.elapsed().as_millis() as u64;
@@ -441,7 +448,7 @@ mod tests {
 
         // Emitted after the subscription: it is both broadcast and buffered.
         session.emit(output(&session, "raced\n"));
-        let (pending, watermark) = session.take_undelivered();
+        let (pending, watermark) = session.undelivered();
         let mut wait = wait;
         for event in pending {
             wait.absorb_backlog(&event);
