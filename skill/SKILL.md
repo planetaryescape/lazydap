@@ -1,0 +1,108 @@
+---
+name: lazydap
+description: |
+  Debug a compiled program from the shell with lazydap: launch it under a
+  debugger, set breakpoints, step, read the stack and variables, and evaluate
+  expressions in the running process. Every command is a shell subcommand that
+  prints JSON, so it works in any agent that can run a command — no server, no
+  protocol host. Use when asked to find why a program crashes, what a variable
+  holds at some line, or what actually happens at runtime rather than what the
+  source suggests. Currently debugs C, C++ and Rust binaries via codelldb.
+lazydap_min_version: "0.1.0"
+---
+
+# lazydap
+
+A scriptable, terminal-first debugger. You drive it exactly as a human would:
+run a subcommand, read the JSON, decide what to do next.
+
+## The one thing to get right
+
+**Use `--wait` on every command that moves the program.** Without it, the
+command returns the instant the debugger accepts the request, before the
+program has gone anywhere, and you will read a stale stack.
+
+With `--wait`, lazydap blocks until the program reaches a stable state and
+returns **one JSON object describing everything that happened on the way** —
+where it stopped, why, the top frame, and every line the program printed. That
+single object is usually all you need; do not go fishing for the pieces
+separately.
+
+```bash
+lazydap continue --wait --format json
+```
+
+## The loop
+
+```bash
+# 1. Start the program, stopped before it runs.
+lazydap launch ./mybinary --stop-on-entry --format json
+
+# 2. Say where you want to stop. Paths are relative to your shell.
+lazydap break src/parser.c:142 --format json
+
+# 3. Run to it. Read the blob this returns.
+lazydap continue --wait --format json
+
+# 4. Look around. Only meaningful while paused.
+lazydap stack --format json
+lazydap scopes --format json
+lazydap eval "tokens[pos]" --format json
+
+# 5. Finish.
+lazydap disconnect --format json
+```
+
+Worked examples, including a crash investigation:
+[`references/examples.md`](references/examples.md).
+
+## Things that will otherwise cost you a turn
+
+- **`--stop-on-entry` stops before `main`.** The stack says `_dyld_start` and
+  none of your variables exist yet — `eval` will report *undeclared
+  identifier*. That is expected. Set a breakpoint and `continue --wait` before
+  inspecting anything.
+- **Inspection needs a paused program.** `stack`, `scopes`, `variables` and
+  `eval` fail with `SessionNotPaused` while it is running. Pause it first
+  (`lazydap pause --wait`) or wait for a breakpoint.
+- **One session at a time.** Launch again and you get `SessionAlreadyActive`,
+  unless the previous program has finished — a finished session is cleared
+  automatically.
+- **Breakpoints outlive sessions.** They are project state, kept in
+  `.lazydap/state.toml`, and applied to every later launch. Set them before
+  launching if you like. Remove the ones you added when you are done.
+- **`eval` evaluates an expression** in the program's language. It does *not*
+  run debugger commands unless you ask for that with `--context repl`.
+- **Read `state`, not the exit code, to know what happened.** Exit `0` means
+  the command worked; `"state": "exited"` means the *program* finished.
+
+## Output
+
+`--format json` gives one JSON object. Without a `--format`, lazydap prints a
+human table on a terminal and JSON everywhere else — so in a pipeline you get
+JSON either way, but say `--format json` and never think about it.
+
+`--format ids` prints bare ids one per line, for piping:
+
+```bash
+lazydap break --list --format ids | xargs -I{} lazydap break --remove --id {}
+```
+
+Also available: `jsonl` (one object per line), `csv`, `table`.
+
+## Reference
+
+- [`references/commands.md`](references/commands.md) — every command and flag,
+  generated from lazydap itself
+- [`references/output-schemas.md`](references/output-schemas.md) — the JSON
+  each command returns, field by field
+- [`references/error-codes.md`](references/error-codes.md) — exit codes, error
+  names, and what to do about each
+- [`references/examples.md`](references/examples.md) — worked sessions
+
+## What you never need to know
+
+The Debug Adapter Protocol, the daemon, the Unix socket, or which adapter is
+running. lazydap starts what it needs on first use and cleans up after itself.
+If you find yourself needing any of it, the tool is wrong — say so rather than
+working around it.
