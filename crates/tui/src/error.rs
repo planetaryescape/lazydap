@@ -18,6 +18,15 @@ pub enum TuiError {
         source: std::io::Error,
     },
 
+    /// Reading or writing the daemon socket.
+    ///
+    /// Separate from [`Terminal`](Self::Terminal) even though both wrap an
+    /// `io::Error`, and deliberately not `#[from]`: a `?` on a socket write
+    /// would otherwise pick up the terminal's conversion and report a failed
+    /// connection as "the terminal could not be driven".
+    #[error("the connection to the daemon failed: {0}")]
+    Ipc(std::io::Error),
+
     /// The daemon went away before it said anything useful. Only reachable
     /// during the handshake: afterwards a lost connection is a `Msg`, because
     /// by then there is a screen to show it on.

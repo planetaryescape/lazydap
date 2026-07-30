@@ -170,18 +170,15 @@ fn spawn_input_pump(tx: UnboundedSender<Msg>) {
                 return;
             }
 
-            match event::poll(INPUT_POLL) {
-                Ok(false) => continue,
-                Ok(true) => {}
-                Err(error) => {
-                    tracing::warn!(target: "tui.input", %error, "stopped reading the terminal");
-                    return;
-                }
-            }
+            let ready = event::poll(INPUT_POLL).and_then(|ready| match ready {
+                true => event::read().map(Some),
+                false => Ok(None),
+            });
 
-            let msg = match event::read() {
-                Ok(Event::Key(key)) => Msg::Key(key),
-                Ok(Event::Resize(..)) => Msg::Resize,
+            let msg = match ready {
+                Ok(Some(Event::Key(key))) => Msg::Key(key),
+                Ok(Some(Event::Resize(..))) => Msg::Resize,
+                // Nothing to read, or a mouse or focus event nothing acts on.
                 Ok(_) => continue,
                 Err(error) => {
                     tracing::warn!(target: "tui.input", %error, "stopped reading the terminal");

@@ -82,9 +82,14 @@ async fn handshake(
 ) -> Result<()> {
     writer
         .send(IpcMessage::request(HANDSHAKE_ID, Request::Ping))
-        .await?;
+        .await
+        .map_err(TuiError::Ipc)?;
 
-    let reply = reader.recv().await?.ok_or(TuiError::DaemonGone)?;
+    let reply = reader
+        .recv()
+        .await
+        .map_err(TuiError::Ipc)?
+        .ok_or(TuiError::DaemonGone)?;
     match reply.payload {
         IpcPayload::Response(Response::Pong { version, .. })
             if version == LAZYDAP_PROTOCOL_VERSION =>

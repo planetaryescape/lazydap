@@ -23,7 +23,7 @@ pub fn view(frame: &mut Frame, state: &mut AppState) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
     match state.source.as_mut() {
-        Some(source) => source.render(frame, body, true),
+        Some(source) => source.render(frame, body),
         None => render_empty(frame, body),
     }
 
@@ -61,7 +61,11 @@ fn session_text(state: &AppState, session: &SessionSnapshot) -> String {
                 text.push_str(&format!(" ({})", reason.as_str()));
             }
             if let Some(location) = state.location.as_ref() {
-                text.push_str(&format!(" at {}:{}", short(&location.path), location.line,));
+                text.push_str(&format!(
+                    " at {}:{}",
+                    file_name(&location.path),
+                    location.line,
+                ));
             }
             text
         }
@@ -72,7 +76,7 @@ fn session_text(state: &AppState, session: &SessionSnapshot) -> String {
 
 /// The file name alone. The status row has one line, and the interesting part
 /// of a path forty characters long is the end of it.
-fn short(path: &std::path::Path) -> String {
+fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())

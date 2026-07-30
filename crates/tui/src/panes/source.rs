@@ -128,15 +128,11 @@ impl SourceView {
     /// Mutates: the pane learns its height here and nowhere else, because the
     /// height is a fact about the layout rather than about the state. That is
     /// the one exception to "no mutation in the view" (D012, M10's notes).
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .title(format!("source · {}", self.path.display()))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if focused {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            }));
+            .border_style(Style::default().fg(Color::Cyan));
         let inner = block.inner(area);
 
         self.viewport_height = u32::from(inner.height);
@@ -205,12 +201,7 @@ mod tests {
 
     /// Draw once so the pane knows how tall it is, the way the real loop does.
     fn draw(view: &mut SourceView, width: u16, height: u16) -> Vec<String> {
-        let mut captured = Vec::new();
-        let lines = render(width, height, |frame| {
-            view.render(frame, frame.area(), true);
-        });
-        captured.extend(lines);
-        captured
+        render(width, height, |frame| view.render(frame, frame.area()))
     }
 
     #[test]
