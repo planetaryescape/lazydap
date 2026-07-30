@@ -240,4 +240,9 @@ complete and its box in `/TODO.md` stays unticked.**
 2. `docs/blueprint/15-decision-log.md`: resolve the open crates.io question. The workflow has no
    publish job and says why in a trailing comment.
 3. The demo GIF.
-4. Tag `v0.1.0` — only after M12–M14 land, since the README's roadmap says those panes are next.
+4. **Finalise the `[0.1.0]` CHANGELOG wording as part of cutting the tag** (Wave 6). The section
+   currently says "unreleased" and "until the tag is cut", and `product-release.yml` copies the
+   section verbatim onto the release page. It refuses to publish while that wording is still
+   there, so this is a blocking step rather than a nicety: drop the unreleased preamble and date
+   the heading (`## [0.1.0] — 2026-MM-DD`) in the same commit that precedes the tag.
+5. Tag `v0.1.0` — only after M12–M14 land, since the README's roadmap says those panes are next.

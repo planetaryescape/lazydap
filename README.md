@@ -19,21 +19,24 @@ $ lazydap break hello.c:6 --format json
   "not_found": []
 }
 
-$ lazydap launch ./hello --format json
+$ lazydap launch ./hello --stop-on-entry --format json
 {
   "capabilities": { "supports_conditional_breakpoints": true, ... },
-  "session_id": "8a2b018f-ecbf-4602-aaf3-17a022dc1220",
-  "state": "running",
+  "raw_reason": "exception",
+  "reason": "entry",
+  "session_id": "64612148-bae7-44d3-a3cd-18f87f2c82b4",
+  "state": "paused",
+  "thread_id": 27790565,
   ...
 }
 
 $ lazydap continue --wait --format json
 {
   "captured_output": [
-    { "category": "stdout", "output": "starting\r\n", "timestamp_ms": 1785443685097 },
+    { "category": "stdout", "output": "starting\r\n", "timestamp_ms": 1785444921957 },
     ...
   ],
-  "elapsed_ms": 90,
+  "elapsed_ms": 98,
   "frame": {
     "column": 16, "id": 1001, "line": 6, "name": "total",
     "source": { "name": "hello.c", "path": "/Users/you/lazydap-demo/hello.c" }
@@ -41,10 +44,14 @@ $ lazydap continue --wait --format json
   "hit_breakpoint_ids": [1],
   "reason": "breakpoint",
   "state": "paused",
-  "thread_id": 27619421,
+  "thread_id": 27790565,
   ...
 }
 ```
+
+`--stop-on-entry` is doing real work there. Without it the program starts running the moment `launch` returns, and if it reaches your breakpoint before the `continue` command gets there, that `continue` resumes from the stop you wanted rather than running to it. Stopping at entry puts you in control of when the program first moves.
+
+The pair of reason fields is lazydap declining to tell you a tidy lie. codelldb implements entry-stop by sending the process a `SIGSTOP`, which LLDB classifies as an exception, so the adapter says `exception`. `reason` is the normalised answer and `raw_reason` is what the adapter actually said, because a reader who needs to know the difference should not have to find out by experiment.
 
 `--wait` is the flag that makes this work from a shell. Without it a step command returns the moment the debugger accepts the request, before the program has gone anywhere. With it, lazydap blocks until the program is somewhere worth looking at and returns one object describing the whole trip: where it stopped, why, the top frame, which breakpoints it hit, and every line the program printed on the way. That last part is usually what you were after.
 
@@ -98,7 +105,8 @@ curl -sL -o /tmp/codelldb.vsix \
 mkdir -p ~/.local/opt/codelldb
 unzip -q -o /tmp/codelldb.vsix -d ~/.local/opt/codelldb
 
-# A wrapper script, not a symlink.
+# A wrapper script, not a symlink. ~/.local/bin must exist and be on your PATH.
+mkdir -p ~/.local/bin
 cat > ~/.local/bin/codelldb <<'EOF'
 #!/usr/bin/env bash
 exec "$HOME/.local/opt/codelldb/extension/adapter/codelldb" "$@"
@@ -166,7 +174,7 @@ gcc -g -O0 hello.c -o hello
 
 ```bash
 lazydap break hello.c:6           # inside the loop
-lazydap launch ./hello
+lazydap launch ./hello --stop-on-entry
 lazydap continue --wait           # runs to the breakpoint
 lazydap scopes                    # note the Local scope's variables_reference
 lazydap variables --reference 1003

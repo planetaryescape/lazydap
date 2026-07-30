@@ -144,7 +144,11 @@ jobs:
   publish:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Both halves matter. `workflow_dispatch` can be pointed at a tag, so the
+    # ref test alone would let a rehearsal create the real release and clobber
+    # its assets. Requiring a push event means a rehearsal runs the gates and
+    # the builds and then stops, which is the whole point of rehearsing.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -172,14 +176,28 @@ jobs:
 
           # The section for this version: from its `## [x.y.z]` heading up to
           # the next `## ` heading, exclusive.
-          awk -v version="$VERSION" '
-            $0 ~ "^## \\[" version "\\]" { found = 1; next }
+          #
+          # Matched literally with index(), not as a regex. A legal Cargo
+          # version carries characters a regex reads as syntax — `0.1.0+build.1`
+          # has a `+` — and such a tag passes the equality check above only to
+          # fail its own match here, after every build has already run.
+          awk -v heading="## [$VERSION]" '
+            index($0, heading) == 1 { found = 1; next }
             found && /^## / { exit }
             found { print }
           ' CHANGELOG.md > notes-body.md
 
           if [ ! -s notes-body.md ]; then
             echo "::error::no [${VERSION}] section in CHANGELOG.md"
+            exit 1
+          fi
+
+          # The CHANGELOG carries its own "not tagged yet" wording while a
+          # version is being worked on, and this job would otherwise copy that
+          # verbatim onto the release page announcing the tag. Finalising the
+          # section is part of cutting the tag; refuse until it has been done.
+          if grep -qiE 'unreleased|not (yet )?tagged|until the tag is cut' notes-body.md; then
+            echo "::error::the [${VERSION}] section of CHANGELOG.md still reads as unreleased. Finalise its wording (drop the unreleased preamble, date the heading) and re-tag."
             exit 1
           fi
 
@@ -190,13 +208,16 @@ jobs:
             echo
             echo "## Install"
             echo
-            echo "Download the archive for your platform below, verify it, and put the binary on your \`PATH\`:"
+            echo "Download the archive for your platform below, verify it, then unpack it and put the binary on your \`PATH\`:"
             echo
             echo '```bash'
-            echo "tar -xzf lazydap-${VERSION}-<target>.tar.gz"
             echo "shasum -a 256 -c lazydap-${VERSION}-<target>.tar.gz.sha256"
+            echo "tar -xzf lazydap-${VERSION}-<target>.tar.gz"
+            echo "mkdir -p ~/.local/bin"
             echo "install lazydap-${VERSION}-<target>/lazydap ~/.local/bin/"
             echo '```'
+            echo
+            echo "Verifying before unpacking is the order that helps: a checksum checked after the fact tells you what you already extracted."
             echo
             echo "Or build it yourself: \`cargo install --path crates/daemon\`."
             echo

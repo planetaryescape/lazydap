@@ -49,6 +49,7 @@ CI additionally sets `RUSTFLAGS: -Dwarnings`; locally you'll want the same befor
 A quick end-to-end loop from the workspace root, using the fixture in this repo:
 
 ```bash
+mkdir -p examples/c-hello/build          # gitignored, so absent in a fresh clone
 gcc -g -O0 examples/c-hello/main.c -o examples/c-hello/build/hello
 ./target/debug/lazydap break examples/c-hello/main.c:19
 ./target/debug/lazydap launch ./examples/c-hello/build/hello --stop-on-entry
@@ -89,6 +90,7 @@ unzip -q -o /tmp/codelldb.vsix -d ~/.local/opt/codelldb
 #    liblldb → ~/.local/opt/codelldb/extension/lldb/lib/liblldb.dylib
 
 # 3. Expose on PATH with a wrapper script. NOT a symlink.
+mkdir -p ~/.local/bin
 cat > ~/.local/bin/codelldb <<'WRAPPER_EOF'
 #!/usr/bin/env bash
 exec "$HOME/.local/opt/codelldb/extension/adapter/codelldb" "$@"
@@ -134,6 +136,7 @@ tar -xzf /tmp/js-debug-dap.tar.gz -C ~/.local/opt/js-debug --strip-components=1
 #    DAP entrypoint → ~/.local/opt/js-debug/src/dapDebugServer.js
 
 # The entrypoint is a Node script, not an executable. Wrap it:
+mkdir -p ~/.local/bin
 cat > ~/.local/bin/js-debug-dap <<'EOF'
 #!/usr/bin/env bash
 exec node "$HOME/.local/opt/js-debug/src/dapDebugServer.js" "$@"
