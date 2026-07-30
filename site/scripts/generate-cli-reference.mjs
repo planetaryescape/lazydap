@@ -14,15 +14,19 @@
  * tables, because repeating the five-line `--format` value list on 21 pages
  * buries the flag the reader came for.
  *
- * Binary resolution: $LAZYDAP_BIN, then target/release, then target/debug.
- * Build one first — `cargo build --bin lazydap`.
+ * Binary resolution: $LAZYDAP_BIN, else whichever of target/release/lazydap and
+ * target/debug/lazydap was built most recently. Build one first —
+ * `cargo build --bin lazydap`.
  *
- * Drift is caught by `npm run check:generated`, which regenerates and then
- * asks git whether anything moved.
+ * This does NOT run as part of `npm run build`: the site has to build on a
+ * machine with no Rust toolchain (a clean clone, or a Vercel deploy). The
+ * generated pages are committed instead, and `npm run check:generated`
+ * regenerates and asks git whether anything moved. CI runs that with
+ * LAZYDAP_BIN pointing at a binary it just built.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,19 +38,28 @@ const OUT_DIR = join(SITE_ROOT, 'src', 'content', 'docs', 'reference', 'cli');
 const REPO_URL = 'https://github.com/planetaryescape/lazydap';
 
 function resolveBinary() {
-  const candidates = [
-    process.env.LAZYDAP_BIN,
+  if (process.env.LAZYDAP_BIN) {
+    if (existsSync(process.env.LAZYDAP_BIN)) return process.env.LAZYDAP_BIN;
+    console.error(`generate-cli-reference: LAZYDAP_BIN is set but missing: ${process.env.LAZYDAP_BIN}`);
+    process.exit(1);
+  }
+
+  // Newest wins rather than release-then-debug. Preferring release would let a
+  // months-old release binary answer --help after a clap change in a debug
+  // build, and the freshness check would pass against the wrong CLI.
+  const built = [
     join(REPO_ROOT, 'target', 'release', 'lazydap'),
     join(REPO_ROOT, 'target', 'debug', 'lazydap'),
-  ].filter(Boolean);
+  ]
+    .filter((path) => existsSync(path))
+    .map((path) => ({ path, mtime: statSync(path).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
 
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
+  if (built.length > 0) return built[0].path;
 
   console.error(
     'generate-cli-reference: no lazydap binary found.\n' +
-      `  Looked at: ${candidates.join(', ')}\n` +
+      `  Looked in ${join(REPO_ROOT, 'target')} for release/lazydap and debug/lazydap.\n` +
       '  Build one with `cargo build --bin lazydap`, or set LAZYDAP_BIN.',
   );
   process.exit(1);
@@ -54,13 +67,33 @@ function resolveBinary() {
 
 const BIN = resolveBinary();
 
+/** A binary that hangs must fail the build, not wedge it. Quirk 5 makes this real. */
+const HELP_TIMEOUT_MS = 10_000;
+
 function help(args) {
-  return execFileSync(BIN, [...args, '--help'], {
-    encoding: 'utf8',
-    // Long help wraps to the terminal width when there is one. Pin it so the
-    // generated Markdown does not depend on whose terminal ran the build.
-    env: { ...process.env, COLUMNS: '100', NO_COLOR: '1' },
-  });
+  const spelled = ['lazydap', ...args, '--help'].join(' ');
+  try {
+    return execFileSync(BIN, [...args, '--help'], {
+      encoding: 'utf8',
+      timeout: HELP_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+      // Long help wraps to the terminal width when there is one. Pin it so the
+      // generated Markdown does not depend on whose terminal ran the build.
+      env: { ...process.env, COLUMNS: '100', NO_COLOR: '1' },
+    });
+  } catch (error) {
+    if (error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM') {
+      console.error(
+        `generate-cli-reference: \`${spelled}\` did not answer within ${HELP_TIMEOUT_MS / 1000}s.\n` +
+          `  Binary: ${BIN}\n` +
+          '  A codelldb install wedged by a macOS update hangs like this; so does a debug build\n' +
+          '  waiting on something. Run the command by hand to see which.',
+      );
+    } else {
+      console.error(`generate-cli-reference: \`${spelled}\` failed.\n  ${error.message}`);
+    }
+    process.exit(1);
+  }
 }
 
 /**
@@ -256,7 +289,7 @@ function main() {
 
     const summary = command.summary || `lazydap ${command.name}`;
     let md = `---\ntitle: "lazydap ${command.name}"\ndescription: ${JSON.stringify(summary)}\n---\n\n`;
-    md += `:::note[Generated page]\nFrom \`lazydap ${command.name} --help\`. To change it, change the clap definition in [\`crates/daemon/src/cli/\`](${REPO_URL}/tree/main/crates/daemon/src/cli) — the site rebuilds from the binary.\n:::\n\n`;
+    md += `:::note[Generated page]\nFrom \`lazydap ${command.name} --help\`. To change it, change the clap definition in [\`crates/daemon/src/cli.rs\`](${REPO_URL}/blob/main/crates/daemon/src/cli.rs), then run \`npm run generate\` in \`site/\` and commit the result. CI fails if this page and the binary disagree.\n:::\n\n`;
 
     if (command.aliases.length > 0) {
       md += `Also spelled ${command.aliases.map((a) => `\`lazydap ${a}\``).join(' or ')}.\n\n`;
@@ -303,7 +336,8 @@ function main() {
   index += `\`--format\` decides how a command answers. \`table\` is for reading and its layout is not a contract; \`json\` is [the contract](/reference/json-output/). With no \`--format\`, lazydap picks \`table\` on a terminal and \`json\` everywhere else, so a pipeline gets JSON without asking.\n\n`;
 
   index += `## Commands that move the program\n\n`;
-  index += `\`launch\`, \`continue\`, \`step\`, \`step-in\`, \`step-out\` and \`pause\` also take \`--wait\` and \`--timeout\`. Without \`--wait\` they return as soon as the debugger accepts the request, which is what a live UI wants and almost never what a script wants. See [the \`--wait\` contract](/guides/wait/).\n\n`;
+  index += `\`continue\`, \`step\`, \`step-in\`, \`step-out\` and \`pause\` also take \`--wait\` and \`--timeout\`. Without \`--wait\` they return as soon as the debugger accepts the request, which is what a live UI wants and almost never what a script wants. See [the \`--wait\` contract](/guides/wait/).\n\n`;
+  index += `\`launch\` does **not** take \`--wait\` — it answers with its own shape once the configuration phase is done. Pass \`--stop-on-entry\` to hold the program still, then \`continue --wait\` to move it.\n\n`;
 
   index += `## See also\n\n`;
   index += `- [Quickstart](/getting-started/quickstart/) — the commands in order, against a real program\n`;

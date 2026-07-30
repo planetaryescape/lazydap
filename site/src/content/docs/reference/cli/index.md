@@ -52,7 +52,9 @@ lazydap [OPTIONS] [COMMAND]
 
 ## Commands that move the program
 
-`launch`, `continue`, `step`, `step-in`, `step-out` and `pause` also take `--wait` and `--timeout`. Without `--wait` they return as soon as the debugger accepts the request, which is what a live UI wants and almost never what a script wants. See [the `--wait` contract](/guides/wait/).
+`continue`, `step`, `step-in`, `step-out` and `pause` also take `--wait` and `--timeout`. Without `--wait` they return as soon as the debugger accepts the request, which is what a live UI wants and almost never what a script wants. See [the `--wait` contract](/guides/wait/).
+
+`launch` does **not** take `--wait` — it answers with its own shape once the configuration phase is done. Pass `--stop-on-entry` to hold the program still, then `continue --wait` to move it.
 
 ## See also
 

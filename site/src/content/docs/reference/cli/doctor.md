@@ -4,7 +4,7 @@ description: "Check that everything lazydap needs is where it should be"
 ---
 
 :::note[Generated page]
-From `lazydap doctor --help`. To change it, change the clap definition in [`crates/daemon/src/cli/`](https://github.com/planetaryescape/lazydap/tree/main/crates/daemon/src/cli) — the site rebuilds from the binary.
+From `lazydap doctor --help`. To change it, change the clap definition in [`crates/daemon/src/cli.rs`](https://github.com/planetaryescape/lazydap/blob/main/crates/daemon/src/cli.rs), then run `npm run generate` in `site/` and commit the result. CI fails if this page and the binary disagree.
 :::
 
 Check that everything lazydap needs is where it should be
