@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/daemon", "crates/dap"]
+members = ["crates/config", "crates/core", "crates/daemon", "crates/dap", "crates/protocol"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,11 +20,16 @@ panic = "warn"
 todo = "warn"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+# Feature sets are chosen per crate: only the daemon needs the whole runtime.
+tokio = { version = "1" }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde", "v4"] }
