@@ -91,7 +91,7 @@ workflow at M15.
 
 ## Beyond v0.1 (M16–M18+)
 
-- [ ] [M20 — Documentation website](docs/implementation/tasks/M20-docs-site.md) — Astro/Starlight site mirroring mxr's; added 2026-07-30 on user request. Runs in parallel with the milestone track; not gated on v0.1.
+- [x] [M20 — Documentation website](docs/implementation/tasks/M20-docs-site.md) — completed 2026-07-30. `site/`: Astro + Starlight, 39 pages (22 generated from the binary with a drift-failing CI check), wire examples serialised from the real protocol types, `llms.txt`, verified transcripts throughout. `cd site && npm ci && npm run build`. Deployment + domain still to decide (SITE_URL placeholder is `lazydap.sh`); `public/og.png` is the one missing asset.
 - [ ] [M16 — Watches](docs/implementation/tasks/M16-watches.md)
 - [ ] [M17 — REPL pane](docs/implementation/tasks/M17-repl-pane.md)
 - [ ] [M18 — Second adapter (debugpy)](docs/implementation/tasks/M18-second-adapter.md)
