@@ -72,21 +72,10 @@ workflow at M15.
 
 ## Phase D — useful features (M12–M15) → v0.1
 
-<<<<<<< HEAD
-- [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
-- [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
-- [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
-- [ ] [M19 — TUI reconnects when the daemon goes away](docs/implementation/tasks/M19-tui-reconnect.md) — added 2026-07-30; M11 recorded reconnection as mandatory pre-v0.1
-||||||| 287e108
-- [ ] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md)
-- [ ] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md)
-- [ ] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md)
-=======
 - [x] [M12 — Stack pane](docs/implementation/tasks/M12-stack-pane.md) — completed 2026-07-30. `crates/tui/src/panes/stack.rs`. Tab cycles source → stack → scopes, `j`/`k` move the selection in the focused pane, `<CR>` jumps the source pane to the frame *and* fetches that frame's scopes. `Cmd::Batch` (D041) and reducer-allocated request ids (D040) landed here.
 - [x] [M13 — Scopes pane with expansion](docs/implementation/tasks/M13-scopes-pane.md) — completed 2026-07-30. `crates/tui/src/panes/scopes.rs`. Lazily-expanded tree; `<CR>` fetches a row's children once and toggles it thereafter. Replies are matched to the node that asked by request id, and a handle already open above a row is refused rather than followed into a cycle.
 - [x] [M14 — Toggle breakpoint from TUI](docs/implementation/tasks/M14-toggle-breakpoint.md) — completed 2026-07-30. `b` adds or removes through the same `BreakpointAdd`/`BreakpointRemove` the CLI sends; `●`/`◯`/`⊘` in a gutter column of its own, on the line the adapter actually used. No daemon-side handler was needed and `crates/store` was untouched — both already did the job.
 - [x] [M19 — TUI reconnect](docs/implementation/tasks/M19-tui-reconnect.md) — completed 2026-07-30. `lazydap shutdown` from another terminal now leaves the TUI reconnecting rather than frozen: reducer-owned backoff, a daemon started through the CLI's own `ensure_daemon_running` behind an `EnsureDaemon` callback (D042), and a screen made true again by the `Subscribe` snapshot rather than reconstructed.
->>>>>>> worktree-agent-a7ed36397136c6daf
 - [ ] [M15 — Config file + launch.json import](docs/implementation/tasks/M15-config-file.md) → **tag v0.1**
 
 ## Beyond v0.1 (M16–M18+)
