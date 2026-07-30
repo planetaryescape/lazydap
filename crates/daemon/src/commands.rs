@@ -176,7 +176,10 @@ pub async fn shutdown(instance: &Instance, format: OutputFormat) -> Result<()> {
         // shutdown` promising to stop it and then leaving it running is the
         // worst of both. `Shutdown` crosses versions, so send it blind.
         Err(error) if error.label == "VersionMismatch" => {
-            shut_down_other_daemon(&instance.socket).await?;
+            let peer_version = error
+                .peer_protocol_version()
+                .unwrap_or(lazydap_protocol::LAZYDAP_PROTOCOL_VERSION);
+            shut_down_other_daemon(&instance.socket, peer_version).await?;
             match format {
                 OutputFormat::Json => print_json(&serde_json::json!({
                     "instance": instance.name,

@@ -1,7 +1,7 @@
 use crate::client::DaemonClient;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use lazydap_protocol::{IpcConnection, IpcMessage, Request};
+use lazydap_protocol::{IpcConnection, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION, Request};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -38,8 +38,15 @@ pub async fn ensure_daemon_running(instance: &Instance) -> Result<DaemonClient> 
         Err(error) if error.label == "VersionMismatch" => {
             // A daemon from another build. Upgrading is cheap: ask it to go,
             // then start one of ours.
-            tracing::info!(target: "daemon.spawn", "restarting a daemon from another build");
-            shut_down_other_daemon(&instance.socket).await?;
+            let peer_version = error
+                .peer_protocol_version()
+                .unwrap_or(LAZYDAP_PROTOCOL_VERSION);
+            tracing::info!(
+                target: "daemon.spawn",
+                peer_version,
+                "restarting a daemon from another build",
+            );
+            shut_down_other_daemon(&instance.socket, peer_version).await?;
         }
         Err(_) => {}
     }
@@ -136,7 +143,17 @@ fn open_log(path: &Path) -> Result<File> {
                 path.display()
             ))
         })?;
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    // Not fatal — a readable log beats no daemon — but not silent either: on a
+    // filesystem that will not take a chmod, the operator should know the log
+    // is readable by others before it fills up with their program's output.
+    if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            target: "daemon.spawn",
+            log = %path.display(),
+            %error,
+            "could not restrict the daemon log to this user; it may be world-readable",
+        );
+    }
     Ok(file)
 }
 
@@ -167,11 +184,21 @@ async fn connect_until(socket: &Path, deadline: tokio::time::Instant) -> Result<
 /// handshake failed — and the reply is not read, because we may not be able to
 /// parse it. The daemon answers `Shutdown` regardless of version for exactly
 /// this reason (see `server::handle_message`).
-pub(crate) async fn shut_down_other_daemon(socket: &Path) -> Result<()> {
+pub(crate) async fn shut_down_other_daemon(socket: &Path, peer_version: u32) -> Result<()> {
     if let Ok(stream) = UnixStream::connect(socket).await {
         let mut connection = IpcConnection::new(stream);
+        // Stamped with the *daemon's* version, not ours. A daemon old enough
+        // to predate the rule that `Shutdown` is version-exempt will reject
+        // anything carrying a version it does not know — including the request
+        // that is supposed to replace it — and the first real upgrade would
+        // stall. A request wearing its own version number gets through either
+        // way.
         let _ = connection
-            .send(IpcMessage::request(1, Request::Shutdown))
+            .send(IpcMessage {
+                version: peer_version,
+                id: 1,
+                payload: IpcPayload::Request(Request::Shutdown),
+            })
             .await;
     }
 
@@ -212,16 +239,26 @@ impl SpawnLock {
                 // and take it in the same breath: reporting "held" here would
                 // send this client off to wait the full deadline for a daemon
                 // that nobody is starting, fail, and only succeed on a retry.
+                //
+                // Claim it by renaming rather than unlinking. Two contenders
+                // can both decide the lock is stale, and with `remove_file`
+                // the slower one deletes the *fresh* lock the faster one has
+                // just created — leaving two spawners again, which is the
+                // whole thing this lock exists to prevent. Exactly one rename
+                // of a given path can succeed; the loser gets `NotFound` and
+                // goes back to waiting, which is now the right answer because
+                // the winner is spawning.
+                let claimed = path.with_extension(format!("stale-{}", std::process::id()));
+                if std::fs::rename(path, &claimed).is_err() {
+                    return Ok(None);
+                }
                 tracing::warn!(
                     target: "daemon.spawn",
                     lock = %path.display(),
-                    "removing a stale spawn lock",
+                    "took over a stale spawn lock",
                 );
-                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(&claimed);
 
-                // One attempt is enough. If it fails, another client cleared
-                // the same stale lock at the same moment and is now spawning,
-                // which is exactly the case where waiting is right.
                 Ok(Self::try_create(path).ok())
             }
             Err(source) => Err(CliError::general(anyhow::anyhow!(
@@ -299,6 +336,31 @@ mod tests {
         );
 
         drop(lock);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_second_contender_leaves_the_taken_over_lock_alone() {
+        // The dangerous interleaving — two clients that have *both* already
+        // classified the lock as stale, where the slower one deletes the fresh
+        // lock the faster one just created — needs thread interleaving to
+        // reproduce, and is what the rename in `acquire` rules out: only one
+        // rename of a path can succeed. What is testable here is the
+        // observable consequence: a contender arriving after a takeover finds
+        // a live lock and leaves it alone.
+        let path = temp_path("contended");
+        std::fs::write(&path, b"").expect("write lock");
+        set_modified(&path, SystemTime::now() - STALE_LOCK_AGE * 2);
+
+        let winner = SpawnLock::acquire(&path).expect("acquire");
+        assert!(winner.is_some(), "the first contender takes the lock over");
+
+        // The second contender is already past its staleness check by now.
+        let loser = SpawnLock::acquire(&path).expect("acquire");
+        assert!(loser.is_none(), "the second contender must wait");
+        assert!(path.exists(), "the winner's fresh lock must still be there",);
+
+        drop(winner);
         let _ = std::fs::remove_file(&path);
     }
 

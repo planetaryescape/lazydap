@@ -42,6 +42,19 @@ impl CliError {
         }
     }
 
+    /// The protocol version the other end reported, when this is a version
+    /// mismatch.
+    ///
+    /// Needed to talk to a daemon that will not talk to us: a request stamped
+    /// with its version is one it will accept.
+    pub fn peer_protocol_version(&self) -> Option<u32> {
+        self.source
+            .downcast_ref::<IpcError>()
+            .filter(|error| error.code == ErrorCode::VersionMismatch)
+            .and_then(|error| error.details["daemon_version"].as_u64())
+            .and_then(|version| u32::try_from(version).ok())
+    }
+
     /// The stderr JSON body, in the shape AGENTS.md documents.
     pub fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -153,6 +166,25 @@ mod tests {
             IpcError::new(ErrorCode::VersionMismatch, "v1 client, v2 daemon").into();
         assert_eq!(error.exit_code, exit::DAEMON_UNREACHABLE);
         assert_eq!(error.as_json()["error"], "VersionMismatch");
+    }
+
+    #[test]
+    fn a_version_mismatch_reports_the_other_end_s_version() {
+        // What lets us address the outgoing daemon in a dialect it accepts.
+        let error: CliError = IpcError::new(ErrorCode::VersionMismatch, "mismatch")
+            .with_details(serde_json::json!({
+                "client_version": 2,
+                "daemon_version": 1,
+            }))
+            .into();
+
+        assert_eq!(error.peer_protocol_version(), Some(1));
+    }
+
+    #[test]
+    fn only_a_version_mismatch_carries_a_peer_version() {
+        let error: CliError = IpcError::new(ErrorCode::SessionNotFound, "no session").into();
+        assert_eq!(error.peer_protocol_version(), None);
     }
 
     #[test]
