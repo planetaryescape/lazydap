@@ -52,8 +52,8 @@ fn render(root: &Command) -> String {
     push_arguments(&mut out, root, Scope::Root);
 
     out.push_str("\n## Commands\n\n");
-    for sub in root.get_subcommands() {
-        push_command(&mut out, sub);
+    for sub in visible_subcommands(root) {
+        push_command(&mut out, sub, "");
     }
 
     out
@@ -70,9 +70,22 @@ enum Scope {
     Subcommand,
 }
 
-fn push_command(out: &mut String, command: &Command) {
+/// One command, then everything under it.
+///
+/// Recursive because a subcommand's subcommands are the surface too: an agent
+/// that reads this file and never sees `launches list` cannot call it, and the
+/// whole point of generating the file is that it cannot omit what the parser
+/// accepts. `path` is what a caller types before this command's own name.
+fn push_command(out: &mut String, command: &Command, path: &str) {
     let name = command.get_name();
-    let _ = writeln!(out, "### `lazydap {name}`");
+    let full = if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{path} {name}")
+    };
+    // `###` for a top-level command, one deeper per level below it.
+    let heading = "#".repeat(2 + full.split(' ').count());
+    let _ = writeln!(out, "{heading} `lazydap {full}`");
     out.push('\n');
 
     let aliases: Vec<&str> = command.get_visible_aliases().collect();
@@ -88,6 +101,21 @@ fn push_command(out: &mut String, command: &Command) {
 
     push_arguments(out, command, Scope::Subcommand);
     out.push('\n');
+
+    for sub in visible_subcommands(command) {
+        push_command(out, sub, &full);
+    }
+}
+
+/// The subcommands worth documenting.
+///
+/// `help` is clap's own, sits under every command that has subcommands, and
+/// carries a copy of each of its siblings. Following it would fill the file
+/// with sections describing how to read the file.
+fn visible_subcommands(command: &Command) -> impl Iterator<Item = &Command> {
+    command
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != "help" && !sub.is_hide_set())
 }
 
 /// The usage line, with clap's styling stripped.

@@ -33,13 +33,28 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(LAZYDAP)
+        self.run_with_config(None, args)
+    }
+
+    /// The same, with `LAZYDAP_CONFIG_PATH` pointed somewhere — including at a
+    /// file that is not valid TOML.
+    fn run_with_config(&self, config: Option<&PathBuf>, args: &[&str]) -> Output {
+        let mut command = Command::new(LAZYDAP);
+        command
             .env("LAZYDAP_INSTANCE", &self.instance)
             .env("LAZYDAP_RUNTIME_DIR", self.root.join("r"))
-            .env("LAZYDAP_DATA_DIR", self.root.join("d"))
-            .args(args)
-            .output()
-            .expect("run lazydap")
+            .env("LAZYDAP_DATA_DIR", self.root.join("d"));
+        if let Some(config) = config {
+            command.env("LAZYDAP_CONFIG_PATH", config);
+        }
+        command.args(args).output().expect("run lazydap")
+    }
+
+    /// Write a config file inside the sandbox and return its path.
+    fn write_config(&self, body: &str) -> PathBuf {
+        let path = self.root.join("config.toml");
+        std::fs::write(&path, body).expect("write the config");
+        path
     }
 
     /// Run a command and parse its JSON, failing loudly with stderr attached —
@@ -147,6 +162,69 @@ fn disconnecting_with_no_session_reports_that_rather_than_hanging() {
     let error: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr in JSON mode");
     assert_eq!(error["error"], "SessionNotFound");
+}
+
+#[test]
+fn a_broken_config_does_not_take_the_recovery_commands_with_it() {
+    // The moment this matters: a debuggee is running, something is wrong, and
+    // the config file has a typo in it. `status` and `shutdown` are what you
+    // reach for, and they have to work.
+    let sandbox = Sandbox::new("cfgbad");
+    let config = sandbox.write_config("[general\nwait_timeout_seconds = ");
+
+    let output = sandbox.run_with_config(Some(&config), &["--format", "json", "status"]);
+
+    assert!(
+        output.status.success(),
+        "status must survive a config it cannot parse: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status still prints its JSON");
+    assert_eq!(report["instance"], sandbox.instance);
+
+    let shutdown = sandbox.run_with_config(Some(&config), &["--format", "json", "shutdown"]);
+    assert!(shutdown.status.success(), "and so must shutdown");
+}
+
+#[test]
+fn doctor_reports_a_broken_config_rather_than_dying_of_it() {
+    let sandbox = Sandbox::new("cfgdoc");
+    let config = sandbox.write_config("[general\nwait_timeout_seconds = ");
+
+    let output = sandbox.run_with_config(Some(&config), &["--format", "json", "doctor"]);
+
+    // A failed check is a failed command — but the report still prints, which
+    // is the whole point of running doctor.
+    assert_eq!(output.status.code(), Some(1), "a failed check fails");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report is still on stdout");
+    let config_check = report["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == "config.file")
+        .expect("doctor must say something about the config file");
+
+    assert_eq!(config_check["ok"], false);
+    let detail = config_check["detail"].as_str().expect("a detail");
+    assert!(detail.contains("config.toml"), "the path: {detail}");
+    assert_eq!(report["ok"], false);
+}
+
+#[test]
+fn a_launch_refuses_outright_when_the_config_cannot_be_read() {
+    // The other half of the bargain: the adapter comes from this file, so a
+    // command that would act on it does not guess.
+    let sandbox = Sandbox::new("cfglau");
+    let config = sandbox.write_config("[adapter.codelldb\ncommand = ");
+
+    let output = sandbox.run_with_config(Some(&config), &["--format", "json", "launch", "./x"]);
+
+    assert_eq!(output.status.code(), Some(1), "it must not launch");
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr");
+    assert_eq!(error["error"], "InvalidLaunchConfig");
 }
 
 #[test]

@@ -54,6 +54,15 @@ pub enum AdapterError {
         searched: Vec<PathBuf>,
     },
 
+    #[error("{adapter} is pinned to {path} in lazydap's config, and that is not an executable")]
+    ConfiguredAdapterMissing { adapter: AdapterKind, path: PathBuf },
+
+    #[error("cannot read lazydap's config: {source}")]
+    Config {
+        #[source]
+        source: lazydap_config::ConfigError,
+    },
+
     #[error("the adapter is no longer running")]
     Gone,
 
@@ -88,6 +97,23 @@ impl AdapterError {
                 "adapter": adapter.as_str(),
                 "searched": searched,
             })),
+            Self::ConfiguredAdapterMissing { adapter, ref path } => IpcError::new(
+                ErrorCode::AdapterNotFound,
+                format!(
+                    "{adapter} is pinned to {} in lazydap's config, and that is not an executable",
+                    path.display(),
+                ),
+            )
+            .with_details(serde_json::json!({
+                "adapter": adapter.as_str(),
+                "configured": path,
+            })),
+            // Not `AdapterNotFound`: the adapter was never looked for. A
+            // caller that retries with a different adapter would keep hitting
+            // the same broken file.
+            Self::Config { ref source } => {
+                IpcError::new(ErrorCode::InvalidLaunchConfig, source.to_string())
+            }
             Self::Gone => IpcError::new(ErrorCode::AdapterCrashed, "the adapter exited"),
             Self::Timeout { ref command, .. } => {
                 let message = self.to_string();
@@ -412,7 +438,29 @@ impl AdapterHandle {
     /// The whole file, every time: `setBreakpoints` *replaces* a source's list
     /// rather than adding to it, so sending only the new one silently removes
     /// the rest. See `docs/reference/dap-protocol-cheatsheet.md`.
+    ///
+    /// Sent twice at most: an adapter that declines the path but names one it
+    /// could have used gets a second chance under that name (quirk 8).
     pub async fn set_breakpoints(
+        &self,
+        source: &Path,
+        breakpoints: &[Breakpoint],
+    ) -> Result<Vec<AdapterBreakpoint>> {
+        let applied = self.send_breakpoints(source, breakpoints).await?;
+
+        let Some(rebound) = rebind_source(source, &applied) else {
+            return Ok(applied);
+        };
+        tracing::debug!(
+            target: "daemon.session",
+            requested = %source.display(),
+            rebound = %rebound.display(),
+            "the adapter would not bind this path but named another spelling of it; re-sending (quirk 8)",
+        );
+        self.send_breakpoints(&rebound, breakpoints).await
+    }
+
+    async fn send_breakpoints(
         &self,
         source: &Path,
         breakpoints: &[Breakpoint],
@@ -456,6 +504,45 @@ impl AdapterHandle {
     }
 }
 
+/// The spelling of `requested` that this adapter would bind, when it refused
+/// the one it was sent (quirk 8).
+///
+/// The failure this exists for: lazydap canonicalises source paths, the
+/// compiler records whatever was typed on its command line, and codelldb
+/// compares the two as strings. Under a symlinked directory — `/tmp` on macOS,
+/// which is `/private/tmp` — those are different strings for one file, and
+/// every breakpoint in the program silently fails to bind.
+///
+/// Two conditions, both necessary:
+///
+/// - **Nothing bound.** If some breakpoints in the file did bind, re-sending
+///   the whole list under a second path would leave the adapter holding both
+///   sets: two adapter breakpoints for one of ours, on one line.
+/// - **The suggestion is the same file.** Resolved through the filesystem, not
+///   compared as text. An adapter naming a path that resolves elsewhere is
+///   offering to break in code the caller never asked about, and taking it up
+///   on that would be worse than the unbound breakpoint.
+///
+/// Returning `None` leaves the breakpoints exactly as unverified as they
+/// already were, which is what `break --list` has always shown.
+fn rebind_source(requested: &Path, applied: &[AdapterBreakpoint]) -> Option<PathBuf> {
+    if applied.is_empty() || applied.iter().any(|breakpoint| breakpoint.verified) {
+        return None;
+    }
+
+    let candidate = applied
+        .iter()
+        .filter_map(|breakpoint| breakpoint.message.as_deref())
+        .find_map(translate::suggested_location)?;
+    if candidate == requested {
+        return None;
+    }
+
+    let same_file =
+        std::fs::canonicalize(&candidate).ok()? == std::fs::canonicalize(requested).ok()?;
+    same_file.then_some(candidate)
+}
+
 /// Read a response body as the shape DAP says it is.
 ///
 /// One place, so an execution request and a query report a malformed answer
@@ -470,21 +557,58 @@ fn decode<R: DeserializeOwned>(command: &str, body: serde_json::Value) -> Result
 
 /// Find the binary for `kind`.
 ///
-/// M5 looks on `PATH` only. The full order decided in D026 is config file >
-/// lazydap-managed directory > `PATH`; the first two need the config loader
-/// that lands with M15/M18, and adding empty lookups now would just be dead
-/// code pretending to be a policy.
+/// Two of D026's three tiers: the user's config file, then `PATH`. The middle
+/// one — a lazydap-managed `{data_dir}/adapters/` — is still not here, because
+/// nothing installs an adapter into it. A lookup in a directory no code ever
+/// writes to is dead code pretending to be a policy, which is the same reason
+/// M5 shipped only `PATH`.
+///
+/// The config is read on every launch rather than once at daemon start: the
+/// daemon may be days old, and somebody who has just pinned a new codelldb
+/// build expects the next launch to use it, not the next reboot.
 pub fn discover(kind: AdapterKind) -> Result<PathBuf> {
-    discover_in(kind, &std::env::var_os("PATH").unwrap_or_default())
+    let config = lazydap_config::load_config().map_err(|source| AdapterError::Config { source })?;
+    discover_with(kind, &config)
 }
 
-/// The lookup itself, with `PATH` passed in so tests do not have to mutate the
-/// process environment (which edition 2024 makes `unsafe`, and this workspace
-/// forbids).
-fn discover_in(kind: AdapterKind, path: &std::ffi::OsStr) -> Result<PathBuf> {
+/// Discovery against a config somebody else has already loaded.
+///
+/// This is what the *client* calls (D050). The config file and `PATH` both
+/// describe the machine as the person typing the command sees it, and the
+/// daemon sees neither: it may have been started days ago, from another
+/// directory, without the `LAZYDAP_CONFIG_PATH` now in force. Resolving there
+/// would read a different config than the one the caller set and fall through
+/// to `PATH` without saying so.
+pub fn discover_with(kind: AdapterKind, config: &lazydap_config::Config) -> Result<PathBuf> {
+    discover_in(kind, config, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// The lookup itself, with the config and `PATH` passed in so tests do not
+/// have to mutate the process environment (which edition 2024 makes `unsafe`,
+/// and this workspace forbids).
+fn discover_in(
+    kind: AdapterKind,
+    config: &lazydap_config::Config,
+    path: &std::ffi::OsStr,
+) -> Result<PathBuf> {
     let binary = match kind {
         AdapterKind::Codelldb => "codelldb",
     };
+
+    // Tier one. A pinned path that is wrong is an error rather than a reason
+    // to carry on down the list: falling through to `PATH` would debug a
+    // different build of the adapter than the one somebody deliberately
+    // chose, and say nothing about having done so.
+    if let Some(command) = config.adapter_command(kind) {
+        if is_executable(command) {
+            tracing::debug!(target: "daemon.session", adapter = %kind, path = %command.display(), "using the adapter pinned in the config");
+            return Ok(command.to_path_buf());
+        }
+        return Err(AdapterError::ConfiguredAdapterMissing {
+            adapter: kind,
+            path: command.to_path_buf(),
+        });
+    }
 
     let mut searched = Vec::new();
     for dir in std::env::split_paths(path) {
@@ -516,6 +640,7 @@ mod tests {
     fn a_missing_adapter_reports_where_it_looked() {
         let error = discover_in(
             AdapterKind::Codelldb,
+            &lazydap_config::Config::default(),
             std::ffi::OsStr::new("/nonexistent-a:/nonexistent-b"),
         )
         .expect_err("codelldb cannot be on a PATH of missing directories");
@@ -529,6 +654,178 @@ mod tests {
             "got: {}",
             ipc.details,
         );
+    }
+
+    /// A config file and, optionally, a fake adapter binary beside it.
+    fn pinned_config(label: &str, executable: bool) -> (lazydap_config::Config, PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("lazydap-discover-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create");
+
+        let binary = dir.join("codelldb");
+        if executable {
+            std::fs::write(&binary, b"#!/bin/sh\n").expect("write");
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("[adapter.codelldb]\ncommand = \"{}\"\n", binary.display()),
+        )
+        .expect("write config");
+
+        let config = lazydap_config::load_config_from(&config_path).expect("load config");
+        (config, binary, dir)
+    }
+
+    #[test]
+    fn an_adapter_pinned_in_the_config_wins_over_one_on_path() {
+        let (config, binary, dir) = pinned_config("pinned", true);
+
+        // A PATH that would otherwise answer: /bin has plenty of executables,
+        // but none of them are what the config asked for.
+        let found = discover_in(AdapterKind::Codelldb, &config, std::ffi::OsStr::new("/bin"))
+            .expect("the pinned binary");
+
+        assert_eq!(found, binary);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pinned_adapter_that_is_not_there_is_an_error_rather_than_a_fallback() {
+        // Falling through to PATH would debug a different build of codelldb
+        // than the one somebody deliberately pinned, and say nothing about it.
+        let (config, binary, dir) = pinned_config("missing", false);
+
+        let error = discover_in(AdapterKind::Codelldb, &config, std::ffi::OsStr::new("/bin"))
+            .expect_err("the pinned path does not exist");
+
+        assert!(
+            matches!(error, AdapterError::ConfiguredAdapterMissing { .. }),
+            "got: {error}",
+        );
+        let ipc = error.into_ipc();
+        assert_eq!(ipc.code, ErrorCode::AdapterNotFound);
+        assert_eq!(ipc.details["configured"], serde_json::json!(binary));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The message codelldb actually sends, captured from a real run.
+    fn unbound(message: &str) -> AdapterBreakpoint {
+        AdapterBreakpoint {
+            id: Some(lazydap_core::BreakpointId(1)),
+            adapter_id: Some(1),
+            verified: false,
+            line: Some(6),
+            message: Some(message.to_string()),
+        }
+    }
+
+    /// A file reachable by two names: one through a symlinked directory, one
+    /// not. Exactly the `/tmp` → `/private/tmp` shape, built by hand so the
+    /// test does not depend on the host having that particular symlink.
+    struct TwoSpellings {
+        real: PathBuf,
+        through_link: PathBuf,
+        root: PathBuf,
+    }
+
+    impl TwoSpellings {
+        fn new(label: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("lazydap-rebind-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let real_dir = root.join("real");
+            std::fs::create_dir_all(&real_dir).expect("create");
+            std::fs::write(real_dir.join("main.c"), b"int main(void){return 0;}\n").expect("write");
+            std::os::unix::fs::symlink(&real_dir, root.join("link")).expect("symlink");
+
+            Self {
+                real: real_dir.join("main.c"),
+                through_link: root.join("link").join("main.c"),
+                root,
+            }
+        }
+    }
+
+    impl Drop for TwoSpellings {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn an_unbound_breakpoint_is_re_sent_under_the_spelling_the_adapter_named() {
+        // Quirk 8, the whole of it: we canonicalised, the debug info did not,
+        // and codelldb compared the two as strings.
+        let files = TwoSpellings::new("same");
+        let applied = [unbound(&format!(
+            "Breakpoint at {}:6 could not be resolved, but a valid location was found at {}:6",
+            files.real.display(),
+            files.through_link.display(),
+        ))];
+
+        assert_eq!(
+            rebind_source(&files.real, &applied),
+            Some(files.through_link.clone()),
+        );
+    }
+
+    #[test]
+    fn a_suggestion_naming_a_different_file_is_refused() {
+        // Binding here would set a breakpoint in code the caller never asked
+        // about, which is worse than the breakpoint that did not bind.
+        let files = TwoSpellings::new("other");
+        let elsewhere = files.root.join("real").join("other.c");
+        std::fs::write(&elsewhere, b"int other(void){return 1;}\n").expect("write");
+
+        let applied = [unbound(&format!(
+            "Breakpoint at {}:6 could not be resolved, but a valid location was found at {}:6",
+            files.real.display(),
+            elsewhere.display(),
+        ))];
+
+        assert_eq!(rebind_source(&files.real, &applied), None);
+    }
+
+    #[test]
+    fn nothing_is_re_sent_when_part_of_the_file_bound() {
+        // Re-sending the whole list under a second path would leave the
+        // adapter holding both sets: two adapter breakpoints on one line.
+        let files = TwoSpellings::new("partial");
+        let applied = [
+            AdapterBreakpoint {
+                verified: true,
+                ..unbound("")
+            },
+            unbound(&format!(
+                "Breakpoint at {}:6 could not be resolved, but a valid location was found at {}:6",
+                files.real.display(),
+                files.through_link.display(),
+            )),
+        ];
+
+        assert_eq!(rebind_source(&files.real, &applied), None);
+    }
+
+    #[test]
+    fn an_unbound_breakpoint_with_no_suggestion_is_left_alone() {
+        let applied = [unbound("Breakpoint at main.c:6 could not be resolved")];
+        assert_eq!(rebind_source(Path::new("/p/main.c"), &applied), None);
+    }
+
+    #[test]
+    fn a_suggestion_identical_to_what_was_sent_is_not_worth_a_second_request() {
+        let files = TwoSpellings::new("identical");
+        let applied = [unbound(&format!(
+            "Breakpoint could not be resolved, but a valid location was found at {}:6",
+            files.real.display(),
+        ))];
+
+        assert_eq!(rebind_source(&files.real, &applied), None);
     }
 
     #[test]

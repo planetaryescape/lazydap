@@ -8,12 +8,16 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Where lazydap keeps things: project-root detection, and the paths of the socket, log and state files"
+description = "Where lazydap keeps things: project-root detection, file paths, user config and .vscode/launch.json import"
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
+lazydap-core = { path = "../core" }
 dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }

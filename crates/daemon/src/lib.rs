@@ -24,6 +24,7 @@ use cli::{Cli, Command};
 use error::{CliError, Result};
 use instance::Instance;
 use lazydap_core::StepKind;
+use lazydap_protocol::{ErrorCode, IpcError};
 use output::{OutputFormat, resolve_format};
 use std::process::ExitCode;
 
@@ -72,7 +73,8 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
     }
 
     let instance = Instance::resolve(cli.instance.as_deref())?;
-    use commands::{breakpoints, diagnostics, inspect, session};
+    check_config(&instance, &command, format)?;
+    use commands::{breakpoints, diagnostics, inspect, launches, session};
 
     match command {
         Command::Version | Command::Completions { .. } => unreachable!("handled above"),
@@ -93,7 +95,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                     program,
                     args,
                     cwd,
-                    env,
+                    env: session::parse_env(&env)?,
                     adapter,
                     stop_on_entry,
                 },
@@ -101,6 +103,13 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             )
             .await
         }
+        Command::Launches { command } => match command {
+            cli::LaunchesCommand::List => launches::list(&instance, format).await,
+            cli::LaunchesCommand::Run {
+                name,
+                stop_on_entry,
+            } => launches::run(&instance, &name, stop_on_entry, format).await,
+        },
         Command::Status => session::status(&instance, format).await,
         Command::Disconnect {
             session_id,
@@ -221,6 +230,45 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             check_state,
         } => diagnostics::doctor(&instance, check_adapters, check_state, format).await,
     }
+}
+
+/// Refuse, or warn, when the user's config file could not be read.
+///
+/// Refuse for the commands that would act on it — launching with an adapter
+/// chosen by a file we could not parse is not something to guess at. Warn for
+/// everything else and carry on with the defaults: a typo in `config.toml`
+/// must not take `shutdown`, `disconnect`, `status` or `logs` down with it,
+/// because those are what you run when a debuggee is loose and something has
+/// gone wrong.
+///
+/// The warning goes to stderr in table mode and to the log otherwise: a
+/// caller parsing `--format json` gets its object on stdout unpolluted, and
+/// `lazydap doctor` reports the same problem as a failed check either way.
+fn check_config(instance: &Instance, command: &Command, format: OutputFormat) -> Result<()> {
+    let Some(problem) = &instance.config_problem else {
+        return Ok(());
+    };
+
+    if command.needs_config() {
+        return Err(CliError::from(IpcError::new(
+            ErrorCode::InvalidLaunchConfig,
+            format!("{problem} — fix it, or run `lazydap doctor` to see where it is"),
+        )));
+    }
+
+    // `doctor` reports this as a check of its own, on stdout, where the rest
+    // of its answer is. Warning first would print the same TOML error twice,
+    // the first time out of nowhere.
+    if matches!(command, Command::Doctor { .. }) {
+        return Ok(());
+    }
+
+    if format == OutputFormat::Table {
+        eprintln!("warning: {problem}; carrying on with the defaults");
+    } else {
+        tracing::warn!(target: "cli.config", %problem, "carrying on with the defaults");
+    }
+    Ok(())
 }
 
 /// Whether there is a person at a terminal to hand the screen to.

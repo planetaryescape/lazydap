@@ -20,7 +20,7 @@ pub struct LaunchOptions {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
-    pub env: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub adapter: AdapterKind,
     pub stop_on_entry: bool,
 }
@@ -66,7 +66,14 @@ pub async fn launch(
                 .with_details(serde_json::json!({ "program": options.program })),
             )
         })?;
-    let env = parse_env(&options.env)?;
+
+    // Resolved here, against this process's config and `PATH`, for the same
+    // reason the program and the working directory are (D050). The daemon's
+    // environment is whatever it inherited whenever it started, so a
+    // `LAZYDAP_CONFIG_PATH` set for this command would mean nothing there.
+    // Failing now also beats failing after a daemon has been spawned.
+    let adapter_command = crate::adapter::discover_with(options.adapter, &instance.config)
+        .map_err(|error| CliError::from(error.into_ipc()))?;
 
     let mut client = ensure_daemon_running(instance).await?;
     let response = client
@@ -75,8 +82,9 @@ pub async fn launch(
             program,
             args: options.args,
             cwd,
-            env,
+            env: options.env,
             stop_on_entry: options.stop_on_entry,
+            adapter_command: Some(adapter_command),
         }))
         .await?;
 
@@ -290,7 +298,7 @@ pub async fn step(
 ) -> Result<()> {
     let mut client = ensure_daemon_running(instance).await?;
     let session_id = active_session_id(&mut client).await?;
-    let wait = wait_mode(wait);
+    let wait = wait_mode(wait, &instance.config);
 
     let request = match movement {
         Movement::Continue { all_threads } => Request::Continue {
@@ -423,7 +431,7 @@ fn render_status(report: &StatusReport) -> String {
 /// A pair with no `=` is refused rather than guessed at: `--env DEBUG` could
 /// plausibly mean "pass DEBUG through from my shell" or "set DEBUG to empty",
 /// and picking one silently would eventually be the wrong one.
-fn parse_env(pairs: &[String]) -> Result<BTreeMap<String, String>> {
+pub fn parse_env(pairs: &[String]) -> Result<BTreeMap<String, String>> {
     pairs
         .iter()
         .map(|pair| {

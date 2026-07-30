@@ -56,6 +56,24 @@ lazydap disconnect --format json
 Worked examples, including a crash investigation:
 [`references/examples.md`](references/examples.md).
 
+## When the repository already knows how to run itself
+
+Before working out a program's arguments yourself, ask:
+
+```bash
+lazydap launches list --format json
+```
+
+It reads `.vscode/launch.json` and `.lazydap/state.toml` and reports each
+configuration with a `runnable` flag — false for the ones lazydap cannot start
+(another debugger's adapter, an `attach`, a `${...}` variable nothing here can
+expand), with the reason next to it. Start a runnable one by name, and its
+program, arguments, working directory and environment come from the file:
+
+```bash
+lazydap launches run "Debug binary" --stop-on-entry --format json
+```
+
 ## Things that will otherwise cost you a turn
 
 - **`--stop-on-entry` stops before `main`.** The stack says `_dyld_start` and

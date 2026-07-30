@@ -136,7 +136,7 @@ $ lazydap doctor --format json
   "checks": [
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (0 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v2", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v4", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -197,13 +197,48 @@ $ echo $?
 2
 ```
 
+## Configurations the repository already has
+
+Most repositories with a non-trivial debug setup already carry a `.vscode/launch.json`. lazydap reads it — and never writes it — alongside its own `[[launch_configs]]` in `.lazydap/state.toml`:
+
+```console
+$ lazydap launches list
+NAME          SOURCE       ADAPTER  REQUEST  PROGRAM                          RUNNABLE
+Debug binary  launch.json  lldb     launch   /Users/you/demo/build/demo       yes
+API           launch.json  python   launch   /Users/you/demo/app.py           no (it needs a `python` adapter, and lazydap ships codelldb only)
+Pick one      launch.json  lldb     launch   /Users/you/demo/${command:pickProcess}  no (nothing could expand ${command:pickProcess}, so its paths are not paths)
+
+warning: `Pick one` uses ${command:pickProcess}, which nothing here can expand; it is left as written
+
+$ lazydap launches run "Debug binary" --stop-on-entry --format json
+{"session_id":"7f866ac8-...","state":"paused","reason":"entry", ...}
+```
+
+VS Code's dialect is read as written: `//` and `/* */` comments and trailing commas. `${workspaceFolder}`, `${workspaceFolderBasename}`, `${userHome}` and `${env:VAR}` are expanded.
+
+**A variable nothing can expand is left in the string and reported, not quietly replaced with nothing.** VS Code substitutes the empty string, which turns `${env:BUILD_DIR}/app` into `/app` — a real path on every Unix machine and the wrong one on all of them. lazydap marks the configuration unrunnable and says which variable it was. Configurations for other debuggers, and `attach` configurations, are listed for the same reason: telling you your file has four configurations and lazydap can run one of them beats showing one and dropping three.
+
+## Configuring lazydap itself
+
+Optional. Without a config file lazydap runs on its defaults and writes nothing. With one — at `~/.config/lazydap/config.toml`, at `$XDG_CONFIG_HOME/lazydap/config.toml`, or wherever `LAZYDAP_CONFIG_PATH` points — two settings are read:
+
+```toml
+[general]
+wait_timeout_seconds = 45          # the default for --wait, under --timeout and LAZYDAP_TIMEOUT
+
+[adapter.codelldb]
+command = "/opt/codelldb/codelldb" # pin the adapter, ahead of PATH
+```
+
+A pinned adapter that isn't there is an error naming the path, not a quiet fall-through to whatever is on `PATH` — using a different build of the adapter than the one you chose, and not saying so, is worse than failing. Keys this build does not read yet are ignored rather than rejected, so a file written against the fuller schema in [`docs/blueprint/08-state-and-config.md`](docs/blueprint/08-state-and-config.md) keeps working as those land.
+
 ## The TUI
 
 Bare `lazydap` on a terminal opens it; `lazydap tui` is the explicit spelling. In a pipe or a CI job the same command prints help instead, because the tty check covers stdin and stdout.
 
-It shows the source file with a marker on the current line, and drives the program with the same requests the CLI sends: `F5`/`c` continue, `F10`/`n` step over, `F11` step in, `Shift-F11` step out. `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` move the view. `q` leaves without ending the session, so you can walk out of the TUI and keep going from the shell against the same paused program.
+Three panes — the source file with a marker on the current line, the call stack, and the variable scopes of the selected frame. `Tab` moves between them, `<CR>` jumps to a frame or expands a variable, `b` sets or clears a breakpoint on the cursor line. It drives the program with the same requests the CLI sends: `F5`/`c` continue, `F10`/`n` step over, `F11` step in, `Shift-F11` step out. `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` move the view. `q` leaves without ending the session, so you can walk out of the TUI and keep going from the shell against the same paused program. If the daemon goes away underneath it, the TUI says so and reconnects on its own, starting one if there is none.
 
-The TUI cannot reach the daemon's internals, and this is enforced by the dependency graph rather than by discipline: `lazydap-tui` depends on `lazydap-core` and `lazydap-protocol` and nothing else, so a feature that skips the protocol does not compile. Stack, scopes and breakpoint panes are the next milestones and are not there yet.
+The TUI cannot reach the daemon's internals, and this is enforced by the dependency graph rather than by discipline: `lazydap-tui` depends on `lazydap-core`, `lazydap-config` and `lazydap-protocol` and nothing else, so a feature that skips the protocol does not compile. That is also why every one of those keys has a CLI equivalent: a TUI-only feature is not something that can be written.
 
 ## For agents
 
@@ -215,11 +250,11 @@ For agents working *on* this repo rather than with it, [`AGENTS.md`](AGENTS.md) 
 
 ## What works today
 
-Launch, breakpoints (set, list, remove, toggle, conditional), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, captured output, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints. A daemon per project with a live event stream clients can subscribe to. A source-pane TUI.
+Launch, breakpoints (set, list, remove, toggle, conditional), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, captured output, launches, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints. A daemon per project with a live event stream clients can subscribe to. A three-pane TUI that reconnects on its own.
 
 Scope for v0.1: **codelldb only** (C, C++, Rust), **one session at a time**, **macOS and Linux**.
 
-Not built, in rough order: TUI panes for stack, scopes and breakpoints; a config file and `.vscode/launch.json` import; watches; a REPL pane; `attach`; restart. After that, debugpy for Python, then delve and js-debug, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
+Not built, in rough order: watches; a REPL pane; `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, debugpy for Python, then delve and js-debug, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
 
 Windows is not a target. Nothing here phones home ([`PRIVACY.md`](PRIVACY.md)).
 
@@ -240,9 +275,12 @@ Clients speak length-delimited JSON over a Unix socket to a daemon that owns the
 | How `--wait` is specified | [`docs/blueprint/10-async-to-sync.md`](docs/blueprint/10-async-to-sync.md) |
 | codelldb's quirks, forensically | [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md) |
 | How debuggers work at all | [`docs/reference/how-debuggers-actually-work.md`](docs/reference/how-debuggers-actually-work.md) |
+| State and config file schemas | [`docs/blueprint/08-state-and-config.md`](docs/blueprint/08-state-and-config.md) |
 | Setting up to hack on it | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | What changed | [`CHANGELOG.md`](CHANGELOG.md) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
+
+The documentation website's sources are in [`site/`](site/).
 
 lazydap is also the subject of a learn-by-LLM Rust book. The chapters under [`docs/book/`](docs/book/) are a snapshot; they are owned by `lazydap-learn`, a separate and currently private repository.
 

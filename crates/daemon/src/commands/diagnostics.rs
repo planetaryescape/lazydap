@@ -12,7 +12,7 @@ use crate::error::{CliError, Result};
 use crate::instance::Instance;
 use crate::output::{OutputFormat, Row, View};
 use clap::CommandFactory;
-use lazydap_protocol::{DoctorReport, LAZYDAP_PROTOCOL_VERSION, Request, Response};
+use lazydap_protocol::{DoctorCheck, DoctorReport, LAZYDAP_PROTOCOL_VERSION, Request, Response};
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
@@ -61,9 +61,16 @@ pub async fn doctor(
             check_state,
         })
         .await?;
-    let Response::Doctor(report) = response else {
+    let Response::Doctor(mut report) = response else {
         return Err(unexpected(response));
     };
+
+    // Added here rather than in the daemon because the config is the client's
+    // to read (D050): the daemon's environment is not the caller's, so a
+    // daemon-side check would report on a different file than the one this
+    // shell is using — or on none at all.
+    report.checks.insert(0, config_check(instance));
+    report.ok = report.checks.iter().all(|check| check.ok);
 
     let view = view(&report);
     view.print(format)?;
@@ -78,6 +85,38 @@ pub async fn doctor(
         )));
     }
     Ok(())
+}
+
+/// What `lazydap doctor` says about the user's config file.
+///
+/// Three outcomes worth telling apart: there is one and it reads; there is one
+/// and it does not, in which case the path *and* the parser's complaint are
+/// the whole answer; or there is none, which is normal and is reported as the
+/// path to create if you want one.
+fn config_check(instance: &Instance) -> DoctorCheck {
+    let name = "config.file".to_string();
+
+    if let Some(problem) = &instance.config_problem {
+        return DoctorCheck {
+            name,
+            ok: false,
+            // Flattened: a TOML error is several lines with a caret diagram in
+            // it, and a multi-line cell tears the table apart. The JSON keeps
+            // whatever it says; the table keeps its columns.
+            detail: problem.split_whitespace().collect::<Vec<_>>().join(" "),
+        };
+    }
+
+    let detail = match lazydap_config::config_path() {
+        Ok(path) if path.exists() => format!("{} (read)", path.display()),
+        Ok(path) => format!("none; create {} to add one", path.display()),
+        Err(error) => format!("no config directory on this machine: {error}"),
+    };
+    DoctorCheck {
+        name,
+        ok: true,
+        detail,
+    }
 }
 
 fn view(report: &DoctorReport) -> View {
@@ -102,6 +141,53 @@ fn view(report: &DoctorReport) -> View {
         &["check", "status", "detail"],
         rows,
     )
+}
+
+#[cfg(test)]
+mod config_check_tests {
+    use super::*;
+    use lazydap_config::Config;
+    use std::path::PathBuf;
+
+    fn instance(config_problem: Option<String>) -> Instance {
+        Instance {
+            name: "test".to_string(),
+            project_root: PathBuf::from("/p"),
+            socket: PathBuf::from("/tmp/s.sock"),
+            lock: PathBuf::from("/tmp/s.lock"),
+            pid: PathBuf::from("/tmp/s.pid"),
+            log: PathBuf::from("/tmp/s.log"),
+            config: Config::default(),
+            config_problem,
+        }
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_reported_rather_than_fatal() {
+        // `doctor` is the command whose job is saying this. Failing to start
+        // because of the very thing it was asked to diagnose would be absurd.
+        let check = config_check(&instance(Some(
+            "/home/me/.config/lazydap/config.toml is not valid lazydap config: \
+             expected `=` at line 2"
+                .to_string(),
+        )));
+
+        assert_eq!(check.name, "config.file");
+        assert!(!check.ok);
+        assert!(check.detail.contains("config.toml"), "the path is in it");
+        assert!(check.detail.contains("line 2"), "and so is the reason");
+    }
+
+    #[test]
+    fn a_machine_with_no_config_passes_and_says_where_to_put_one() {
+        let check = config_check(&instance(None));
+        assert!(check.ok, "not having one is the normal case: {check:?}");
+        assert!(
+            check.detail.contains("config.toml"),
+            "got: {}",
+            check.detail,
+        );
+    }
 }
 
 /// Print the daemon's log.

@@ -10,7 +10,7 @@
 //! 2. Nothing here uses a shared read loop. The handshake owns the whole
 //!    transport, and hands it to the pump only once the session is live.
 
-use super::{AdapterError, AdapterHandle, Pending, Result, discover, translate};
+use super::{AdapterError, AdapterHandle, Pending, Result, discover, rebind_source, translate};
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, Breakpoint, OutputCategory, OutputChunk, PauseReason,
     SessionState,
@@ -20,7 +20,7 @@ use lazydap_dap::{
     InitializeArgs, LaunchArgs, SetBreakpointsArgs, SetBreakpointsResponse, Source,
 };
 use lazydap_protocol::{AdapterCapabilities, LaunchRequest};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +52,7 @@ pub struct Launched {
     /// session buffer so a `stop_on_entry` launch does not silently lose the
     /// first lines.
     pub output: Vec<OutputChunk>,
-    /// The process the adapter started, when it said which (quirk 8).
+    /// The process the adapter started, when it said which (quirk 9).
     ///
     /// Read from the launch output rather than by the pump, because the line
     /// carrying it arrives *during* the handshake — the pump does not own the
@@ -77,7 +77,14 @@ pub async fn launch(
     request: &LaunchRequest,
     breakpoints: &[(PathBuf, Vec<Breakpoint>)],
 ) -> Result<Launched> {
-    let adapter_path = discover(AdapterKind::Codelldb)?;
+    // What the client resolved, when it said (D050). Its config file and its
+    // `PATH` are the ones the caller meant; falling back to our own lookup is
+    // for a client too old to have sent one, and the protocol version makes
+    // that impossible today.
+    let adapter_path = match &request.adapter_command {
+        Some(path) => path.clone(),
+        None => discover(AdapterKind::Codelldb)?,
+    };
     let mut transport = DapTransport::spawn(&adapter_path.to_string_lossy()).await?;
 
     match handshake(&mut transport, request, breakpoints).await {
@@ -145,6 +152,10 @@ async fn handshake(
     // Which source each outstanding `setBreakpoints` was for, so its response
     // can be paired back up with what we asked for.
     let mut breakpoint_seqs: HashMap<i64, usize> = HashMap::new();
+    // Sources already re-sent under the adapter's own spelling (quirk 8, the /tmp rebind). One
+    // retry each: the second answer is taken as final however it reads, so two
+    // components disagreeing about a path cannot loop here.
+    let mut rebound: HashSet<usize> = HashSet::new();
     let mut launch_answered = false;
     let mut outcome = Outcome {
         capabilities: translate_capabilities(&capabilities),
@@ -237,9 +248,31 @@ async fn handshake(
                     launch_answered = true;
                 }
                 if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
-                    outcome
-                        .breakpoints
-                        .extend(applied_breakpoints(&breakpoints[index].1, response.body));
+                    let (source, in_source) = &breakpoints[index];
+                    let applied = applied_breakpoints(in_source, response.body);
+
+                    // Quirk 8: the adapter would not bind the path we sent but
+                    // named one it could. Ask again under that name, and let
+                    // the retry's answer replace this one rather than join it
+                    // — the caller would otherwise see each breakpoint twice.
+                    match rebind_source(source, &applied).filter(|_| rebound.insert(index)) {
+                        Some(path) => {
+                            tracing::debug!(
+                                target: "daemon.session",
+                                requested = %source.display(),
+                                rebound = %path.display(),
+                                "re-sending breakpoints under the path the adapter named (quirk 8)",
+                            );
+                            let seq = transport
+                                .send_request(
+                                    "setBreakpoints",
+                                    &set_breakpoints_args(&path, in_source),
+                                )
+                                .await?;
+                            breakpoint_seqs.insert(seq, index);
+                        }
+                        None => outcome.breakpoints.extend(applied),
+                    }
                 }
             }
         }
@@ -450,6 +483,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             env: BTreeMap::new(),
             stop_on_entry: true,
+            adapter_command: None,
         }
     }
 

@@ -573,6 +573,86 @@ Found by counting, not by reading: 46 orphaned test fixtures had accumulated acr
 
 ---
 
+## D046 — the JSONC dialect is read by a hand-rolled scanner, not a crate
+
+**Status:** decided (2026-07-30, with M15).
+
+**Why:** `.vscode/launch.json` is JSON with `//` and `/* */` comments and trailing commas, and `serde_json` reads none of that. The alternatives were `json5`, `jsonc-parser` or `serde_jsonrc`; the cost is roughly a hundred lines of scanner against a dependency in a budget the project keeps deliberately small (AGENTS.md). The scanner is in `crates/config/src/launch_json.rs::strip_jsonc` and turns JSONC into JSON, which `serde_json` then parses — so the *parser* is still a real one, and only the dialect is handled here.
+
+**What makes it correct rather than a regex:** it is string-aware. `"https://example.com"` is not a comment and `{"sep": ","}` is not a trailing comma, and both are the bug every naive stripper has. Comments become the whitespace they occupied — their newlines are kept — so a `serde_json` error still points at the line the reader is looking at in their editor.
+
+**What it deliberately does not do:** single quotes, unquoted keys, hex numbers, or anything else JSON5 adds. VS Code does not accept them either, so a file using them was never going to work in the editor that owns the format.
+
+**Revisit if:** a second file format needs the same treatment, or the scanner grows a third special case. One more and the dependency is the cheaper side.
+
+---
+
+## D047 — launch configurations are read by the client, and `run` sends an ordinary `Launch`
+
+**Status:** decided (2026-07-30, with M15).
+
+**Why:** both files are found by walking up from the working directory. The daemon's working directory is wherever it happened to be started (D024's detection runs in whoever is asking), so a daemon reading `.vscode/launch.json` would read a different project's, or none. Every other path in lazydap is resolved client-side for exactly this reason — see the module comment on `crates/daemon/src/commands/mod.rs`.
+
+**What follows from it:** `lazydap launches run <name>` resolves the configuration, then sends the same `Request::Launch` that `lazydap launch` sends. No new protocol request, no protocol version bump, and nothing about launch configurations enters the daemon — which also means the TUI could grow a configuration picker later without either side learning a new message.
+
+**The precedence rule:** `.lazydap/state.toml` beats `.vscode/launch.json` when both name a configuration the same, with a warning naming it. lazydap's own file is the one somebody chose to write for lazydap; picking silently between two things with one name is how you debug the wrong binary.
+
+**Scope taken, and not:** state.toml's `[[launch_configs]]` are **read-only**. Nothing writes them — there is no `launches add` — and they are read out of the store's `unknown` table rather than modelled as a field, because a typed field serialising as empty would delete a hand-written configuration the first time somebody set a breakpoint.
+
+---
+
+## D048 — an unbound breakpoint is re-sent under the path the adapter names (resolves quirk 8)
+
+**Status:** decided (2026-07-30, with M15). Implemented in `crates/daemon/src/adapter/mod.rs::rebind_source`.
+
+**Why:** three components disagreed about a file's name and the user paid for it. lazydap canonicalises source paths so the daemon and the adapter agree regardless of anyone's working directory; a compiler records the path as it was typed on its command line; codelldb compares the two as strings. Under a symlinked directory — `/tmp` on macOS is `/private/tmp` — every breakpoint in the program silently fails to bind, and the only signal is a `verified: false` inside a message that reads like a success.
+
+lazydap has both spellings at the moment it matters. When a `setBreakpoints` response reports nothing bound and names a location it could have used, that file's breakpoints are sent again under that name, and the second answer is final.
+
+**What bounds it:**
+
+- **One retry per source**, tracked per launch. The second answer is taken however it reads, so two components disagreeing about a path cannot loop.
+- **Only when nothing in the file bound.** A partial rebind would leave the adapter holding two live breakpoints for one of ours, on one line.
+- **Only when the suggestion resolves to the same file**, checked through the filesystem rather than compared as text. An adapter naming a path that resolves elsewhere is offering to break in code the caller never asked about.
+- **The stored path does not change.** Only the spelling on the wire does, so breakpoint ids, `break --list` and `.lazydap/state.toml` are untouched.
+
+**Alternatives considered:** *stop canonicalising* — loses the reason canonicalisation was added (a typo becomes a silent `verified: false` twenty minutes later, and the daemon's cwd stops mattering). *Send both spellings* — two `setBreakpoints` for one file, and a program that stops twice when both happen to bind. *Leave it documented* — what M15 inherited; the workaround is a directory move, which is fine for a person and invisible to an agent that just wrote a scratch program to `/tmp`.
+
+---
+
+## D049 — the config file is looked for in `~/.config` first, not in the platform's config directory
+
+**Status:** decided (2026-07-30, review round after M15). Supersedes the path list in [`08-state-and-config.md`](08-state-and-config.md).
+
+**Why:** `dirs::config_dir()` returns `~/Library/Application Support` on macOS. That is right for an application bundle and wrong for a command-line tool: `git`, `ripgrep`, `starship`, `nvim` and everything else a terminal user has configured live in `~/.config`, this project's own README and blueprint both say `~/.config/lazydap/config.toml`, and a user who follows those instructions on a Mac would have written a file lazydap never reads. A config that is silently ignored is worse than one that does not exist — nothing is wrong until the pinned adapter quietly is not used.
+
+**The order**, first that **exists** winning:
+
+1. `LAZYDAP_CONFIG_PATH` — and if it names a file that is not there, that is an error, not a fall-through. The user said where it was.
+2. `$XDG_CONFIG_HOME/lazydap/config.toml`
+3. `~/.config/lazydap/config.toml`
+4. `dirs::config_dir()/lazydap/config.toml` — last, so a file an earlier build wrote to `~/Library/Application Support` keeps working rather than being orphaned by this change.
+
+When none exists, the **first** candidate is what `lazydap doctor` prints as the place to create one. The list is deduplicated with its order preserved, because on Linux all three usually name the same directory and a `doctor` that printed it three times would look broken.
+
+**Consequence:** the macOS location is read but never recommended. If both exist, XDG and `~/.config` win — deliberately: the one a user hand-wrote from the docs beats the one a library chose for them.
+
+---
+
+## D050 — the client resolves the adapter binary and sends it; protocol goes to v4
+
+**Status:** decided (2026-07-30, review round after M15). **Protocol v3 → v4.**
+
+**Why:** adapter discovery reads the user's config file and `PATH`. Both describe the machine *as the person typing the command sees it*. The daemon sees neither — it may have been started days earlier, from another directory, with another environment — so `LAZYDAP_CONFIG_PATH=/tmp/pinned.toml lazydap launch ./app` read the pin in the client, and then the daemon resolved the adapter again against its own default config path and fell through to `PATH`. The pin was obeyed by the process that could not act on it and ignored by the process that could, silently. This is the same failure D047 names for `launch.json` and D024 for the project root, arrived at from the other direction.
+
+**What changes:** `LaunchRequest` carries `adapter_command: Option<PathBuf>`, resolved client-side by `adapter::discover_with` against the config the client already loaded. The daemon uses it when present and falls back to its own lookup when absent. Discovery failing is now reported *before* a daemon is spawned, which is also a better error.
+
+**Why a version bump for an optional field.** The field is additive and `serde` ignores unknown ones, so an older daemon would accept the request and quietly ignore the pin — which is precisely the bug being fixed, reintroduced by the compatibility story. Both ends already refuse a version they do not recognise, so bumping turns "silently launches the wrong adapter" into a `VersionMismatch` that `lazydap shutdown` clears and auto-spawn replaces. The cost is one daemon restart; the alternative is a debugger obeying a configuration nobody can see. `Shutdown` stays version-exempt, so the escape hatch still crosses the boundary.
+
+**Not changed:** the daemon's own discovery is kept rather than deleted. It is the fallback for a client that sends nothing, and it is what `discover` still means for any future caller inside the daemon.
+
+---
+
 ## Open decisions
 
 These need user input.
