@@ -171,6 +171,31 @@ async fn a_request_from_another_build_is_refused_with_both_versions() {
 }
 
 #[tokio::test]
+async fn shutdown_crosses_protocol_versions_so_an_upgrade_can_land() {
+    let daemon = TestDaemon::start().await;
+    let mut connection = daemon.raw().await;
+
+    // An upgraded client stops the old daemon before starting its own. If the
+    // daemon refused this for being from the wrong version, the upgrade would
+    // deadlock: the client cannot stop it, and it will not talk to the client.
+    connection
+        .send(IpcMessage {
+            version: 9999,
+            id: 1,
+            payload: IpcPayload::Request(Request::Shutdown),
+        })
+        .await
+        .expect("send");
+
+    let reply = connection.recv().await.expect("recv").expect("a reply");
+    match reply.payload {
+        IpcPayload::Response(response) => assert_eq!(response, Response::ShuttingDown),
+        other => unreachable!("expected an acknowledgement, got: {other:?}"),
+    }
+    assert!(daemon.state.shutdown_requested());
+}
+
+#[tokio::test]
 async fn a_frame_the_daemon_cannot_read_is_answered_before_it_hangs_up() {
     use tokio::io::AsyncWriteExt;
 

@@ -3,6 +3,7 @@ use crate::error::{CliError, Result};
 use crate::instance::Instance;
 use lazydap_protocol::{IpcConnection, IpcMessage, Request};
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -113,17 +114,30 @@ fn spawn_detached(instance: &Instance) -> Result<()> {
     Ok(())
 }
 
+/// Open the daemon's log, owner-only.
+///
+/// Failing to open it stops the daemon from starting at all, so it belongs to
+/// the same class as any other "could not start or contact the daemon"
+/// failure: exit 3, not a generic 1.
+///
+/// `mode` applies only when the file is created, so an existing log written by
+/// an older lazydap keeps its old permissions until the explicit tighten
+/// below. Debug logs carry the paths of programs being debugged and whatever
+/// they printed.
 fn open_log(path: &Path) -> Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(path)
         .map_err(|source| {
-            CliError::general(anyhow::anyhow!(
+            CliError::unreachable(anyhow::anyhow!(
                 "cannot open the daemon log at {}: {source}",
                 path.display()
             ))
-        })
+        })?;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    Ok(file)
 }
 
 /// Retry until the daemon answers or the deadline passes.
@@ -151,8 +165,9 @@ async fn connect_until(socket: &Path, deadline: tokio::time::Instant) -> Result<
 /// Used when the running daemon speaks a different protocol version. The
 /// request goes out without a handshake — the whole point is that the
 /// handshake failed — and the reply is not read, because we may not be able to
-/// parse it.
-async fn shut_down_other_daemon(socket: &Path) -> Result<()> {
+/// parse it. The daemon answers `Shutdown` regardless of version for exactly
+/// this reason (see `server::handle_message`).
+pub(crate) async fn shut_down_other_daemon(socket: &Path) -> Result<()> {
     if let Ok(stream) = UnixStream::connect(socket).await {
         let mut connection = IpcConnection::new(stream);
         let _ = connection
@@ -185,27 +200,45 @@ struct SpawnLock {
 
 impl SpawnLock {
     fn acquire(path: &Path) -> Result<Option<Self>> {
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(_) => Ok(Some(Self {
-                path: path.to_path_buf(),
-            })),
+        match Self::try_create(path) {
+            Ok(lock) => Ok(Some(lock)),
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                if is_stale(path) {
-                    // The client that held this died before releasing it.
-                    tracing::warn!(
-                        target: "daemon.spawn",
-                        lock = %path.display(),
-                        "removing a stale spawn lock",
-                    );
-                    let _ = std::fs::remove_file(path);
+                if !is_stale(path) {
+                    // Somebody else is spawning right now. Wait for them.
+                    return Ok(None);
                 }
-                Ok(None)
+
+                // The client that held this died before releasing it. Clear it
+                // and take it in the same breath: reporting "held" here would
+                // send this client off to wait the full deadline for a daemon
+                // that nobody is starting, fail, and only succeed on a retry.
+                tracing::warn!(
+                    target: "daemon.spawn",
+                    lock = %path.display(),
+                    "removing a stale spawn lock",
+                );
+                let _ = std::fs::remove_file(path);
+
+                // One attempt is enough. If it fails, another client cleared
+                // the same stale lock at the same moment and is now spawning,
+                // which is exactly the case where waiting is right.
+                Ok(Self::try_create(path).ok())
             }
             Err(source) => Err(CliError::general(anyhow::anyhow!(
                 "cannot take the spawn lock at {}: {source}",
                 path.display()
             ))),
         }
+    }
+
+    fn try_create(path: &Path) -> std::io::Result<Self> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(|_| Self {
+                path: path.to_path_buf(),
+            })
     }
 }
 
@@ -252,21 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_left_by_a_dead_client_is_cleared() {
+    fn a_lock_left_by_a_dead_client_is_cleared_and_taken_at_once() {
         let path = temp_path("stale");
         std::fs::write(&path, b"").expect("write lock");
         // Backdate it past the staleness cutoff.
-        let old = SystemTime::now() - STALE_LOCK_AGE * 2;
-        set_modified(&path, old);
+        set_modified(&path, SystemTime::now() - STALE_LOCK_AGE * 2);
 
+        let lock = SpawnLock::acquire(&path).expect("acquire");
         assert!(
-            SpawnLock::acquire(&path).expect("acquire").is_none(),
-            "the first attempt reports the lock as held and clears it",
+            lock.is_some(),
+            "clearing a stale lock and then waiting for a daemon nobody is \
+             starting would burn the whole spawn deadline",
         );
-        assert!(
-            SpawnLock::acquire(&path).expect("acquire").is_some(),
-            "the next attempt gets the freed lock",
-        );
+
+        drop(lock);
         let _ = std::fs::remove_file(&path);
     }
 

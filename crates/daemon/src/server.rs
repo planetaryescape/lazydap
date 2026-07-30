@@ -170,10 +170,14 @@ async fn handle_message(state: &Arc<DaemonState>, message: IpcMessage) -> IpcMes
         }
     };
 
-    // `Ping` is answered whatever version it arrived on: it is how a client
-    // *discovers* the mismatch. Anything else from a build we do not
-    // understand is refused.
-    if message.version != LAZYDAP_PROTOCOL_VERSION && !matches!(request, Request::Ping) {
+    // Two requests are answered whatever version they arrive on. `Ping` is how
+    // a client *discovers* the mismatch, and `Shutdown` is how it resolves
+    // one: an upgraded client stops the old daemon and starts its own. Reject
+    // `Shutdown` for being from the wrong version and the upgrade path
+    // deadlocks — the client cannot stop the daemon, and the daemon will not
+    // talk to the client. Anything else is refused.
+    let version_exempt = matches!(request, Request::Ping | Request::Shutdown);
+    if message.version != LAZYDAP_PROTOCOL_VERSION && !version_exempt {
         return IpcMessage::error(
             id,
             IpcError::new(

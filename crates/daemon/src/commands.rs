@@ -4,7 +4,7 @@
 //! schema (`ARCHITECTURE.md`), so it is built explicitly here rather than
 //! being whatever `serde` happened to derive for an internal type.
 
-use crate::auto_spawn::ensure_daemon_running;
+use crate::auto_spawn::{ensure_daemon_running, shut_down_other_daemon};
 use crate::client::DaemonClient;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
@@ -27,8 +27,23 @@ pub async fn launch(
     options: LaunchOptions,
     format: OutputFormat,
 ) -> Result<()> {
+    // Resolve the working directory against *this* process, not the daemon's.
+    // The daemon's own cwd is wherever it happened to be started, so a
+    // relative `--cwd ../fixtures` would otherwise be resolved from the wrong
+    // base — and silently, against a directory that may well exist.
     let cwd = match options.cwd {
-        Some(cwd) => cwd,
+        Some(cwd) => cwd.canonicalize().map_err(|source| {
+            CliError::from(
+                IpcError::new(
+                    ErrorCode::InvalidLaunchConfig,
+                    format!(
+                        "cannot use {} as the working directory: {source}",
+                        cwd.display()
+                    ),
+                )
+                .with_details(serde_json::json!({ "cwd": cwd })),
+            )
+        })?,
         None => std::env::current_dir().map_err(CliError::general)?,
     };
 
@@ -157,6 +172,23 @@ pub async fn shutdown(instance: &Instance, format: OutputFormat) -> Result<()> {
     // ask it to stop would be absurd.
     let mut client = match DaemonClient::connect(&instance.socket).await {
         Ok(client) => client,
+        // A daemon from another build is still a daemon, and `lazydap
+        // shutdown` promising to stop it and then leaving it running is the
+        // worst of both. `Shutdown` crosses versions, so send it blind.
+        Err(error) if error.label == "VersionMismatch" => {
+            shut_down_other_daemon(&instance.socket).await?;
+            match format {
+                OutputFormat::Json => print_json(&serde_json::json!({
+                    "instance": instance.name,
+                    "shutting_down": true,
+                    "note": "the daemon was from another build",
+                }))?,
+                OutputFormat::Table => {
+                    println!("daemon {} (another build) shutting down", instance.name)
+                }
+            }
+            return Ok(());
+        }
         Err(_) => {
             match format {
                 OutputFormat::Json => print_json(&serde_json::json!({
