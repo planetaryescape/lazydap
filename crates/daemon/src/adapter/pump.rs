@@ -9,7 +9,7 @@
 //! reached through channels.
 
 use super::Pending;
-use super::codelldb::{PumpStart, output_chunk};
+use super::handshake::{PumpStart, output_chunk, system_process_id};
 use crate::state::Session;
 use lazydap_core::{
     AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
@@ -45,6 +45,10 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
                 }
             }
             Ok(Incoming::Event(event)) => handle_event(&session, event),
+            // Answered rather than ignored: an adapter waiting on a reply it
+            // will never get is a session that stops making progress with
+            // nothing said about why.
+            Ok(Incoming::ReverseRequest(request)) => session.adapter().refuse(&request).await,
             Err(error) => {
                 finish(&session, &error).await;
                 break;
@@ -69,6 +73,16 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
         "output" => {
             if let Some(chunk) = output_chunk(&event) {
                 session.emit(Event::Output { session_id, chunk });
+            }
+        }
+        // Which process the adapter started. The handshake watches for this
+        // too, and usually sees it first — but nothing orders it against the
+        // `launch` response, so a launch that settles first would otherwise
+        // leave the session with no pid to reap (D045). `set_debuggee` keeps
+        // the first answer, so both paths recording it is not two records.
+        "process" => {
+            if let Some(pid) = system_process_id(&event) {
+                session.set_debuggee(pid);
             }
         }
         "stopped" => {

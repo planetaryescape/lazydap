@@ -5,28 +5,40 @@
 //! responses, `seq` numbers and camelCase field names stop here
 //! (`ARCHITECTURE.md`, anti-pattern 4).
 //!
-//! There is deliberately no `DebugAdapter` trait yet. v0.1 ships one adapter
-//! (D013), and a trait with a single implementor is ceremony that hides where
-//! the real seam is. The seam is this module boundary, and it is checked the
-//! only way that actually holds: `lazydap_dap` is imported nowhere else in the
-//! daemon. When debugpy arrives at M18 this module becomes the trait and its
-//! first implementation. See D029.
+//! D029 said this module would become a trait when the second adapter landed,
+//! and M18 is that moment: [`DebugAdapter`] is the trait, [`codelldb`] and
+//! [`debugpy`] are its implementations, and [`handshake`] is everything the
+//! two do identically. The daemon depends on the trait rather than on either
+//! adapter (non-negotiable #5), and the module boundary still does the
+//! enforcing it always did: `lazydap_dap` is imported nowhere else in the
+//! daemon, checked by `scripts/check_architecture_boundaries.sh`.
+//!
+//! The trait lives here rather than in `lazydap-core` (D052). Its methods
+//! speak DAP — `adapterID`, launch arguments, a stop's `reason` string — and
+//! moving it to a crate every other crate depends on would move the DAP
+//! vocabulary with it, undoing the one thing this boundary exists to do.
 
-pub mod codelldb;
+// All private. Nothing outside this module names an adapter — it calls
+// [`launch`] and gets a [`Launched`] back — and making that a visibility rule
+// rather than a convention is what stops non-negotiable #5 from eroding one
+// convenient `use` at a time.
+mod codelldb;
+mod debugpy;
+mod handshake;
 mod pump;
 mod translate;
 
 use lazydap_core::{
-    AdapterBreakpoint, AdapterKind, Breakpoint, EvalContext, EvalResult, Scope, StackFrame,
-    StepKind, ThreadInfo, Variable, VariableFilter,
+    AdapterBreakpoint, AdapterKind, Breakpoint, EvalContext, EvalResult, PauseReason, Scope,
+    StackFrame, StepKind, ThreadInfo, Variable, VariableFilter,
 };
 use lazydap_dap::{
-    ContinueArgs, ContinueResponse, DapResponse, DapWriter, DisconnectArgs, EvaluateArgs,
-    EvaluateResponse, PauseArgs, ScopesArgs, ScopesResponse, SetBreakpointsArgs,
+    ContinueArgs, ContinueResponse, DapRequest, DapResponse, DapWriter, DisconnectArgs,
+    EvaluateArgs, EvaluateResponse, PauseArgs, ScopesArgs, ScopesResponse, SetBreakpointsArgs,
     SetBreakpointsResponse, Source, StackTraceArgs, StackTraceResponse, StepArgs, ThreadsResponse,
     TransportError, VariablesArgs, VariablesResponse,
 };
-use lazydap_protocol::{ErrorCode, IpcError};
+use lazydap_protocol::{ErrorCode, IpcError, LaunchRequest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -36,7 +48,90 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 
+pub use handshake::{Launched, launch};
 pub use pump::spawn_pump;
+
+/// What one debug adapter does differently from another.
+///
+/// Deliberately small. Everything a session does *after* the launch — stepping,
+/// stacks, scopes, evaluation, breakpoints — is specified precisely enough
+/// that both adapters answer the same requests the same way, and all of it
+/// lives once in [`AdapterHandle`]. What is left is the launch: how to start
+/// the adapter, what to call ourselves, what arguments its `launch` takes, and
+/// the two places each adapter reports something in its own words rather than
+/// the specification's.
+///
+/// Object-safe and synchronous on purpose. Starting the adapter is described
+/// as a [`Spawn`] value rather than done by the trait, so no method here is
+/// `async` — which keeps the trait usable behind `dyn` without pulling in a
+/// procedural macro to box the futures. It also makes the difference between
+/// the two adapters something a test can assert on rather than something it
+/// has to run a process to observe.
+pub trait DebugAdapter: Send + Sync {
+    fn kind(&self) -> AdapterKind;
+
+    /// How to start this adapter, given the command discovery resolved for it.
+    fn spawn(&self, command: &Path) -> Spawn;
+
+    /// What to put in `initialize`'s `adapterID`. Adapters branch on it.
+    fn adapter_id(&self) -> &'static str;
+
+    /// This adapter's `launch` arguments, as JSON.
+    ///
+    /// JSON rather than a typed struct because the two adapters share only
+    /// half their fields and disagree about the rest; each builds its own
+    /// typed arguments and serialises them here, so the shape is still checked
+    /// where it is written.
+    fn launch_args(&self, request: &LaunchRequest) -> serde_json::Value;
+
+    /// What lazydap calls a stop, and what the adapter called it when those
+    /// differ.
+    ///
+    /// The default is to take the adapter at its word, which is right for any
+    /// adapter that follows the specification — debugpy does. codelldb
+    /// overrides it (D033, quirk 6).
+    fn normalise_stop(
+        &self,
+        raw: &str,
+        _description: &str,
+        _stop_on_entry: bool,
+    ) -> (PauseReason, Option<String>) {
+        (PauseReason::from(raw), None)
+    }
+
+    /// The debuggee's pid, if this adapter only says it in console output.
+    ///
+    /// The default is `None`: an adapter that sends the DAP `process` event is
+    /// already understood by the handshake, and needs nothing here. codelldb
+    /// does not send it (quirk 9), so codelldb scrapes.
+    fn debuggee_pid_in(&self, _output: &str) -> Option<u32> {
+        None
+    }
+}
+
+/// How to start an adapter and reach it once it is running.
+///
+/// The two shapes DAP adapters come in. Which one an adapter wants is a fact
+/// about that adapter, so it is answered by [`DebugAdapter::spawn`] rather
+/// than guessed at from the command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spawn {
+    /// Start it and connect to the TCP port it announces on stderr.
+    Tcp { command: PathBuf },
+    /// Start it and speak DAP over its own stdin and stdout.
+    Stdio { program: PathBuf, args: Vec<String> },
+}
+
+/// The implementation for one adapter kind.
+///
+/// `&'static` rather than boxed: neither adapter carries any state — what they
+/// are is which methods they implement — so there is nothing to allocate.
+pub fn for_kind(kind: AdapterKind) -> &'static dyn DebugAdapter {
+    match kind {
+        AdapterKind::Codelldb => &codelldb::CodeLldb,
+        AdapterKind::Debugpy => &debugpy::Debugpy,
+    }
+}
 
 /// How long to wait for the adapter to answer one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,6 +151,17 @@ pub enum AdapterError {
 
     #[error("{adapter} is pinned to {path} in lazydap's config, and that is not an executable")]
     ConfiguredAdapterMissing { adapter: AdapterKind, path: PathBuf },
+
+    /// Found, and cannot do the job. Only debugpy can reach this: it is a
+    /// Python module, so an interpreter being present says nothing about the
+    /// module being installed in it.
+    #[error("{path} cannot act as {adapter}: {problem} — {hint}")]
+    Incomplete {
+        adapter: AdapterKind,
+        path: PathBuf,
+        problem: String,
+        hint: String,
+    },
 
     #[error("cannot read lazydap's config: {source}")]
     Config {
@@ -108,6 +214,22 @@ impl AdapterError {
                 "adapter": adapter.as_str(),
                 "configured": path,
             })),
+            // Also `AdapterNotFound`: from a caller's point of view there is
+            // no usable adapter of this kind, which is the same situation and
+            // the same exit code (4). The hint is what makes it actionable.
+            Self::Incomplete {
+                adapter,
+                ref path,
+                ref hint,
+                ..
+            } => {
+                let message = self.to_string();
+                IpcError::new(ErrorCode::AdapterNotFound, message).with_details(serde_json::json!({
+                    "adapter": adapter.as_str(),
+                    "found": path,
+                    "hint": hint,
+                }))
+            }
             // Not `AdapterNotFound`: the adapter was never looked for. A
             // caller that retries with a different adapter would keep hitting
             // the same broken file.
@@ -490,6 +612,29 @@ impl AdapterHandle {
         ))
     }
 
+    /// Answer a reverse request with "no".
+    ///
+    /// Takes no permit and no reply from the caller: refusing is not a thing
+    /// anybody chose to do, it is the only honest answer to a question lazydap
+    /// never said it could answer. A failure to write the refusal is logged
+    /// rather than returned — the pump is the only caller, it has nowhere to
+    /// return an error to, and a write that fails means the adapter is going
+    /// away anyway.
+    pub async fn refuse(&self, request: &DapRequest) {
+        let mut writer = self.writer.lock().await;
+        let Some(writer) = writer.as_mut() else {
+            return;
+        };
+        if let Err(error) = writer.refuse(request).await {
+            tracing::warn!(
+                target: "daemon.session",
+                %error,
+                command = request.command,
+                "could not answer the adapter's reverse request",
+            );
+        }
+    }
+
     /// Kill the adapter process and reap it.
     ///
     /// Idempotent: the pump calls this when the socket dies, and `disconnect`
@@ -591,8 +736,13 @@ fn discover_in(
     config: &lazydap_config::Config,
     path: &std::ffi::OsStr,
 ) -> Result<PathBuf> {
-    let binary = match kind {
-        AdapterKind::Codelldb => "codelldb",
+    // What to look for on `PATH`. debugpy is not a binary: it is a module, so
+    // what is being searched for is an interpreter that can import it, and
+    // both spellings are worth trying because a machine with only `python` is
+    // still a machine that can run it.
+    let binaries: &[&str] = match kind {
+        AdapterKind::Codelldb => &["codelldb"],
+        AdapterKind::Debugpy => &["python3", "python"],
     };
 
     // Tier one. A pinned path that is wrong is an error rather than a reason
@@ -600,30 +750,98 @@ fn discover_in(
     // different build of the adapter than the one somebody deliberately
     // chose, and say nothing about having done so.
     if let Some(command) = config.adapter_command(kind) {
-        if is_executable(command) {
-            tracing::debug!(target: "daemon.session", adapter = %kind, path = %command.display(), "using the adapter pinned in the config");
-            return Ok(command.to_path_buf());
+        if !is_executable(command) {
+            return Err(AdapterError::ConfiguredAdapterMissing {
+                adapter: kind,
+                path: command.to_path_buf(),
+            });
         }
-        return Err(AdapterError::ConfiguredAdapterMissing {
-            adapter: kind,
-            path: command.to_path_buf(),
-        });
+        usable(kind, command)?;
+        tracing::debug!(target: "daemon.session", adapter = %kind, path = %command.display(), "using the adapter pinned in the config");
+        return Ok(command.to_path_buf());
     }
 
     let mut searched = Vec::new();
+    // An interpreter that was found and cannot do the job. Remembered so the
+    // failure can name it: "no python3 anywhere" and "the python3 you have
+    // cannot import debugpy" are different problems with different fixes, and
+    // reporting the second as the first sends somebody to reinstall Python.
+    let mut incomplete: Option<AdapterError> = None;
+
     for dir in std::env::split_paths(path) {
-        let candidate = dir.join(binary);
-        if is_executable(&candidate) {
-            tracing::debug!(target: "daemon.session", adapter = %kind, path = %candidate.display(), "found adapter");
-            return Ok(candidate);
+        for binary in binaries {
+            let candidate = dir.join(binary);
+            if !is_executable(&candidate) {
+                continue;
+            }
+            match usable(kind, &candidate) {
+                Ok(()) => {
+                    tracing::debug!(target: "daemon.session", adapter = %kind, path = %candidate.display(), "found adapter");
+                    return Ok(candidate);
+                }
+                // Keep looking: a machine can have several interpreters and
+                // only one of them with debugpy installed.
+                Err(error) => {
+                    tracing::debug!(target: "daemon.session", adapter = %kind, path = %candidate.display(), %error, "found but not usable; still looking");
+                    incomplete.get_or_insert(error);
+                }
+            }
         }
         searched.push(dir);
     }
 
-    Err(AdapterError::NotFound {
+    Err(incomplete.unwrap_or(AdapterError::NotFound {
         adapter: kind,
         searched,
-    })
+    }))
+}
+
+/// Whether `command` can actually act as this adapter.
+///
+/// Only debugpy needs asking. codelldb is the adapter: if the binary is there,
+/// it is the thing. debugpy is a *module*, so an interpreter on `PATH` proves
+/// nothing — the failure without this check is a launch that gets far enough
+/// to spawn a process, which then dies with a Python traceback about a missing
+/// module, reported as a crashed adapter.
+///
+/// Costs one interpreter start-up per launch, which is a few tens of
+/// milliseconds against a launch already measured in seconds, and buys the
+/// difference between an honest `AdapterNotFound` and a mystery.
+fn usable(kind: AdapterKind, command: &Path) -> Result<()> {
+    if kind != AdapterKind::Debugpy {
+        return Ok(());
+    }
+
+    // Answered rather than merely exiting zero. A pinned command that is not
+    // an interpreter at all — `/bin/echo` is the honest accident, a shell
+    // wrapper the interesting one — succeeds at almost any argument list, so
+    // "it did not fail" proves nothing. Only something that really ran the
+    // program prints exactly this back.
+    const PROOF: &str = "lazydap-debugpy-ok";
+
+    let ran = std::process::Command::new(command)
+        .args(["-c", &format!("import debugpy; print('{PROOF}')")])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    match ran {
+        Ok(output)
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim() == PROOF =>
+        {
+            Ok(())
+        }
+        _ => Err(AdapterError::Incomplete {
+            adapter: kind,
+            path: command.to_path_buf(),
+            problem: "it cannot import debugpy".to_string(),
+            hint: format!(
+                "install it with `{} -m pip install debugpy`",
+                command.display(),
+            ),
+        }),
+    }
 }
 
 fn is_executable(path: &Path) -> bool {

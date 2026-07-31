@@ -1,7 +1,7 @@
 //! The adapter's lifecycle, and everything that makes the program move.
 
 use super::{Result, find_session, live_session};
-use crate::adapter::{self, codelldb};
+use crate::adapter;
 use crate::state::{DaemonState, Session};
 use crate::wait::{DEFAULT_TIMEOUT, Wait, WaitOptions};
 use lazydap_core::{EndReason, SessionId, SessionState, StepKind};
@@ -71,7 +71,9 @@ pub async fn launch(
         .filter(|(_, breakpoints): &(_, Vec<_>)| !breakpoints.is_empty())
         .collect();
 
-    let launched = codelldb::launch(&request, &grouped)
+    // Which adapter this is, is `request.adapter`'s business — the handler's
+    // is that a program is being launched. Non-negotiable #5, finally literal.
+    let launched = adapter::launch(&request, &grouped)
         .await
         .map_err(adapter::AdapterError::into_ipc)?;
 
@@ -251,8 +253,31 @@ pub async fn execute(
         session.set_state(SessionState::Running);
     }
 
-    // Step 3.
-    if let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await {
+    // Step 3 — unless there is nothing to ask for.
+    //
+    // `continue` on a program that is already running is a request to do the
+    // thing it is already doing. codelldb answers it anyway and nothing
+    // happens; debugpy does not answer it at all, and the acknowledgement
+    // timeout that follows is treated as a wedged adapter and kills the
+    // session (see `execute`'s doc on `AdapterHandle`). The sequence that
+    // reaches it is ordinary rather than exotic: launch without
+    // `--stop-on-entry`, then `continue --wait` to reach the first breakpoint.
+    //
+    // So it is not sent. What the caller wants — the next stable state — is
+    // what `--wait` is already subscribed for, and skipping a request that
+    // could only have been a no-op costs nothing on either adapter. The
+    // subscription is taken above, before this decision, so a stop that
+    // happens while we are here is caught either way.
+    let already_running =
+        matches!(movement, Movement::Continue) && previous == SessionState::Running;
+
+    if already_running {
+        tracing::debug!(
+            target: "daemon.session",
+            session_id = %session_id,
+            "continue on an already-running program; waiting rather than asking again",
+        );
+    } else if let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await {
         // Put back only the state *we* wrote. By now the pump may have
         // recorded a real ending — an adapter can execute the request, emit
         // `terminated` and die before acknowledging — and stamping `paused`

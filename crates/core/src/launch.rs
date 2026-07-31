@@ -127,7 +127,7 @@ impl std::fmt::Display for NotRunnable {
         match self {
             Self::UnsupportedAdapter { adapter_type } => write!(
                 f,
-                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb only",
+                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb and debugpy only",
             ),
             Self::AttachNotSupported => {
                 f.write_str("it attaches to a running process, which lazydap cannot do yet")

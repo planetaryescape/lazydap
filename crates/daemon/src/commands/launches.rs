@@ -131,7 +131,7 @@ pub async fn run(
                     .unwrap_or_else(|| instance.project_root.clone()),
             ),
             env: config.env.clone(),
-            adapter: config.adapter.unwrap_or_default(),
+            adapter: config.adapter,
             // `--stop-on-entry` on the command line adds to the configuration
             // rather than replacing it: nobody asks for it and means "and turn
             // the file's setting off".

@@ -21,7 +21,9 @@ pub struct LaunchOptions {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
-    pub adapter: AdapterKind,
+    /// Which adapter to debug under, when the caller said. `None` means read
+    /// it off the program — see [`AdapterKind::for_program`].
+    pub adapter: Option<AdapterKind>,
     pub stop_on_entry: bool,
 }
 
@@ -67,18 +69,28 @@ pub async fn launch(
             )
         })?;
 
+    // `--adapter` if the caller named one, otherwise whatever the program's
+    // extension says, otherwise the default. Detection is deliberately weak —
+    // a native binary has no extension to read — so it fills in rather than
+    // overrides: somebody debugging a `.py` under codelldb has said so
+    // explicitly, and is entitled to find out for themselves how that goes.
+    let adapter = options
+        .adapter
+        .or_else(|| AdapterKind::for_program(&program))
+        .unwrap_or_default();
+
     // Resolved here, against this process's config and `PATH`, for the same
     // reason the program and the working directory are (D050). The daemon's
     // environment is whatever it inherited whenever it started, so a
     // `LAZYDAP_CONFIG_PATH` set for this command would mean nothing there.
     // Failing now also beats failing after a daemon has been spawned.
-    let adapter_command = crate::adapter::discover_with(options.adapter, &instance.config)
+    let adapter_command = crate::adapter::discover_with(adapter, &instance.config)
         .map_err(|error| CliError::from(error.into_ipc()))?;
 
     let mut client = ensure_daemon_running(instance).await?;
     let response = client
         .request(Request::Launch(LaunchRequest {
-            adapter: options.adapter,
+            adapter,
             program,
             args: options.args,
             cwd,

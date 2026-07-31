@@ -191,6 +191,10 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
 
     let adapter = match config.adapter_type.as_str() {
         "lldb" => Some(AdapterKind::Codelldb),
+        // `python` is the older VS Code Python extension's spelling and
+        // `debugpy` the current one. Files in the wild carry both, and they
+        // name the same adapter (M18).
+        "debugpy" | "python" => Some(AdapterKind::Debugpy),
         // Microsoft's C/C++ extension describes the same thing — a native
         // program, its arguments, a working directory — so codelldb can run
         // it. Its `MIMode`, `miDebuggerPath` and `setupCommands` are not read,
@@ -892,17 +896,40 @@ mod tests {
     fn a_configuration_for_another_debugger_is_listed_with_its_own_type() {
         let imported = import_str(
             r#"{"configurations": [
-                {"type": "python", "request": "launch", "name": "API", "program": "app.py"}
+                {"type": "go", "request": "launch", "name": "API", "program": "main.go"}
             ]}"#,
         );
 
         let config = &imported.configs[0];
         assert_eq!(config.adapter, None);
-        assert_eq!(config.adapter_type, "python");
+        assert_eq!(config.adapter_type, "go");
         assert!(
             config.not_runnable().is_some(),
             "listing it is useful; pretending lazydap can run it is not",
         );
+    }
+
+    /// Both spellings the Python extension has used, and both runnable since
+    /// M18. Until then these were imported, listed, and refused.
+    #[test]
+    fn a_python_configuration_is_runnable_under_debugpy() {
+        for adapter_type in ["python", "debugpy"] {
+            let imported = import_str(&format!(
+                r#"{{"configurations": [
+                    {{"type": "{adapter_type}", "request": "launch",
+                     "name": "API", "program": "${{workspaceFolder}}/app.py"}}
+                ]}}"#,
+            ));
+
+            let config = &imported.configs[0];
+            assert_eq!(config.adapter, Some(AdapterKind::Debugpy));
+            assert_eq!(config.adapter_type, adapter_type);
+            assert_eq!(
+                config.not_runnable(),
+                None,
+                "a `{adapter_type}` configuration is runnable now",
+            );
+        }
     }
 
     #[test]
