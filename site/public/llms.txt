@@ -25,6 +25,7 @@ corpus is at /llms-full.txt.
 
 ## Guides
 
+- [Recipes](/guides/recipes.md): worked goals — segfaults, hit conditions, output capture, Python, launch.json, CI assertions, unbound breakpoints, adapter pins, cleanup
 - [Why lazydap](/guides/why-lazydap.md): the five trade-offs and when to use something else
 - [Debug with an agent](/guides/agents.md): the skill bundle and the mistakes that cost turns
 - [The --wait contract](/guides/wait.md): stable states, the five outcomes, timeouts
