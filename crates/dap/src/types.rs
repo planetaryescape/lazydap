@@ -153,7 +153,7 @@ pub struct GoLaunchArgs {
     /// Sent because delve's default is a `__debug_bin<random>` file in the
     /// *adapter's* working directory — which is the daemon's, so a user's
     /// repository. delve deletes it when it handles `disconnect`, but an
-    /// adapter that dies without one leaves it behind (quirk 4). Naming a
+    /// adapter that dies without one leaves it behind (quirk 5). Naming a
     /// temporary path means the leak lands somewhere the operating system
     /// sweeps rather than in somebody's `git status`.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -119,7 +119,7 @@ reaper at whatever matches.
 - **The entry stop has no stack.** delve stops before the Go runtime has scheduled anything,
   so `threads` returns a placeholder named `Dummy` and `stackTrace` fails outright. Left as
   an honest error rather than papered over as an empty stack; asserted in the suite and
-  written up as quirk 5.
+  written up as quirk 6.
 - **An unrecovered panic pauses** (`reason: "exception"`) where debugpy's uncaught exception
   exits. delve applies its own `unrecovered-panic` default server-side despite lazydap
   sending no exception filters. Asserted, because an agent that learned the Python behaviour

@@ -226,7 +226,7 @@ impl Drop for Sandbox {
 /// the `.py` by name. Nothing here does: `mode: "debug"` compiles the source
 /// and runs the *result*, so a leaked Go debuggee appears in the process table
 /// as the binary — which is why lazydap names that binary itself, under the
-/// `lazydap-delve-` prefix (quirk 4). Both are checked anyway: the fixture path
+/// `lazydap-delve-` prefix (quirk 5). Both are checked anyway: the fixture path
 /// still catches an `exec`-mode debuggee and delve's own command line.
 fn strays() -> Vec<String> {
     let fixtures = repo_root().join("examples/go-fixtures");
@@ -502,7 +502,7 @@ fn an_unrecovered_panic_pauses_rather_than_ending_the_program() {
 /// the entry stop for Go, which would take a working `--stop-on-entry` away.
 /// An agent that wants a stack should continue to a breakpoint first, which is
 /// what every other test in this file does. See `docs/reference/delve-quirks.md`,
-/// quirk 5.
+/// quirk 6.
 #[test]
 fn the_entry_stop_has_no_goroutine_to_take_a_stack_of() {
     let (_dlv, _turn) = require_dlv!();

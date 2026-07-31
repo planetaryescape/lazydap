@@ -59,7 +59,29 @@ The fix is one launch argument, `outputMode: "remote"`, and lazydap always sends
 it. Every `captured_output` assertion in `crates/daemon/tests/wait_delve.rs` is a
 regression test for that one line.
 
-## 3. `mode` is required, and lazydap infers it from the filename
+## 3. delve's own chatter arrives tagged as the debuggee's stdout
+
+With `outputMode: "remote"` on, the compile step reports itself through the same
+channel the program's output uses, and with the same category:
+
+```json
+{"category": "stdout", "output": "Building /path/to/main.go\n"}
+{"category": "console", "output": "Type 'dlv help' for list of commands.\n"}
+{"category": "stdout", "output": "hello from m22\n"}
+```
+
+The first line is delve talking; the third is the program. Both say `stdout`.
+
+lazydap passes this through rather than filtering it. Dropping a line because it
+starts with `Building ` would mean a program that legitimately prints that loses
+it, and a debugger that silently edits a program's output is worse than one that
+includes a line of build noise. It only appears for `mode: "debug"` — an `exec`
+launch compiles nothing and its `captured_output` is the program's alone.
+
+Worth knowing if you are diffing `captured_output` against expected program
+output: strip the build line, or launch a prebuilt binary.
+
+## 4. `mode` is required, and lazydap infers it from the filename
 
 delve's `launch` needs to know whether `program` is source to compile or a binary
 to run:
@@ -82,7 +104,7 @@ quirk, and it needs its own milestone.
 Getting the mode wrong is not subtle: delve rejects a `.go` file in `exec` mode
 and a binary in `debug` mode, both with a message naming the file.
 
-## 4. `mode: "debug"` compiles into the *adapter's* working directory
+## 5. `mode: "debug"` compiles into the *adapter's* working directory
 
 Left alone, delve writes the binary it compiles to `__debug_bin<random>` in its
 own working directory — which is the **daemon's**, so somebody's repository. It
@@ -102,7 +124,7 @@ let one session's cleanup remove the file another was about to run.
 This also makes leaked Go debuggees findable: they run under a
 `lazydap-delve-` prefix, which is what the suite's stray check greps for.
 
-## 5. The entry stop has no goroutine, so there is no stack
+## 6. The entry stop has no goroutine, so there is no stack
 
 A `--stop-on-entry` launch stops before the Go runtime has scheduled anything.
 `threads` answers with a single placeholder:
@@ -127,7 +149,7 @@ truth is "not yet", and skipping the entry stop for Go would take a working
 Not mode-specific: `exec` on a prebuilt binary behaves the same way, so it is
 delve's entry point rather than the compile step.
 
-## 6. An unrecovered panic pauses — where debugpy exits
+## 7. An unrecovered panic pauses — where debugpy exits
 
 The three adapters do genuinely different things with a program that kills
 itself, and this is the one most likely to surprise an agent:
@@ -147,7 +169,7 @@ An agent that learned "a crash means `state: exited`" from a Python session will
 be wrong here. The program is still there, and its stack is still readable, which
 is better — just different.
 
-## 7. `exited` arrives before `terminated`
+## 8. `exited` arrives before `terminated`
 
 DAP does not order these two, and the three adapters do not agree. delve sends
 `exited` (with the code) first and `terminated` after it.
@@ -156,7 +178,7 @@ That is the favourable order — the exit code is in hand before the session end
 and it is why lazydap's `POST_TERMINATION_GRACE` drain, which exists for adapters
 that send them the other way round, never has anything to do for delve.
 
-## 8. The adapter outlives the debuggee and waits for the client
+## 9. The adapter outlives the debuggee and waits for the client
 
 After the debuggee exits, `dlv dap` stays running. It exits, cleanly, when the
 DAP client disconnects.
@@ -167,7 +189,7 @@ finds one. lazydap reaps it when the session goes or the daemon shuts down.
 Verified: after `lazydap shutdown`, zero `dlv` processes, zero debuggees, zero
 temporary binaries.
 
-## 9. `hitBreakpointIds` is populated — unlike debugpy
+## 10. `hitBreakpointIds` is populated — unlike debugpy
 
 delve's `stopped` event names the breakpoint it stopped on, the way codelldb's
 does:
@@ -180,7 +202,7 @@ debugpy sends none (its quirks file, entry 3), so an agent that branches on
 *which* breakpoint was hit works under codelldb and delve and must fall back to
 the frame under debugpy.
 
-## 10. A dying adapter does not reliably take the debuggee with it
+## 11. A dying adapter does not reliably take the debuggee with it
 
 Delve sits between the other two here, and it depends on what the program was
 doing:
