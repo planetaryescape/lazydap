@@ -16,6 +16,7 @@ pub mod inspect;
 pub mod launches;
 pub mod session;
 pub mod tui;
+pub mod watch;
 
 use crate::cli::WaitArgs;
 use crate::client::DaemonClient;

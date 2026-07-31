@@ -7,7 +7,7 @@
 //! adapter.
 
 use super::{Result, StoreError};
-use lazydap_core::{Breakpoint, LaunchConfig, LaunchConfigSource, LaunchKind};
+use lazydap_core::{Breakpoint, LaunchConfig, LaunchConfigSource, LaunchKind, Watch};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -29,19 +29,49 @@ pub struct Document {
     pub next_breakpoint_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breakpoints: Vec<Breakpoint>,
-    /// Anything a newer lazydap wrote that this one does not model — watches,
-    /// launch configs — is carried through a rewrite untouched rather than
-    /// deleted. Losing a colleague's launch configs because they run a newer
-    /// build would be a nasty way to find out about this file.
+    /// The watch counter, persisted for the reason the breakpoint one is: a
+    /// removed watch must not have its id handed to a different expression
+    /// later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_watch_id: Option<u32>,
+    /// The project's watch expressions (M16). Modelled rather than left in
+    /// [`Self::unknown`], because lazydap *writes* these — which is the line
+    /// between the two: what this build writes it models, what it only reads it
+    /// leaves where it found it (see [`launch_configs`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watches: Vec<Watch>,
+    /// Anything a newer lazydap wrote that this one does not model — launch
+    /// configs, adapter settings, preferences — is carried through a rewrite
+    /// untouched rather than deleted. Losing a colleague's launch configs
+    /// because they run a newer build would be a nasty way to find out about
+    /// this file.
     #[serde(flatten)]
     pub unknown: toml::Table,
 }
 
+/// What the file says, in the shapes the store keeps in memory.
+///
+/// A struct rather than the tuple this used to be. Two counters, two lists and
+/// the unmodelled remainder is past the point where positional returns can be
+/// read at the call site — and a `(Vec<Breakpoint>, u32, Vec<Watch>, u32,
+/// Table)` is exactly the shape in which somebody eventually passes the watch
+/// counter as the breakpoint one.
+pub struct Contents {
+    pub breakpoints: Vec<Breakpoint>,
+    /// The id the next breakpoint should take.
+    pub next_breakpoint_id: u32,
+    pub watches: Vec<Watch>,
+    /// The id the next watch should take.
+    pub next_watch_id: u32,
+    /// The sections this build does not model, which the caller has to hold on
+    /// to and hand back, or the next write deletes them.
+    pub unknown: toml::Table,
+}
+
 impl Document {
-    /// Absolute paths, the id the next breakpoint should take, and whatever
-    /// sections this build does not model — which the caller has to hold on to
-    /// and hand back, or the next write deletes them.
-    pub fn into_memory(self, root: &Path) -> (Vec<Breakpoint>, u32, toml::Table) {
+    /// Absolute paths, the ids the next breakpoint and watch should take, and
+    /// whatever sections this build does not model.
+    pub fn into_memory(self, root: &Path) -> Contents {
         let breakpoints: Vec<Breakpoint> = self
             .breakpoints
             .into_iter()
@@ -51,23 +81,27 @@ impl Document {
             })
             .collect();
 
-        let highest = breakpoints
-            .iter()
-            .map(|breakpoint| breakpoint.id.0 + 1)
-            .max()
-            .unwrap_or(1);
-        let next_id = self.next_breakpoint_id.unwrap_or(1).max(highest);
+        let next_breakpoint_id = next_id(
+            self.next_breakpoint_id,
+            breakpoints.iter().map(|breakpoint| breakpoint.id.0),
+        );
+        let next_watch_id = next_id(
+            self.next_watch_id,
+            self.watches.iter().map(|watch| watch.id.0),
+        );
 
-        (breakpoints, next_id, self.unknown)
+        Contents {
+            breakpoints,
+            next_breakpoint_id,
+            watches: self.watches,
+            next_watch_id,
+            unknown: self.unknown,
+        }
     }
 
-    pub fn from_memory(
-        breakpoints: &[Breakpoint],
-        next_id: u32,
-        root: &Path,
-        unknown: toml::Table,
-    ) -> Self {
-        let mut breakpoints: Vec<Breakpoint> = breakpoints
+    pub fn from_memory(contents: &Contents, root: &Path) -> Self {
+        let mut breakpoints: Vec<Breakpoint> = contents
+            .breakpoints
             .iter()
             .map(|breakpoint| Breakpoint {
                 source: relativise(&breakpoint.source, root),
@@ -78,18 +112,37 @@ impl Document {
         // being TOML at all (D006).
         breakpoints.sort_by(|a, b| a.source.cmp(&b.source).then(a.line.cmp(&b.line)));
 
+        // Watches sort by id rather than by expression: the id is the order
+        // they were added in, which is the order they are read in on screen,
+        // and sorting by text would shuffle the pane whenever one was renamed.
+        let mut watches = contents.watches.clone();
+        watches.sort_by_key(|watch| watch.id);
+
         Self {
             version: SCHEMA_VERSION,
-            next_breakpoint_id: Some(next_id),
+            next_breakpoint_id: Some(contents.next_breakpoint_id),
             breakpoints,
-            // Carried straight back out. These are the sections this build
-            // does not model — watches and launch configs, on the roadmap but
-            // not written by anything yet, or whatever a newer lazydap put
-            // there. Rewriting the file to add one breakpoint must not delete
-            // a colleague's launch configs because they run a newer build.
-            unknown,
+            next_watch_id: Some(contents.next_watch_id),
+            watches,
+            // Carried straight back out. These are the sections this build does
+            // not model — launch configs, adapter settings, or whatever a newer
+            // lazydap put there. Rewriting the file to add one breakpoint must
+            // not delete a colleague's launch configs because they run a newer
+            // build.
+            unknown: contents.unknown.clone(),
         }
     }
+}
+
+/// The next id to hand out: whatever the file said, but never one that is
+/// already in use.
+///
+/// A stale counter is the ordinary case for a hand-edited file, and handing
+/// back a live id would silently point a script holding it at somebody else's
+/// breakpoint.
+fn next_id(counter: Option<u32>, in_use: impl Iterator<Item = u32>) -> u32 {
+    let highest = in_use.map(|id| id + 1).max().unwrap_or(1);
+    counter.unwrap_or(1).max(highest)
 }
 
 /// Read the state file, returning the empty document if there isn't one.
@@ -293,18 +346,38 @@ mod tests {
         }
     }
 
+    fn watch(id: u32, expression: &str) -> Watch {
+        Watch {
+            id: lazydap_core::WatchId(id),
+            expression: expression.to_string(),
+            label: None,
+        }
+    }
+
+    /// The contents of a file holding exactly these breakpoints and watches,
+    /// with both counters one past the highest id.
+    fn contents(breakpoints: Vec<Breakpoint>, watches: Vec<Watch>) -> Contents {
+        Contents {
+            next_breakpoint_id: next_id(None, breakpoints.iter().map(|b| b.id.0)),
+            next_watch_id: next_id(None, watches.iter().map(|w| w.id.0)),
+            breakpoints,
+            watches,
+            unknown: toml::Table::new(),
+        }
+    }
+
     #[test]
     fn the_file_is_written_in_a_stable_order_so_it_diffs_cleanly() {
-        let root = Path::new("/p");
         let document = Document::from_memory(
-            &[
-                breakpoint(1, "/p/z.c", 5),
-                breakpoint(2, "/p/a.c", 20),
-                breakpoint(3, "/p/a.c", 2),
-            ],
-            4,
-            root,
-            toml::Table::new(),
+            &contents(
+                vec![
+                    breakpoint(1, "/p/z.c", 5),
+                    breakpoint(2, "/p/a.c", 20),
+                    breakpoint(3, "/p/a.c", 2),
+                ],
+                Vec::new(),
+            ),
+            Path::new("/p"),
         );
 
         let sources: Vec<String> = document
@@ -316,43 +389,98 @@ mod tests {
     }
 
     #[test]
+    fn watches_are_written_in_the_order_they_were_added_rather_than_alphabetically() {
+        // The pane reads top to bottom in the order they were set up. Sorting
+        // by text would shuffle it whenever an expression was edited.
+        let document = Document::from_memory(
+            &contents(
+                Vec::new(),
+                vec![watch(2, "zebra"), watch(1, "alpha"), watch(3, "middle")],
+            ),
+            Path::new("/p"),
+        );
+
+        // Ids 1, 2, 3 were added in that order and hold expressions that sort
+        // the other way, so a file ordered alphabetically would read
+        // "alpha, middle, zebra" instead.
+        let expressions: Vec<&str> = document
+            .watches
+            .iter()
+            .map(|watch| watch.expression.as_str())
+            .collect();
+        assert_eq!(expressions, vec!["alpha", "zebra", "middle"]);
+    }
+
+    #[test]
     fn a_file_with_no_next_id_derives_one_past_the_highest_it_has() {
-        // Hand-written files will not have the counter in them.
-        let document: Document =
-            toml::from_str("version = 1\n\n[[breakpoints]]\nid = 7\nsource = \"a.c\"\nline = 1\n")
-                .expect("parse");
-        let (_, next_id, _) = document.into_memory(Path::new("/p"));
-        assert_eq!(next_id, 8);
+        // Hand-written files will not have the counters in them.
+        let document: Document = toml::from_str(
+            "version = 1\n\n[[breakpoints]]\nid = 7\nsource = \"a.c\"\nline = 1\n\n\
+             [[watches]]\nid = 4\nexpression = \"counter\"\n",
+        )
+        .expect("parse");
+        let contents = document.into_memory(Path::new("/p"));
+
+        assert_eq!(contents.next_breakpoint_id, 8);
+        assert_eq!(contents.next_watch_id, 5);
     }
 
     #[test]
     fn a_stale_counter_never_hands_back_an_id_that_is_in_use() {
         let document: Document = toml::from_str(
-            "version = 1\nnext_breakpoint_id = 2\n\n\
-             [[breakpoints]]\nid = 9\nsource = \"a.c\"\nline = 1\n",
+            "version = 1\nnext_breakpoint_id = 2\nnext_watch_id = 2\n\n\
+             [[breakpoints]]\nid = 9\nsource = \"a.c\"\nline = 1\n\n\
+             [[watches]]\nid = 6\nexpression = \"counter\"\n",
         )
         .expect("parse");
-        let (_, next_id, _) = document.into_memory(Path::new("/p"));
+        let contents = document.into_memory(Path::new("/p"));
+
         assert_eq!(
-            next_id, 10,
-            "the counter cannot go backwards past a live id"
+            contents.next_breakpoint_id, 10,
+            "the counter cannot go backwards past a live id",
+        );
+        assert_eq!(contents.next_watch_id, 7, "nor can the watch one");
+    }
+
+    #[test]
+    fn a_watch_survives_a_write_and_a_read() {
+        let document = Document::from_memory(
+            &contents(Vec::new(), vec![watch(1, "tokens[pos]")]),
+            Path::new("/p"),
+        );
+        let written = toml::to_string_pretty(&document).expect("serialise");
+
+        let read: Document = toml::from_str(&written).expect("parse");
+        let contents = read.into_memory(Path::new("/p"));
+
+        assert_eq!(contents.watches, vec![watch(1, "tokens[pos]")]);
+        assert!(
+            contents.unknown.is_empty(),
+            "a modelled section must not also land in the unmodelled remainder: {:?}",
+            contents.unknown,
         );
     }
 
     #[test]
     fn state_a_newer_lazydap_wrote_survives_a_rewrite_by_this_one() {
+        // Deliberately a section this build models *nothing* of. It used to be
+        // `[[watches]]`, which stopped being a fair test the moment M16 gave
+        // them a typed field of their own.
         let document: Document = toml::from_str(
-            "version = 1\n\n[[watches]]\nid = \"w1\"\nexpression = \"tokens[pos]\"\n",
+            "version = 1\n\n[[data_breakpoints]]\nid = \"d1\"\naddress = \"0x7ffd\"\n",
         )
         .expect("parse");
         assert!(
-            document.unknown.contains_key("watches"),
+            document.unknown.contains_key("data_breakpoints"),
             "unmodelled sections must be captured, not dropped: {:?}",
             document.unknown,
         );
 
         let round_tripped = toml::to_string_pretty(&document).expect("serialise");
-        assert!(round_tripped.contains("watches"), "got: {round_tripped}");
+        assert!(
+            round_tripped.contains("data_breakpoints"),
+            "got: {round_tripped}",
+        );
     }
 
     #[test]
@@ -442,15 +570,10 @@ mod tests {
         let document: Document =
             toml::from_str("[[launch_configs]]\nname = \"main\"\nprogram = \"app\"\n")
                 .expect("parse");
-        let (_, next_id, unknown) = document.into_memory(Path::new("/p"));
+        let contents = document.into_memory(Path::new("/p"));
 
-        let rewritten = toml::to_string_pretty(&Document::from_memory(
-            &[],
-            next_id,
-            Path::new("/p"),
-            unknown,
-        ))
-        .expect("serialise");
+        let rewritten = toml::to_string_pretty(&Document::from_memory(&contents, Path::new("/p")))
+            .expect("serialise");
 
         assert!(rewritten.contains("launch_configs"), "got: {rewritten}");
         assert!(rewritten.contains("main"), "got: {rewritten}");

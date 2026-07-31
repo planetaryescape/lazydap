@@ -6,11 +6,12 @@
 //!
 //! Split by topic: [`session`] owns the adapter's lifecycle and everything
 //! that moves the program, [`inspect`] reads a stopped one, [`breakpoints`]
-//! owns project state that outlives any session.
+//! and [`watches`] own the project state that outlives any session.
 
 mod breakpoints;
 mod inspect;
 mod session;
+mod watches;
 
 use crate::state::{DaemonState, Session};
 use lazydap_core::{SessionId, SessionState};
@@ -139,6 +140,15 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
         Request::BreakpointToggle { selector, dry_run } => {
             breakpoints::toggle(state, selector, dry_run).await
         }
+
+        // --- Watches ---
+        //
+        // None of these are `async`: a watch is never handed to an adapter, so
+        // there is nothing to await. What one evaluates to is an ordinary
+        // `Request::Eval`, made by whoever wants to know, at a stop.
+        Request::WatchList => watches::list(state),
+        Request::WatchAdd { watch, dry_run } => watches::add(state, watch, dry_run),
+        Request::WatchRemove { selector, dry_run } => watches::remove(state, selector, dry_run),
 
         // Answered by `server::serve_client`, which is the only thing that
         // has the connection to attach the event stream to. Reaching here

@@ -1,8 +1,8 @@
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointSelector, BreakpointStatus, EndReason,
-    EvalContext, EvalResult, NewBreakpoint, OutputChunk, PauseReason, Scope, SessionId,
+    EvalContext, EvalResult, NewBreakpoint, NewWatch, OutputChunk, PauseReason, Scope, SessionId,
     SessionState, StackFrame, StepKind, ThreadInfo, ThreadUpdate, Variable, VariableFilter,
-    WaitOutcome,
+    WaitOutcome, Watch, WatchId, WatchSelector,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,7 +34,16 @@ use std::path::PathBuf;
 /// different codelldb than the one the caller pinned. A `VersionMismatch` that
 /// `lazydap shutdown` clears is a far better failure than a debugger that
 /// obeys the wrong configuration without saying so.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 4;
+///
+/// v5 (M16, D052): the watch requests and [`Event::WatchUpdated`]. A new
+/// `Request` variant is not additive in either direction — `Request` is an
+/// externally-tagged enum with no fallback, so an older daemon fails to
+/// deserialise the *whole envelope* and never reaches the `version` field it
+/// would have refused on. What the caller gets instead is a `BadRequest` on id
+/// `0` and a closed connection, which the client cannot match to its request
+/// and reports as "the daemon closed the connection before answering". The bump
+/// is what turns that into the `VersionMismatch` `lazydap shutdown` clears.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 5;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +215,18 @@ pub enum Request {
         dry_run: bool,
     },
 
+    // --- Watches. Project state too: the expressions exist without a session,
+    // and what they evaluate to does not (M16). ---
+    WatchList,
+    WatchAdd {
+        watch: NewWatch,
+        dry_run: bool,
+    },
+    WatchRemove {
+        selector: WatchSelector,
+        dry_run: bool,
+    },
+
     /// Push every event of these kinds down this connection as it happens.
     ///
     /// Answered with [`Response::Status`], not a variant of its own, and that
@@ -335,6 +356,7 @@ pub enum Response {
     },
 
     Breakpoints(BreakpointReport),
+    Watches(WatchReport),
 }
 
 /// What a `--wait` saw. The one shape agents read.
@@ -442,6 +464,59 @@ impl BreakpointAction {
             Self::Added => "would add",
             Self::Removed => "would remove",
             Self::Toggled => "would toggle",
+        }
+    }
+}
+
+/// The answer to every watch command.
+///
+/// The same shape [`BreakpointReport`] has, and for the same reason: one shape
+/// for list, add and remove means a client parses watches exactly once, and
+/// `--dry-run` is a flag on a familiar response rather than a different one.
+///
+/// It is missing `applied_to_session`, which is the one real difference between
+/// the two. A breakpoint has to be handed to a live adapter to mean anything,
+/// so whether that happened is news. There is no DAP request that installs a
+/// watch — an expression is evaluated on demand, at a stop, by whoever wants to
+/// know — so there is nothing for a session to have been told, and a field
+/// saying `false` forever would only invite a caller to wonder what it was
+/// waiting for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchReport {
+    pub action: WatchAction,
+    /// Nothing was changed; this is what *would* change.
+    pub dry_run: bool,
+    /// The watches this command is about: all of them for a list, the affected
+    /// ones otherwise.
+    pub watches: Vec<Watch>,
+    /// Ids the selector named but no watch matched. Empty on success; a caller
+    /// that piped ids in can tell which ones went stale.
+    pub not_found: Vec<WatchId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchAction {
+    Listed,
+    Added,
+    Removed,
+}
+
+impl WatchAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Listed => "listed",
+            Self::Added => "added",
+            Self::Removed => "removed",
+        }
+    }
+
+    /// How to describe it when nothing has happened yet.
+    pub fn would(&self) -> &'static str {
+        match self {
+            Self::Listed => "would list",
+            Self::Added => "would add",
+            Self::Removed => "would remove",
         }
     }
 }
@@ -556,6 +631,22 @@ pub enum Event {
         session_id: SessionId,
         update: ThreadUpdate,
     },
+    /// The project's watch list changed, because somebody ran `lazydap watch`
+    /// (add or remove).
+    ///
+    /// Always project scope, and so there is no `session_id` to distinguish two
+    /// meanings the way [`Self::BreakpointUpdated`] has to. A watch has no
+    /// adapter opinion for a session to hold: nothing is ever installed, so
+    /// nothing can be verified or moved.
+    ///
+    /// The payload names *which* watch, and nothing more. What it means to a
+    /// client is "the list is not what you last read; read it again" — which is
+    /// the only honest thing one of these can say, since an add and a removal
+    /// arrive the same way and only the list distinguishes them (D043's lesson,
+    /// applied at the start rather than after the bug).
+    WatchUpdated {
+        watch_id: WatchId,
+    },
 }
 
 impl Event {
@@ -568,14 +659,14 @@ impl Event {
             Self::Output { .. } => EventKind::Output,
             Self::BreakpointUpdated { .. } => EventKind::BreakpointUpdated,
             Self::ThreadChanged { .. } => EventKind::ThreadChanged,
+            Self::WatchUpdated { .. } => EventKind::WatchUpdated,
         }
     }
 
     /// Which session this is about, when it is about one.
     ///
-    /// `None` only for a project-scope [`Event::BreakpointUpdated`] — a
-    /// `lazydap break` is a change to the project, and belongs to no session's
-    /// history.
+    /// `None` for the project-scope events — a `lazydap break` or a `lazydap
+    /// watch` is a change to the project, and belongs to no session's history.
     pub fn session_id(&self) -> Option<SessionId> {
         match self {
             Self::SessionStarted { session_id, .. }
@@ -585,6 +676,9 @@ impl Event {
             | Self::Output { session_id, .. }
             | Self::ThreadChanged { session_id, .. } => Some(*session_id),
             Self::BreakpointUpdated { session_id, .. } => *session_id,
+            // Never a session's: a watch belongs to the project, and there is
+            // no adapter opinion in one of these to be scoped to a session.
+            Self::WatchUpdated { .. } => None,
         }
     }
 }
@@ -600,6 +694,7 @@ pub enum EventKind {
     Output,
     BreakpointUpdated,
     ThreadChanged,
+    WatchUpdated,
 }
 
 /// A failure, always paired with the id of the request that caused it.
@@ -773,6 +868,66 @@ mod tests {
             breakpoints: Vec::new(),
             not_found: vec![BreakpointId(9)],
             applied_to_session: false,
+        };
+        let json = serde_json::to_string(&report).expect("serialise");
+
+        assert!(json.contains(r#""action":"removed""#), "got: {json}");
+        assert!(json.contains(r#""dry_run":true"#), "got: {json}");
+        assert!(json.contains(r#""not_found":[9]"#), "got: {json}");
+    }
+
+    #[test]
+    fn a_watch_request_round_trips_through_json() {
+        let request = Request::WatchAdd {
+            watch: NewWatch {
+                expression: "tokens[pos]".to_string(),
+                label: Some("current token".to_string()),
+            },
+            dry_run: false,
+        };
+        let json = serde_json::to_string(&request).expect("serialise");
+        let decoded: Request = serde_json::from_str(&json).expect("deserialise");
+
+        assert_eq!(decoded, request, "got: {json}");
+    }
+
+    #[test]
+    fn a_request_variant_this_build_does_not_know_is_a_hard_decode_failure() {
+        // This is the whole reason M16 bumped the protocol rather than adding
+        // variants quietly (D052). `Request` is externally tagged with no
+        // fallback, so an unknown variant does not fail *softly* — the whole
+        // envelope fails to deserialise, which means the daemon never reaches
+        // the `version` field it would have refused on. Two builds both
+        // claiming v4 would therefore answer a watch command with a closed
+        // connection instead of a `VersionMismatch` a restart clears.
+        let frame = r#"{"version":4,"id":7,"payload":{"Request":"WatchList"}}"#
+            .replace("WatchList", "SomethingFromTheFuture");
+        let error = serde_json::from_str::<IpcMessage>(&frame).expect_err("unknown variant");
+
+        assert!(
+            error.to_string().contains("unknown variant"),
+            "got: {error}",
+        );
+    }
+
+    #[test]
+    fn a_watch_update_belongs_to_the_project_rather_than_to_any_session() {
+        // Which is what keeps it out of a session's event buffer, and therefore
+        // out of the blob the next `continue --wait` returns.
+        let event = Event::WatchUpdated {
+            watch_id: WatchId(3),
+        };
+        assert_eq!(event.kind(), EventKind::WatchUpdated);
+        assert_eq!(event.session_id(), None);
+    }
+
+    #[test]
+    fn a_dry_run_watch_report_says_so_in_the_shape_a_real_one_uses() {
+        let report = WatchReport {
+            action: WatchAction::Removed,
+            dry_run: true,
+            watches: Vec::new(),
+            not_found: vec![WatchId(9)],
         };
         let json = serde_json::to_string(&report).expect("serialise");
 

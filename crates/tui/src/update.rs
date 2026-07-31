@@ -456,6 +456,15 @@ fn daemon_event(mut state: AppState, event: Event) -> (AppState, Cmd) {
         return breakpoint_updated(state, *session_id, breakpoint);
     }
 
+    // Project scope too, and for the same reason it is handled up here: there
+    // is no session to filter it against. Somebody ran `lazydap watch`, and the
+    // only honest response is to read the list again — an add and a removal
+    // arrive identically, and only the list distinguishes them (D043).
+    if let Event::WatchUpdated { .. } = &event {
+        let cmd = send(&mut state, Request::WatchList);
+        return (state, cmd);
+    }
+
     if !applies(&state, &event) {
         tracing::debug!(
             target: "tui.ipc",
@@ -521,12 +530,14 @@ fn daemon_event(mut state: AppState, event: Event) -> (AppState, Cmd) {
         }
         // `Output` and `ThreadChanged` are subscribed to by nobody yet, and
         // handled explicitly rather than with a catch-all so that adding an
-        // event variant is a decision here. `BreakpointUpdated` is listed only
-        // to keep this exhaustive — it returned above, before the session
-        // filter, because its two scopes want opposite things from one.
-        Event::Output { .. } | Event::BreakpointUpdated { .. } | Event::ThreadChanged { .. } => {
-            (state, Cmd::None)
-        }
+        // event variant is a decision here. `BreakpointUpdated` and
+        // `WatchUpdated` are listed only to keep this exhaustive — both
+        // returned above, before the session filter, because a project-scope
+        // event has no session to be filtered against.
+        Event::Output { .. }
+        | Event::BreakpointUpdated { .. }
+        | Event::ThreadChanged { .. }
+        | Event::WatchUpdated { .. } => (state, Cmd::None),
     }
 }
 
