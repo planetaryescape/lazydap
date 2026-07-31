@@ -1,12 +1,24 @@
-use crate::types::{DapEvent, DapResponse};
+use crate::types::{DapEvent, DapRequest, DapResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
+
+/// The reading half of whatever carries DAP, once the transport owns it.
+///
+/// Boxed rather than generic because the two adapters lazydap ships reach
+/// their adapter over different things — codelldb over a TCP socket, debugpy
+/// over a child's stdout — and every type that holds a reader would otherwise
+/// grow a parameter it does nothing with. The cost is one virtual call per
+/// read of a stream that is already crossing a process boundary.
+type Source = Box<dyn AsyncRead + Send + Unpin>;
+
+/// The writing half, boxed for the same reason.
+type Sink = Box<dyn AsyncWrite + Send + Unpin>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -37,13 +49,21 @@ pub enum TransportError {
 
 pub type Result<T> = std::result::Result<T, TransportError>;
 
-/// One message read off the adapter socket. Responses answer a request we
+/// One message read off the adapter connection. Responses answer a request we
 /// sent; events are adapter-initiated and can arrive at any time, including
 /// between a request and its response.
 #[derive(Debug)]
 pub enum Incoming {
     Response(DapResponse<serde_json::Value>),
     Event(DapEvent),
+    /// The adapter is asking *us* for something (`runInTerminal`,
+    /// `startDebugging`). lazydap advertises support for neither, so every one
+    /// of these is answered with a refusal — see
+    /// [`DapWriter::refuse`]. It is a variant rather than an
+    /// error because an adapter that asks anyway has not malfunctioned, and
+    /// killing the session over a question we can simply answer "no" to is a
+    /// debug session lost to politeness.
+    ReverseRequest(DapRequest),
 }
 
 pub struct DapTransport {
@@ -52,11 +72,17 @@ pub struct DapTransport {
 }
 
 impl DapTransport {
-    pub async fn spawn(adapter_path: &str) -> Result<Self> {
+    /// Start an adapter that listens on a TCP port and announces it on stderr,
+    /// then connect to it.
+    ///
+    /// One of the two shapes a DAP adapter comes in, and the one codelldb
+    /// uses. The other is [`spawn_stdio`](Self::spawn_stdio). Which one an
+    /// adapter wants is a property of that adapter, so the choice is made in
+    /// the adapter module rather than here.
+    pub async fn spawn_tcp(adapter_path: &str) -> Result<Self> {
         // codelldb's "Listening on HOST:PORT" line is logged at debug level — without
         // RUST_LOG=debug in its env, the adapter is silent on stderr and our line-loop
         // hangs forever. See docs/issues/0002-codelldb-version-drift-rust-log.md.
-        // Adapter-specific; will be revisited per-adapter in M18.
         let mut child = Command::new(adapter_path)
             .arg("--port")
             .arg("0")
@@ -98,7 +124,41 @@ impl DapTransport {
         });
 
         let stream = TcpStream::connect(("127.0.0.1", port)).await?;
-        Ok(Self::from_parts(child, stream))
+        Ok(Self::from_tcp(child, stream))
+    }
+
+    /// Start an adapter that speaks DAP over its own stdin and stdout.
+    ///
+    /// The framing is identical to the TCP case — `Content-Length` headers and
+    /// a JSON body — so only the pipes differ. debugpy works this way
+    /// (`python3 -m debugpy.adapter`), which is why the command is a program
+    /// *and arguments* rather than a bare path: the adapter is a module of an
+    /// interpreter, not an executable of its own.
+    ///
+    /// stderr is drained into the log rather than left unread. A child whose
+    /// stderr pipe fills up blocks writing to it, and an adapter blocked in a
+    /// log call answers no requests.
+    pub async fn spawn_stdio(program: &OsStr, args: &[String]) -> Result<Self> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "dap.adapter.stderr", "{line}");
+            }
+        });
+
+        Ok(Self::from_parts(child, Box::new(stdout), Box::new(stdin)))
     }
 
     /// Send a request and read until its response arrives, discarding events.
@@ -114,12 +174,8 @@ impl DapTransport {
         let seq = self.send_request(command, args).await?;
 
         loop {
-            let body = self.reader.read_message_body().await?;
-            let value: serde_json::Value = serde_json::from_slice(&body)?;
-            let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match kind {
-                "response" => {
-                    let resp: DapResponse<R> = serde_json::from_slice(&body)?;
+            match self.reader.read_incoming().await? {
+                Incoming::Response(resp) => {
                     if resp.request_seq != seq {
                         return Err(TransportError::UnexpectedResponse {
                             request_seq: resp.request_seq,
@@ -134,18 +190,14 @@ impl DapTransport {
                     // all. Deserialise `R` from JSON null in that case, so
                     // `()` and `serde_json::Value` both work while a response
                     // type that genuinely needs fields still fails loudly.
-                    return match resp.body {
-                        Some(body) => Ok(body),
-                        None => Ok(serde_json::from_value(serde_json::Value::Null)?),
-                    };
+                    return Ok(serde_json::from_value(
+                        resp.body.unwrap_or(serde_json::Value::Null),
+                    )?);
                 }
-                "event" => {
-                    let event_name = value.get("event").and_then(|v| v.as_str()).unwrap_or("?");
-                    tracing::debug!(target: "dap.recv.event", event_name, "ignoring event");
+                Incoming::Event(event) => {
+                    tracing::debug!(target: "dap.recv.event", event_name = event.event, "ignoring event");
                 }
-                other => {
-                    tracing::warn!(kind = other, "unknown message type");
-                }
+                Incoming::ReverseRequest(request) => self.writer.refuse(&request).await?,
             }
         }
     }
@@ -163,6 +215,11 @@ impl DapTransport {
         self.reader.read_incoming().await
     }
 
+    /// Answer a reverse request with "no" — see [`DapWriter::refuse`].
+    pub async fn refuse(&mut self, request: &DapRequest) -> Result<()> {
+        self.writer.refuse(request).await
+    }
+
     /// Hand reads and writes to separate owners.
     ///
     /// The daemon needs this: a long-lived task owns [`DapReader`] and does
@@ -178,18 +235,22 @@ impl DapTransport {
         self.writer.shutdown().await
     }
 
-    fn from_parts(child: Child, stream: TcpStream) -> Self {
+    fn from_tcp(child: Child, stream: TcpStream) -> Self {
         // Split before the first read so the buffered reader owns its half from
         // the start: splitting later would strand whatever bytes the buffer had
         // already pulled off the socket.
         let (read_half, write_half) = stream.into_split();
+        Self::from_parts(child, Box::new(read_half), Box::new(write_half))
+    }
+
+    fn from_parts(child: Child, source: Source, sink: Sink) -> Self {
         Self {
             reader: DapReader {
-                stream: BufReader::new(read_half),
+                stream: BufReader::new(source),
             },
             writer: DapWriter {
                 child,
-                stream: write_half,
+                stream: sink,
                 seq: AtomicI64::new(1),
             },
         }
@@ -198,7 +259,7 @@ impl DapTransport {
 
 /// The read side of an adapter connection.
 pub struct DapReader {
-    stream: BufReader<OwnedReadHalf>,
+    stream: BufReader<Source>,
 }
 
 impl DapReader {
@@ -231,6 +292,19 @@ impl DapReader {
                 let event: DapEvent = serde_json::from_slice(&body)?;
                 tracing::debug!(target: "dap.recv.event", event = event.event, "event");
                 Ok(Incoming::Event(event))
+            }
+            // A reverse request. Reading it as a message we simply do not
+            // understand would kill the session over a question, which is how
+            // this used to behave.
+            Some("request") => {
+                let request: DapRequest = serde_json::from_slice(&body)?;
+                tracing::debug!(
+                    target: "dap.recv.request",
+                    seq = request.seq,
+                    command = request.command,
+                    "reverse request",
+                );
+                Ok(Incoming::ReverseRequest(request))
             }
             other => Err(TransportError::Dap(format!(
                 "unknown message type: {other:?}"
@@ -274,7 +348,7 @@ impl DapReader {
 /// one that gets to give up and pull the plug.
 pub struct DapWriter {
     child: Child,
-    stream: OwnedWriteHalf,
+    stream: Sink,
     seq: AtomicI64,
 }
 
@@ -289,14 +363,50 @@ impl DapWriter {
             "command": command,
             "arguments": args,
         });
-        let body = serde_json::to_vec(&outbound)?;
+        self.write_message(&outbound).await?;
+        tracing::debug!(target: "dap.send", seq, command, "request");
+
+        Ok(seq)
+    }
+
+    /// Answer a reverse request with "no".
+    ///
+    /// lazydap advertises neither `runInTerminal` nor `startDebugging`, so an
+    /// adapter should not be asking — but adapters do, and the alternative to
+    /// answering is silence. Silence is the worse failure of the two: the
+    /// adapter waits for a reply that is never coming, the debuggee never
+    /// starts, and the session dies at a timeout that names the wrong thing.
+    /// A refusal it can read leaves the adapter free to fall back or fail
+    /// with its own words.
+    pub async fn refuse(&mut self, request: &DapRequest) -> Result<()> {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+
+        let outbound = serde_json::json!({
+            "seq": seq,
+            "type": "response",
+            "request_seq": request.seq,
+            "command": request.command,
+            "success": false,
+            "message": format!("lazydap does not support `{}`", request.command),
+        });
+        self.write_message(&outbound).await?;
+        tracing::warn!(
+            target: "dap.send",
+            seq,
+            command = request.command,
+            "refused a reverse request lazydap never advertised support for",
+        );
+
+        Ok(())
+    }
+
+    async fn write_message(&mut self, message: &serde_json::Value) -> Result<()> {
+        let body = serde_json::to_vec(message)?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
         self.stream.write_all(header.as_bytes()).await?;
         self.stream.write_all(&body).await?;
         self.stream.flush().await?;
-        tracing::debug!(target: "dap.send", seq, command, "request");
-
-        Ok(seq)
+        Ok(())
     }
 
     /// Whether the adapter process has already exited, without blocking.
@@ -350,7 +460,7 @@ mod tests {
             .spawn()
             .expect("spawn stand-in adapter process");
 
-        DapTransport::from_parts(child, stream)
+        DapTransport::from_tcp(child, stream)
     }
 
     #[tokio::test]

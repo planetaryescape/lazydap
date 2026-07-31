@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let mut transport = DapTransport::spawn("codelldb").await?;
+    let mut transport = DapTransport::spawn_tcp("codelldb").await?;
 
     let caps: Capabilities = transport
         .request("initialize", &InitializeArgs::new("lldb"))
@@ -66,6 +66,11 @@ async fn main() -> anyhow::Result<()> {
     let configure_deadline = Instant::now() + PHASE_TIMEOUT;
     loop {
         match next_message(&mut transport, configure_deadline).await? {
+            // codelldb never sends one. lazydap's daemon answers them
+            // properly; an example that only drives codelldb just says so.
+            Incoming::ReverseRequest(request) => {
+                println!("[req] {} (unanswered by this example)", request.command)
+            }
             Incoming::Event(event) => {
                 println!("[evt] {} {}", event.event, body_of(&event));
                 match event.event.as_str() {
@@ -157,6 +162,11 @@ async fn main() -> anyhow::Result<()> {
     let resume_deadline = Instant::now() + PHASE_TIMEOUT;
     loop {
         match next_message(&mut transport, resume_deadline).await? {
+            // codelldb never sends one. lazydap's daemon answers them
+            // properly; an example that only drives codelldb just says so.
+            Incoming::ReverseRequest(request) => {
+                println!("[req] {} (unanswered by this example)", request.command)
+            }
             Incoming::Event(event) => {
                 println!("[evt] {} {}", event.event, body_of(&event));
                 match event.event.as_str() {
@@ -273,6 +283,11 @@ async fn drain_until_disconnected(transport: &mut DapTransport, disconnect_seq: 
             }
             Incoming::Response(resp) => println!("[rsp] {} success={}", resp.command, resp.success),
             Incoming::Event(event) => println!("[evt] {} {}", event.event, body_of(&event)),
+            // codelldb never sends one; lazydap answers them properly in
+            // `crates/daemon/src/adapter/`. Here, saying so is enough.
+            Incoming::ReverseRequest(request) => {
+                println!("[req] {} (unanswered by this example)", request.command)
+            }
         }
     }
 }
