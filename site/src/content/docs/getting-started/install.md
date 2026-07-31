@@ -70,11 +70,8 @@ are all inside it.
 brew install planetaryescape/lazydap/lazydap
 ```
 
-:::note[The tap appears with the next release]
-The release workflow renders the formula and pushes it to
-`planetaryescape/homebrew-lazydap`, so the tap goes live the next time a version is tagged.
-Until then, use the install script or build from source.
-:::
+The formula comes from the `planetaryescape/homebrew-lazydap` tap, which the release
+workflow updates as part of cutting a version.
 
 ### Install script
 

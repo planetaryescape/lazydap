@@ -124,8 +124,6 @@ Other platforms: `codelldb-linux-x64.vsix`, `codelldb-linux-arm64.vsix`, `codell
 brew install planetaryescape/lazydap/lazydap
 ```
 
-> The tap is pushed by the release workflow, so it appears with the next release. Until then take one of the two routes below.
-
 Or by script, which reads `uname`, downloads the matching build, checks its SHA-256 **before** unpacking it, and puts the binary in `~/.local/bin` — `LAZYDAP_INSTALL_DIR` moves that, and nothing here uses `sudo`:
 
 ```bash

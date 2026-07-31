@@ -81,16 +81,17 @@ brew install --formula /tmp/lazydap.rb && lazydap version && brew uninstall lazy
 
 ## Completed
 
-**2026-07-31.** Everything in this repository is done and verified against the real v0.1.0
-release assets. The two outward-facing halves are not, and cannot be from here: the
-`planetaryescape/homebrew-lazydap` repository does not exist and `HOMEBREW_TAP_TOKEN` is not
-set. Until both land, `brew install planetaryescape/lazydap/lazydap` fails, which is why the
-README and the site both carry a note saying the tap arrives with the next release.
+**2026-07-31.** Done and verified against the real v0.1.0 release assets.
+`planetaryescape/homebrew-lazydap` exists and `HOMEBREW_TAP_TOKEN` is set, so the workflow
+has everything it needs. The one thing left is pushing the rendered v0.1.0 formula into the
+tap by hand — v0.1.0 shipped before this milestone existed, so no workflow run has ever
+updated the tap. Every version from here does it automatically.
 
 Shipped:
 
 - `install.sh` — `LAZYDAP_INSTALL_DIR` (default `~/.local/bin`), `LAZYDAP_REPO`,
-  `LAZYDAP_BASE_URL`, optional version argument, no sudo, shellcheck-clean.
+  `LAZYDAP_BASE_URL`, `LAZYDAP_RELEASES_URL`, optional version argument, no sudo,
+  shellcheck-clean.
 - `packaging/homebrew/lazydap.rb` and `scripts/render_homebrew_formula.sh`.
 - A `homebrew` job in `.github/workflows/product-release.yml`, after `publish`.
 - README, `site/src/content/docs/getting-started/install.md`, AGENTS.md ship-it §6, and the
@@ -128,3 +129,41 @@ Shipped:
   v5. Untouched here — out of this milestone's blast radius.
 - No Linux arm64 release build exists, so `install.sh` sends aarch64 Linux to a source
   build. Worth a target if anyone asks.
+
+### Security review round (2026-07-31)
+
+Seven findings, all fixed in this milestone.
+
+- **The checksum check had no trust anchor and did not bind the digest to the file.**
+  `shasum -c` lets the *manifest* choose what gets checked, so a manifest naming a file that
+  trivially matches passes while the archive is never hashed. `install.sh` now parses the
+  manifest itself — exactly one entry, exactly two fields, a 64-hex digest, and a filename
+  that must equal the archive it is about to install — hashes the downloaded file directly,
+  and string-compares. `shasum -c` is never handed the manifest.
+- **Download schemes are restricted to `https://` and `file://`.** Over plain http the same
+  attacker serves the archive and the digest that vouches for it, which is not a check.
+- **What the check does and does not prove is written down** at the point it happens:
+  integrity against a corrupted or swapped download, not authenticity. The archive and its
+  digest share an origin, so a compromised origin defeats it.
+- **Tap updates were racy.** The workflow's concurrency group is per-ref, so two releases in
+  flight could interleave and the loser could quietly restore the older formula. The
+  `homebrew` job now has a global concurrency group and refuses (logs, succeeds) when the
+  version in the tap is newer than the one being pushed, compared with `sort -V`.
+- **The release notes advertised Homebrew unconditionally** while the tap update could skip
+  or fail. The brew line is now appended by the tap job after the push succeeds, so a
+  release whose tap update skipped never mentions brew at all.
+- **Malformed checksum files rendered silently** into the formula — an empty file produced
+  `sha256 ""`, which publishes fine and fails at somebody else's `brew install`. The render
+  script applies the same parse as `install.sh`.
+- **`latest` would have selected a future `v0.2.0-rc1` over `v0.1.0`.** Settled policy: the
+  GitHub prerelease *flag* is ignored, because every `v0.*` release carries it deliberately
+  and honouring it would leave `latest` finding nothing until v1.0; a semver prerelease
+  *suffix* is skipped.
+
+### Follow-up: sign the releases
+
+Checksums prove integrity, not authenticity — an attacker who controls the release origin
+serves a matching archive and digest and every check here passes. Closing that needs a
+signature over the release artifacts (minisign or cosign), a published public key, and
+verification in both `install.sh` and the formula. Out of M21's scope; worth its own
+milestone before anyone treats lazydap as a supply-chain dependency.

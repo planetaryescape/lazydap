@@ -919,8 +919,37 @@ out as prereleases, which that redirect skips. Asked on 2026-07-31 it answered
 API call against an unauthenticated rate limit, and a failure there names the fix: pass a
 version.
 
+**Two notions of prerelease, treated differently.** GitHub's prerelease *flag* is ignored
+when resolving `latest`: every `v0.*` release sets it deliberately, because a 0.x release is
+not a stability promise, so honouring it would leave `latest` finding nothing at all until
+v1.0. A semver prerelease *suffix* is skipped: somebody who named no version wants the
+newest release meant for them, not `v0.2.0-rc1`. Tags are `vX.Y.Z` or `vX.Y.Z-suffix`, so a
+hyphen is the whole test.
+
+**What the checksum proves, and what it does not.** The installer parses the `.sha256`
+manifest itself rather than handing it to `shasum -c`. `-c` lets the manifest choose which
+file gets checked, which makes the manifest — the untrusted half — the one deciding whether
+anything is verified at all; a manifest naming some other file passes while the archive is
+never hashed. So: exactly one entry, a 64-hex digest, and a filename that must equal the
+archive about to be installed; then hash the download directly and compare strings. Downloads
+are restricted to `https://` and `file://`, because over plain http the same attacker serves
+both the archive and the digest vouching for it.
+
+None of that is authenticity. The archive and its digest share an origin, and whoever
+controls that origin can serve a matching pair. Requiring https keeps a network attacker out
+of the origin; closing the rest needs a signature over the release, which is recorded as a
+follow-up in the M21 task file rather than pretended at here.
+
 **Consequences:** the tap (`planetaryescape/homebrew-lazydap`) is a second repository, so
 the release workflow's `homebrew` job needs a `HOMEBREW_TAP_TOKEN` secret it cannot create
 for itself. Without the secret the job renders the formula, logs that it is skipping the
 push, and succeeds — forks and rehearsals are not broken releases. The rendered formula is
 printed to the job log either way, which is also how the tap gets its first copy.
+
+Because the tap is shared state outside this repository, that job carries a global
+concurrency group rather than the workflow's per-ref one, and refuses to push when the tap
+already serves a newer version. Two releases in flight would otherwise race, and the loser
+could quietly put the older formula back. For the same reason the Homebrew line is appended
+to the release notes by that job *after* the push succeeds, rather than written into the
+notes the publish job builds: a release whose tap update skipped never mentions `brew`, so
+the notes cannot advertise an install command that would hand somebody the wrong version.

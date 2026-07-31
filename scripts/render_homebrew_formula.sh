@@ -30,19 +30,54 @@ template="packaging/homebrew/lazydap.rb"
 
 checksum_for() {
   local target="$1"
-  local file="${artifacts_dir}/lazydap-${version}-${target}.tar.gz.sha256"
+  local archive="lazydap-${version}-${target}.tar.gz"
+  local file="${artifacts_dir}/${archive}.sha256"
 
   if [ ! -f "$file" ]; then
     echo "$0: missing checksum file: $file" >&2
-    exit 1
+    return 1
   fi
 
-  awk '{ print $1 }' "$file"
+  # The same parse as install.sh's digest_from_manifest, and for the same
+  # reason. A checksum file that is empty, doubled, CRLF-wrapped or vouching for
+  # a different archive would otherwise be substituted into the formula as-is:
+  # `sha256 ""` renders fine, publishes fine, and fails on somebody else's
+  # machine at `brew install`, which is the worst place to find out.
+  tr -d '\r' < "$file" | awk -v expected="$archive" -v file="$file" '
+    /[^[:space:]]/ {
+      entries++
+      digest = $1
+      name = $2
+      sub(/^\*/, "", name)
+      fields = NF
+    }
+    END {
+      if (entries != 1) {
+        printf "%s: expected exactly one entry, found %d\n", file, entries + 0 > "/dev/stderr"
+        exit 1
+      }
+      if (fields != 2) {
+        printf "%s: entry has %d fields, expected 2\n", file, fields + 0 > "/dev/stderr"
+        exit 1
+      }
+      if (digest !~ /^[0-9a-fA-F]{64}$/) {
+        printf "%s: not a sha-256 digest: %s\n", file, digest > "/dev/stderr"
+        exit 1
+      }
+      if (name != expected) {
+        printf "%s: vouches for %s, not %s\n", file, name, expected > "/dev/stderr"
+        exit 1
+      }
+      print tolower(digest)
+    }
+  '
 }
 
-aarch64_apple_darwin="$(checksum_for aarch64-apple-darwin)"
-x86_64_apple_darwin="$(checksum_for x86_64-apple-darwin)"
-x86_64_unknown_linux_gnu="$(checksum_for x86_64-unknown-linux-gnu)"
+# `|| exit 1` on each: the failure happens inside a command substitution, which
+# is its own subshell, so the function's own exit would not stop this script.
+aarch64_apple_darwin="$(checksum_for aarch64-apple-darwin)" || exit 1
+x86_64_apple_darwin="$(checksum_for x86_64-apple-darwin)" || exit 1
+x86_64_unknown_linux_gnu="$(checksum_for x86_64-unknown-linux-gnu)" || exit 1
 
 mkdir -p "$(dirname "$output_formula")"
 
