@@ -74,6 +74,49 @@ pub struct LaunchArgs {
     pub terminal: Option<String>,
 }
 
+/// debugpy's `launch` arguments.
+///
+/// A separate struct from codelldb's [`LaunchArgs`] rather than one type with
+/// everything optional. The two adapters agree on the first six fields and on
+/// nothing after them, and a shared struct would have to make `terminal`,
+/// `console`, `justMyCode` and `subProcess` all optional — at which point
+/// nothing stops a codelldb launch from being built with debugpy's fields set,
+/// and the compiler has stopped helping. What each adapter sends is part of
+/// what that adapter *is*.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonLaunchArgs {
+    #[serde(rename = "type")]
+    pub adapter_type: String,
+    pub request: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub stop_on_entry: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Where the debuggee's console goes. `"internalConsole"` is the only
+    /// value lazydap can use: every other one makes debugpy ask for a terminal
+    /// with a `runInTerminal` reverse request we do not advertise, and the
+    /// debuggee's stdout would arrive in that terminal rather than as DAP
+    /// `output` events. codelldb spells the same idea `terminal: "console"`.
+    pub console: String,
+    /// Whether to step over code outside the user's own project.
+    ///
+    /// debugpy defaults this to `true`, which hides library and stdlib frames.
+    /// lazydap sends `false`: its first-class caller is an agent debugging a
+    /// failure that is as likely to be in a dependency as in the project, and
+    /// a stack that silently omits where the program actually is makes that
+    /// failure unfindable.
+    pub just_my_code: bool,
+    /// Whether debugpy should follow the debuggee's subprocesses.
+    ///
+    /// `false`, because following one means debugpy asking us to open a second
+    /// debug session with a `startDebugging` reverse request, and lazydap runs
+    /// one session at a time (D007).
+    pub sub_process: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBreakpointsArgs {
@@ -308,6 +351,21 @@ pub struct DapEvent {
     pub message_type: String,
     pub event: String,
     pub body: Option<serde_json::Value>,
+}
+
+/// A request sent by the *adapter* to us — DAP calls these reverse requests.
+///
+/// There are two in the wild: `runInTerminal`, which asks the client to start
+/// the debuggee in a terminal it owns, and `startDebugging`, which asks it to
+/// open a second debug session for a subprocess. lazydap advertises support
+/// for neither and every launch it builds is configured to avoid provoking
+/// them, so one arriving means an adapter asked anyway. It is answered with a
+/// refusal rather than ignored: see [`crate::DapWriter::refuse`].
+#[derive(Debug, Deserialize)]
+pub struct DapRequest {
+    pub seq: i64,
+    pub command: String,
+    pub arguments: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

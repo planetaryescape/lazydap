@@ -39,20 +39,41 @@ impl FromStr for SessionId {
     }
 }
 
-/// Which external debug adapter backs a session. v0.1 ships codelldb only
-/// (D013); the enum exists so the wire format does not change when debugpy
-/// lands at M18.
+/// Which external debug adapter backs a session.
+///
+/// Two of them since M18: codelldb for compiled languages with debug info (C,
+/// C++, Rust), debugpy for Python. The default is codelldb because that is
+/// what a program lazydap cannot classify is most likely to be — a native
+/// binary has no extension to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterKind {
     #[default]
     Codelldb,
+    Debugpy,
 }
 
 impl AdapterKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Codelldb => "codelldb",
+            Self::Debugpy => "debugpy",
+        }
+    }
+
+    /// Which adapter a program's filename says it needs, when it says
+    /// anything.
+    ///
+    /// Only the extension is read. Sniffing a shebang or an ELF header would
+    /// classify more programs, and would also mean opening a file the caller
+    /// has not asked to debug yet — and getting it wrong silently, which a
+    /// missing extension does not. `None` leaves the choice to the caller's
+    /// `--adapter`, or to the default.
+    pub fn for_program(program: &std::path::Path) -> Option<Self> {
+        match program.extension()?.to_str()? {
+            "py" => Some(Self::Debugpy),
+            "c" | "cc" | "cpp" | "cxx" | "rs" => Some(Self::Codelldb),
+            _ => None,
         }
     }
 }
@@ -69,6 +90,10 @@ impl FromStr for AdapterKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "codelldb" | "lldb" => Ok(Self::Codelldb),
+            // `python` is what a `launch.json` written for VS Code's older
+            // Python extension says; `debugpy` is the current spelling. Both
+            // name the same adapter.
+            "debugpy" | "python" => Ok(Self::Debugpy),
             other => Err(UnknownAdapter(other.to_string())),
         }
     }
@@ -79,7 +104,11 @@ pub struct UnknownAdapter(pub String);
 
 impl fmt::Display for UnknownAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown adapter: {} (v0.1 ships codelldb only)", self.0)
+        write!(
+            f,
+            "unknown adapter: {} (lazydap ships codelldb and debugpy)",
+            self.0,
+        )
     }
 }
 

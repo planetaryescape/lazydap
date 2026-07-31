@@ -45,9 +45,10 @@ pub enum Command {
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
 
-        /// Which debug adapter to use.
-        #[arg(long, default_value = "codelldb")]
-        adapter: AdapterKind,
+        /// Which debug adapter to use. Defaults to the one the program's file
+        /// extension implies — debugpy for `.py`, codelldb otherwise.
+        #[arg(long)]
+        adapter: Option<AdapterKind>,
 
         /// Arguments for the debuggee, after a `--` separator. They are kept
         /// separate so a debuggee flag can never be mistaken for a lazydap one.

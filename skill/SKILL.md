@@ -1,13 +1,14 @@
 ---
 name: lazydap
 description: |
-  Debug a compiled program from the shell with lazydap: launch it under a
-  debugger, set breakpoints, step, read the stack and variables, and evaluate
-  expressions in the running process. Every command is a shell subcommand that
-  prints JSON, so it works in any agent that can run a command — no server, no
-  protocol host. Use when asked to find why a program crashes, what a variable
-  holds at some line, or what actually happens at runtime rather than what the
-  source suggests. Currently debugs C, C++ and Rust binaries via codelldb.
+  Debug a program from the shell with lazydap: launch it under a debugger, set
+  breakpoints, step, read the stack and variables, and evaluate expressions in
+  the running process. Every command is a shell subcommand that prints JSON, so
+  it works in any agent that can run a command — no server, no protocol host.
+  Use when asked to find why a program crashes, what a variable holds at some
+  line, or what actually happens at runtime rather than what the source
+  suggests. Debugs C, C++ and Rust binaries via codelldb, and Python via
+  debugpy. `.py` picks debugpy on its own; anything else defaults to codelldb.
 lazydap_min_version: "0.1.0"
 ---
 

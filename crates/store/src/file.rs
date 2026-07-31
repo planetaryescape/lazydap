@@ -254,6 +254,10 @@ impl StoredLaunchConfig {
             cwd: self.cwd.map(|cwd| absolutise(&cwd, root)),
             env: self.env,
             stop_on_entry: self.stop_on_entry,
+            // Not spelled in lazydap's own file. `[adapter.<kind>] command`
+            // in the user config is where a pinned adapter binary goes here,
+            // and it applies to every launch rather than one of them.
+            adapter_command: None,
             source: LaunchConfigSource::ProjectState,
             // Nothing substitutes variables in lazydap's own file: it is
             // lazydap's, so a path in it means what it says.
@@ -389,15 +393,30 @@ mod tests {
 
     #[test]
     fn a_launch_config_this_build_cannot_run_is_still_read() {
+        // `delve` rather than `debugpy`, which this build gained at M18. The
+        // point of the test is the adapter nobody here can drive, and it needs
+        // a name that is still one.
+        let document: Document = toml::from_str(
+            "[[launch_configs]]\nname = \"api\"\nadapter = \"delve\"\nprogram = \"main.go\"\n",
+        )
+        .expect("parse");
+
+        let (configs, _) = launch_configs(&document.unknown, Path::new("/p"));
+        assert_eq!(configs[0].adapter, None);
+        assert_eq!(configs[0].adapter_type, "delve");
+        assert!(configs[0].not_runnable().is_some());
+    }
+
+    #[test]
+    fn a_python_launch_config_is_read_and_runnable() {
         let document: Document = toml::from_str(
             "[[launch_configs]]\nname = \"api\"\nadapter = \"debugpy\"\nprogram = \"app.py\"\n",
         )
         .expect("parse");
 
         let (configs, _) = launch_configs(&document.unknown, Path::new("/p"));
-        assert_eq!(configs[0].adapter, None);
-        assert_eq!(configs[0].adapter_type, "debugpy");
-        assert!(configs[0].not_runnable().is_some());
+        assert_eq!(configs[0].adapter, Some(lazydap_core::AdapterKind::Debugpy));
+        assert_eq!(configs[0].not_runnable(), None);
     }
 
     #[test]

@@ -102,7 +102,7 @@ runs on `v*` tags and has never fired.
 - [x] [M20 — Documentation website](docs/implementation/tasks/M20-docs-site.md) — completed 2026-07-30. `site/`: Astro + Starlight, 39 pages (22 generated from the binary with a drift-failing CI check), wire examples serialised from the real protocol types, `llms.txt`, verified transcripts throughout. `cd site && npm ci && npm run build`. Deployment + domain still to decide (SITE_URL placeholder is `lazydap.sh`); `public/og.png` is the one missing asset.
 - [ ] [M16 — Watches](docs/implementation/tasks/M16-watches.md)
 - [ ] [M17 — REPL pane](docs/implementation/tasks/M17-repl-pane.md)
-- [ ] [M18 — Second adapter (debugpy)](docs/implementation/tasks/M18-second-adapter.md)
+- [x] [M18 — Second adapter (debugpy)](docs/implementation/tasks/M18-second-adapter.md) — Python debugged end to end; the adapter seam is a trait (D052)
 
 ## Known follow-ups (post-v0.1, no milestone yet)
 

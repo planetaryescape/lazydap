@@ -32,7 +32,7 @@ Usage: lazydap launch [OPTIONS] <PROGRAM> [-- <ARGS>...]
 | `--stop-on-entry` | no | `false` | Stop at the program's entry point instead of running to the first breakpoint |
 | `--cwd <CWD>` | no | - | Working directory for the debuggee. Defaults to the current one |
 | `--env <KEY=VALUE>` | no | - | Environment for the debuggee, as KEY=VALUE. Repeatable |
-| `--adapter <ADAPTER>` | no | `codelldb` | Which debug adapter to use |
+| `--adapter <ADAPTER>` | no | - | Which debug adapter to use. Defaults to the one the program's file extension implies — debugpy for `.py`, codelldb otherwise |
 | `<ARGS>` | no | - | Arguments for the debuggee, after a `--` separator. They are kept separate so a debuggee flag can never be mistaken for a lazydap one |
 
 ### `lazydap launches`

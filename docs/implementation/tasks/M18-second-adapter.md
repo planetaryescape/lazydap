@@ -154,3 +154,72 @@ Manual: Python program debug via TUI and CLI. Both work identically (same key bi
 - **Capability divergence is real.** debugpy may not support `restartFrame`. The TUI should query capabilities and disable the relevant key binding.
 - **Path conventions.** debugpy expects forward slashes everywhere; codelldb is fine with platform paths. Normalise in adapter code.
 - **After M18, the project exits structured-milestone mode.** Future work tracked as issues / addenda.
+
+---
+
+## Completed — 2026-07-31
+
+Python is debugged end to end through the same commands C is, and the adapter
+seam D029 deferred is now a trait (D052).
+
+### Deviations from the plan above
+
+The plan was written before anyone had run debugpy. Four things it specifies
+turned out to be wrong, and the code follows what the adapter actually does:
+
+1. **No `crates/adapter-debugpy/`.** Both adapters are modules inside
+   `crates/daemon/src/adapter/`. Separate crates would spread `lazydap_dap`
+   across more manifests to buy something the existing module boundary and its
+   `grep` already enforce. See D052.
+2. **Not `debugpy-adapter`, and not TCP.** The plan preferred the
+   `debugpy-adapter` binary "(simpler, more like codelldb)". It is a shim that
+   commonly lands off `PATH`, and debugpy speaks **stdio**. The adapter is
+   started as `python3 -m debugpy.adapter`, and the transport grew a stdio
+   construction path (D053). Discovery therefore resolves an *interpreter*, and
+   verifies it can import the module.
+3. **No `LaunchArgs` refactor into per-adapter builders was needed** beyond a
+   second typed struct: `PythonLaunchArgs` next to codelldb's `LaunchArgs`. The
+   trait returns `serde_json::Value`, so each adapter keeps its arguments typed
+   where they are written.
+4. **`restartFrame` capability divergence never arose.** debugpy advertises
+   *more* than codelldb, not less. The real divergence is `hitBreakpointIds`,
+   which debugpy omits — quirk 5.
+
+### Found by running it, not by reading it
+
+Two bugs the gates could not have caught, both fixed here:
+
+- **`continue` on an already-running program killed the session** under
+  debugpy — it never answers such a request, the acknowledgement timeout fired,
+  and that is read as a wedged adapter. Reached by `launch` without
+  `--stop-on-entry` followed by `continue --wait`, which is what `launches run`
+  does for most `launch.json` configurations. D055.
+- **The debugpy presence check passed for `/bin/echo`**, because exiting zero
+  proves nothing. It now requires the interpreter to print a sentinel back.
+
+Two behaviours were left alone deliberately and are asserted so they cannot
+drift: an uncaught Python exception is not a pause (D054's closing note), and
+`step` on a running program can still reach an adapter timeout (D055).
+
+### Where things are
+
+- Trait, `Spawn`, discovery: `crates/daemon/src/adapter/mod.rs`
+- Shared handshake: `crates/daemon/src/adapter/handshake.rs`
+- The two adapters: `adapter/codelldb.rs`, `adapter/debugpy.rs`
+- Transport (stdio + TCP + reverse requests): `crates/dap/src/transport.rs`
+- Example: `examples/py-hello/main.py`; fixtures: `examples/py-fixtures/`
+- Tests: `crates/daemon/tests/wait_debugpy.rs` (8, serialised like the codelldb suite)
+- Quirks: [`docs/reference/debugpy-quirks.md`](../../reference/debugpy-quirks.md)
+
+### Follow-ups discovered
+
+- **`hit_breakpoint_ids` is empty under debugpy.** An agent that branches on
+  which breakpoint was hit has to fall back to the frame. Synthesising ids by
+  matching source and line was not done: it would be a guess on any line
+  carrying two breakpoints, and a guess is worse than an honest empty list.
+- **Exception filters.** `setExceptionBreakpoints` is never sent, for any
+  adapter. Deciding whether an uncaught exception should pause is a product
+  decision affecting both adapters; it wants its own milestone.
+- **`step` while running** has the same unanswered-request shape as the
+  `continue` bug and no sensible fallback. Worth a fast local rejection rather
+  than a ten-second adapter timeout, on both adapters.

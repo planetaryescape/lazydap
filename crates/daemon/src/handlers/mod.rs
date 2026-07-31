@@ -168,20 +168,28 @@ fn doctor(state: &Arc<DaemonState>, check_adapters: bool, check_state: bool) -> 
     let mut checks = Vec::new();
 
     if check_adapters {
-        checks.push(
-            match crate::adapter::discover(lazydap_core::AdapterKind::Codelldb) {
+        // Every adapter lazydap ships, whether or not this machine has it.
+        // Reporting only the ones that are installed would make a missing one
+        // indistinguishable from one lazydap cannot drive at all, which is the
+        // question `doctor` exists to answer.
+        for kind in [
+            lazydap_core::AdapterKind::Codelldb,
+            lazydap_core::AdapterKind::Debugpy,
+        ] {
+            let name = format!("adapter.{kind}");
+            checks.push(match crate::adapter::discover(kind) {
                 Ok(path) => DoctorCheck {
-                    name: "adapter.codelldb".to_string(),
+                    name,
                     ok: true,
                     detail: path.display().to_string(),
                 },
                 Err(error) => DoctorCheck {
-                    name: "adapter.codelldb".to_string(),
+                    name,
                     ok: false,
                     detail: error.to_string(),
                 },
-            },
-        );
+            });
+        }
     }
 
     if check_state {
