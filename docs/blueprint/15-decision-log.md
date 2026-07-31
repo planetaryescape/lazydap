@@ -953,3 +953,72 @@ could quietly put the older formula back. For the same reason the Homebrew line 
 to the release notes by that job *after* the push succeeds, rather than written into the
 notes the publish job builds: a release whose tap update skipped never mentions `brew`, so
 the notes cannot advertise an install command that would hand somebody the wrong version.
+
+## D061 — a debuggee is identified by what the adapter ran, not by what we asked for
+
+**Status:** accepted (M22)
+
+D045's reaper kills a debuggee whose adapter died without stopping it. Before killing
+anything it checks identity: the pid is still running, and its `ps` command line is still the
+program the session launched. That check exists because a daemon outlives many programs, and
+killing whatever holds a recycled pid would be far worse than the leak it prevents.
+
+The check compared against **the path lazydap passed to `launch`**. That is right for
+codelldb, which execs the binary it is given, and for debugpy, which runs the script as an
+argument to an interpreter. It is wrong for delve: `mode: "debug"` *compiles* the `.go`
+source and runs the resulting binary, so the process in the table is a file lazydap never
+named. The identity check found a command line it did not recognise, correctly concluded
+"this is somebody else", and declined to kill lazydap's own debuggee.
+
+Found by M22's adapter-kill test leaking two Go debuggees, which is how D045 itself was
+found — by counting orphans.
+
+**Decision:** the DAP `process` event already carries `name`, the program the adapter says it
+actually started. Take its word for it, and fall back to the launched path only when it gives
+none. One rule for every adapter, rather than a delve-shaped exception.
+
+`name` is only used when it is an **absolute path**. The specification describes it as
+something to show a user, so an adapter is entitled to put a label there — and a reaper
+matching a label like `node` against `ps` output would kill whatever agreed with it. A
+relative or bare name falls back to what was launched, which is exactly as good as the
+behaviour before this entry.
+
+**Consequences:** codelldb is unaffected — it sends no `process` event at all (quirk 9), so
+its pid still comes from scraped console text and carries no name, which is correct because
+its debuggee *is* the program that was launched. debugpy sends the event with the script
+path, which is what the check already used. Only delve changes behaviour, and only because
+only delve runs something other than what it was handed.
+
+The reaper is still best-effort, and still refuses more often than it kills. A Go program
+whose adapter dies while it is *running* is now reaped; one whose path contains a space still
+is not, for the reason the module has always given.
+
+## D062 — starting a TCP adapter is a recipe the adapter supplies
+
+**Status:** accepted (M22)
+
+`DapTransport::spawn_tcp` took an adapter path and hard-coded everything else: `--port 0`,
+`RUST_LOG=debug`, read stderr, look for `Listening on `. All four of those are facts about
+codelldb, sitting in the transport crate, which is the one place that is supposed to know
+nothing about any particular adapter.
+
+delve disagrees with codelldb about every one of them. It is `dlv dap --listen=127.0.0.1:0`,
+it needs no environment, and it announces `DAP server listening at: 127.0.0.1:54421` on
+**stdout**.
+
+**Decision:** `Spawn::Tcp` carries a `TcpSpawn` — program, arguments, environment, which
+stream the announcement is on, and the marker text before the address. The adapter module
+supplies it; the transport does as it is told.
+
+The alternative was a second `spawn_tcp_delve`, which would have put a second adapter's name
+in the transport crate and left the two startups free to drift apart in different functions.
+
+**Consequences:** the codelldb-specific knowledge moved from `crates/dap` into
+`crates/daemon/src/adapter/codelldb.rs`, beside the rest of it, and `RUST_LOG=debug` now has
+its explanation next to the thing it explains. The three M2–M4 walkthrough examples build
+their transport through `adapter::for_kind(...).spawn(...)` rather than restating the recipe,
+so they cannot drift from it either.
+
+The stream that is *not* carrying the announcement is drained into the log rather than left
+unread, which it had to be anyway: a child whose pipe fills up blocks writing to it, and an
+adapter blocked in a log call answers no requests.
