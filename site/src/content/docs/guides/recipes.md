@@ -1,6 +1,6 @@
 ---
 title: Solve common debugging problems
-description: Nine worked recipes, from finding a segfault to asserting runtime state in CI.
+description: Ten worked recipes, from finding a segfault to asserting runtime state in CI.
 ---
 
 {/* Watch expressions (M16) and the REPL pane (M17) landed in Wave 7, after this
