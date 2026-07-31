@@ -199,7 +199,11 @@ mod tests {
     fn an_id_that_does_not_exist_picks_nothing_rather_than_erroring_here() {
         // The caller compares what it asked for with what came back; the
         // selector's job is only to say what matched.
-        assert!(WatchSelector::Ids(vec![WatchId(99)]).pick(&fixture()).is_empty());
+        assert!(
+            WatchSelector::Ids(vec![WatchId(99)])
+                .pick(&fixture())
+                .is_empty()
+        );
     }
 
     #[test]

@@ -644,9 +644,7 @@ pub enum Event {
     /// the only honest thing one of these can say, since an add and a removal
     /// arrive the same way and only the list distinguishes them (D043's lesson,
     /// applied at the start rather than after the bug).
-    WatchUpdated {
-        watch_id: WatchId,
-    },
+    WatchUpdated { watch_id: WatchId },
 }
 
 impl Event {

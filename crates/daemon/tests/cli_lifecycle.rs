@@ -376,8 +376,14 @@ fn a_dry_run_watch_command_changes_nothing() {
         "a preview does not promise an id it has not allocated",
     );
 
-    let preview =
-        sandbox.json_in_project(&["--format", "json", "watch", "remove", "counter", "--dry-run"]);
+    let preview = sandbox.json_in_project(&[
+        "--format",
+        "json",
+        "watch",
+        "remove",
+        "counter",
+        "--dry-run",
+    ]);
     assert_eq!(preview["dry_run"], true);
     assert_eq!(preview["watches"][0]["expression"], "counter");
 

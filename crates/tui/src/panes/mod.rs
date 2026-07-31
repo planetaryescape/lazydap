@@ -4,9 +4,12 @@
 //! knowing how to draw itself into a `Rect`. The reducer (M10) moves them; it
 //! does not reach into their fields.
 
+pub mod input;
+pub mod repl;
 pub mod scopes;
 pub mod source;
 pub mod stack;
+pub mod watches;
 
 use ratatui::style::{Color, Style};
 

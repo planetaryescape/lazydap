@@ -66,7 +66,11 @@ pub fn add(state: &Arc<DaemonState>, new: NewWatch, dry_run: bool) -> Result<Res
     }))
 }
 
-pub fn remove(state: &Arc<DaemonState>, selector: WatchSelector, dry_run: bool) -> Result<Response> {
+pub fn remove(
+    state: &Arc<DaemonState>,
+    selector: WatchSelector,
+    dry_run: bool,
+) -> Result<Response> {
     let picked = state.store.select_watches(&selector);
     let not_found = missing(&selector, &picked);
 

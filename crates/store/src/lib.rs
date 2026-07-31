@@ -894,7 +894,10 @@ mod tests {
             expressions.contains(&"theirs".to_string()),
             "the hand-written one was adopted, not reverted: {expressions:?}",
         );
-        assert!(expressions.contains(&"later".to_string()), "{expressions:?}");
+        assert!(
+            expressions.contains(&"later".to_string()),
+            "{expressions:?}"
+        );
     }
 
     #[test]

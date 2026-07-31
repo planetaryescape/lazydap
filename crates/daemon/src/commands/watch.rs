@@ -183,7 +183,10 @@ mod tests {
     #[test]
     fn a_removal_that_selects_nothing_is_a_usage_error_rather_than_a_silent_no_op() {
         let error = selector(None, Vec::new(), false).expect_err("nothing selected");
-        assert!(error.to_string().contains("nothing selected"), "got: {error}");
+        assert!(
+            error.to_string().contains("nothing selected"),
+            "got: {error}"
+        );
     }
 
     #[test]

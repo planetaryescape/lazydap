@@ -6,21 +6,37 @@
 //! measured in. Computing it outside the layout would mean duplicating the
 //! layout. Nothing else here writes to the state (D012, M10's notes).
 
-use crate::state::{AppState, Connection, Focus, SessionSnapshot};
+use crate::state::{AppState, Connection, Focus, Modal, SessionSnapshot};
 use lazydap_core::SessionState;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-/// The keys the status row advertises. Short on purpose: a help pane is Phase
-/// D's job, and a row that lists everything is a row nobody reads.
-const KEYS: &str = "F5 continue · F10 step · b break · Tab pane · q quit";
+/// The keys the status row advertises. Short on purpose: a help pane is still
+/// unbuilt, and a row that lists everything is a row nobody reads.
+const KEYS: &str = "F5 continue · F10 step · b break · a watch · Tab pane · q quit";
 
-/// How the width is split. The source pane is the one being read; the stack
-/// and the scopes are being glanced at.
+/// The keys the status row advertises instead while the REPL has the cursor.
+///
+/// A different list because the usual one is a lie in there: `q` is a `q`, and
+/// somebody who tabbed in needs to be told how to get out before they need to
+/// know how to quit.
+const REPL_KEYS: &str = "<CR> eval · / adapter command · ^P/^N history · Esc leave";
+
+/// How the width is split. The source pane is the one being read; the panes on
+/// the right are being glanced at.
 const SOURCE_SHARE: u16 = 65;
 const SIDEBAR_SHARE: u16 = 35;
+
+/// How the left column is split between the file and the REPL.
+///
+/// The REPL is always present rather than appearing when focused. A pane that
+/// opens on demand moves everything else on screen at the moment somebody is
+/// about to read it, and the scrollback is worth seeing while stepping — it is
+/// the record of what you have already asked.
+const FILE_SHARE: u16 = 72;
+const REPL_SHARE: u16 = 28;
 
 pub fn view(frame: &mut Frame, state: &mut AppState) {
     // Panes above, one status row that is always exactly one line tall.
@@ -31,19 +47,28 @@ pub fn view(frame: &mut Frame, state: &mut AppState) {
         Constraint::Percentage(SIDEBAR_SHARE),
     ])
     .areas(body);
-    // Stack above scopes: the frame you pick decides which variables the pane
-    // below is showing, so reading downwards follows the causality.
-    let [stack, scopes] =
-        Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(right);
+    let [file, repl] = Layout::vertical([
+        Constraint::Percentage(FILE_SHARE),
+        Constraint::Percentage(REPL_SHARE),
+    ])
+    .areas(left);
+    // Stack, then scopes, then watches: the frame you pick decides what the two
+    // panes below it are showing, so reading downwards follows the causality.
+    let [stack, scopes, watches] = Layout::vertical([
+        Constraint::Percentage(30),
+        Constraint::Percentage(40),
+        Constraint::Percentage(30),
+    ])
+    .areas(right);
 
     match state.source.as_mut() {
         Some(source) => source.render(
             frame,
-            left,
+            file,
             &state.breakpoints,
             state.focus == Focus::Source,
         ),
-        None => render_empty(frame, left, state.focus == Focus::Source),
+        None => render_empty(frame, file, state.focus == Focus::Source),
     }
     state
         .stack
@@ -51,11 +76,56 @@ pub fn view(frame: &mut Frame, state: &mut AppState) {
     state
         .scopes
         .render(frame, scopes, state.focus == Focus::Scopes);
+    state
+        .watches
+        .render(frame, watches, state.focus == Focus::Watches);
+    state.repl.render(frame, repl, state.focus == Focus::Repl);
 
     frame.render_widget(
-        Paragraph::new(format!("{} · {KEYS}", status_text(state)))
+        Paragraph::new(format!("{} · {}", status_text(state), keys(state)))
             .style(Style::default().fg(Color::DarkGray)),
         status,
+    );
+
+    // Last, so it is drawn over everything. A prompt that owns the keyboard
+    // and is hidden behind a pane is the worst of both.
+    if let Some(modal) = state.modal.as_ref() {
+        render_modal(frame, body, modal);
+    }
+}
+
+/// Which key list the status row shows.
+fn keys(state: &AppState) -> &'static str {
+    match state.focus.is_typing() {
+        true => REPL_KEYS,
+        false => KEYS,
+    }
+}
+
+/// A prompt, centred over the panes (M16).
+///
+/// [`Clear`] first, because ratatui draws over whatever is underneath rather
+/// than replacing it — without it the pane's own text shows through the gaps in
+/// the box.
+fn render_modal(frame: &mut Frame, body: Rect, modal: &Modal) {
+    let Modal::AddWatch(input) = modal;
+
+    let [area] = Layout::horizontal([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(body);
+    let [area] = Layout::vertical([Constraint::Length(3)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let block = Block::default()
+        .title("watch expression")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(format!("{}█", input.as_str())).block(block),
+        area,
     );
 }
 
@@ -141,10 +211,11 @@ mod tests {
 
     const FILE: &str = "/tmp/numbers.txt";
 
-    /// Wide enough that all three panes have room to say something. Narrower
-    /// than this and the snapshots test the truncation rather than the layout.
+    /// Wide and tall enough that all five panes have room to say something.
+    /// Smaller than this and the snapshots test the truncation rather than the
+    /// layout.
     const WIDTH: u16 = 64;
-    const HEIGHT: u16 = 12;
+    const HEIGHT: u16 = 16;
 
     fn loaded(lines: u32) -> AppState {
         let body: Vec<String> = (1..=lines).map(|line| format!("line {line}")).collect();
@@ -279,16 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn nothing_loaded_yet_still_draws_three_panes_and_a_status_row() {
+    fn nothing_loaded_yet_still_draws_every_pane_and_a_status_row() {
         assert_eq!(
             render(34, 5, |frame| view(frame, &mut AppState::default())),
             [
                 "┌lazydap─────────────┐┌stack─────┐",
-                // Too short for the stack pane to have an inside. It still
-                // draws, which is the point: no arithmetic underflows.
-                "│no source loaded    │└──────────┘",
-                "│                    │┌scopes────┐",
+                // Too short for most of these panes to have an inside. They
+                // still draw, which is the point: no arithmetic underflows.
+                "│no source loaded    │┌scopes────┐",
                 "└────────────────────┘└──────────┘",
+                "┌repl────────────────┐┌watches───┐",
                 // Clipped at the terminal width, not wrapped onto a second row.
                 "no session · F5 continue · F10 ste",
             ],
@@ -331,10 +402,12 @@ mod tests {
         let drawn = screen(&mut state);
 
         assert!(drawn[3].starts_with("│ ▶  3 line 3"), "got: {}", drawn[3]);
+        // The last row, always: the status row is the one thing the layout
+        // pins to a fixed height.
+        let status = drawn.last().expect("a status row");
         assert!(
-            drawn[11].starts_with("paused (breakpoint) at numbers.txt:3 · "),
-            "got: {}",
-            drawn[11],
+            status.starts_with("paused (breakpoint) at numbers.txt:3 · "),
+            "got: {status}",
         );
     }
 
@@ -410,9 +483,9 @@ mod tests {
 
     #[test]
     fn a_program_stopped_on_a_breakpoint_shows_its_stack_and_its_locals() {
-        // The whole of M12, M13 and M14 in one frame: the marker on line 19,
-        // a breakpoint sign beside it, two frames in the stack pane, and the
-        // value of `x` in the scopes pane.
+        // The whole of Phase D and E in one frame: the marker on line 19, a
+        // breakpoint sign beside it, two frames in the stack pane, the value of
+        // `x` in the scopes pane, and the two panes M16 and M17 added.
         let mut state = at_a_breakpoint();
 
         assert_eq!(
@@ -421,13 +494,17 @@ mod tests {
                 "┌source · /tmp/numbers.txt───────────────┐┌stack───────────────┐",
                 "│   11 line 11                           ││numbers.txt:19 main │",
                 "│   12 line 12                           ││numbers.txt:3 _start│",
-                "│   13 line 13                           │└────────────────────┘",
-                "│   14 line 14                           │┌scopes──────────────┐",
-                "│   15 line 15                           ││▾ Locals            │",
-                "│   16 line 16                           ││    x = 5 : int     │",
-                "│   17 line 17                           ││                    │",
+                "│   13 line 13                           ││                    │",
+                "│   14 line 14                           │└────────────────────┘",
+                "│   15 line 15                           │┌scopes──────────────┐",
+                "│   16 line 16                           ││▾ Locals            │",
+                "│   17 line 17                           ││    x = 5 : int     │",
                 "│   18 line 18                           ││                    │",
                 "│●▶ 19 line 19                           ││                    │",
+                "└────────────────────────────────────────┘└────────────────────┘",
+                "┌repl────────────────────────────────────┐┌watches─────────────┐",
+                "│>                                       ││no watches — a to ad│",
+                "│                                        ││                    │",
                 "└────────────────────────────────────────┘└────────────────────┘",
                 "paused (breakpoint) at numbers.txt:19 · F5 continue · F10 step ·",
             ],
@@ -503,6 +580,145 @@ mod tests {
                 "{width}x{height}",
             );
         }
+    }
+
+    // --- M16 and M17 on screen ---------------------------------------------
+
+    /// The breakpoint screen, plus two watches answered and a REPL exchange.
+    fn with_watches_and_repl() -> AppState {
+        let mut state = at_a_breakpoint();
+
+        state.watches.replace(vec![
+            lazydap_core::Watch {
+                id: lazydap_core::WatchId(1),
+                expression: "counter".to_string(),
+                label: None,
+            },
+            lazydap_core::Watch {
+                id: lazydap_core::WatchId(2),
+                expression: "tokens[pos]".to_string(),
+                label: None,
+            },
+        ]);
+        let round = state.watches.begin_round();
+        state.watches.record(
+            round,
+            lazydap_core::WatchId(1),
+            lazydap_core::WatchValue::Value(lazydap_core::EvalResult {
+                value: "42".to_string(),
+                type_name: Some("int".to_string()),
+                variables_reference: 0,
+            }),
+        );
+        state.watches.record(
+            round,
+            lazydap_core::WatchId(2),
+            lazydap_core::WatchValue::Error("out of scope".to_string()),
+        );
+
+        for c in "x + 1".chars() {
+            state.repl.push_char(c);
+        }
+        let (entry, _) = state.repl.submit().expect("a submission");
+        state.repl.answer(
+            entry,
+            crate::panes::repl::ReplOutput::Value(lazydap_core::EvalResult {
+                value: "6".to_string(),
+                type_name: Some("int".to_string()),
+                variables_reference: 0,
+            }),
+        );
+        state
+    }
+
+    /// A terminal with room for the REPL to show an exchange *and* its prompt.
+    ///
+    /// At [`HEIGHT`] the REPL gets two rows inside its border, which is enough
+    /// to draw but not enough to demonstrate the scrollback.
+    fn tall_screen(state: &mut AppState) -> Vec<String> {
+        render(WIDTH, 20, |frame| view(frame, state))
+    }
+
+    #[test]
+    fn the_watches_pane_shows_a_value_and_an_error_side_by_side() {
+        // Both halves of M16 in one frame: an expression that evaluated, and
+        // one that did not. The errored row stays — the same expression is
+        // usually back in scope a few steps later.
+        let mut state = with_watches_and_repl();
+        let drawn = tall_screen(&mut state);
+
+        let value = drawn
+            .iter()
+            .find(|row| row.contains("counter = 42 : int"))
+            .expect("the answered watch");
+        assert!(value.ends_with('│'), "inside the pane: {value}");
+
+        assert!(
+            drawn.iter().any(|row| row.contains("tokens[pos] = out of")),
+            "and the refused one keeps its row: {drawn:?}",
+        );
+    }
+
+    #[test]
+    fn the_repl_shows_what_was_asked_and_what_came_back_above_the_prompt() {
+        let mut state = with_watches_and_repl();
+        state.focus = Focus::Repl;
+        let drawn = tall_screen(&mut state);
+
+        let asked = drawn
+            .iter()
+            .position(|row| row.contains("> x + 1"))
+            .expect("the line that was typed");
+        assert!(
+            drawn[asked + 1].contains("6 : int"),
+            "the answer sits under it: {}",
+            drawn[asked + 1],
+        );
+        assert!(
+            drawn[asked + 2].contains("> █"),
+            "and the prompt is below that, with a cursor because the pane has \
+             the keys: {}",
+            drawn[asked + 2],
+        );
+    }
+
+    #[test]
+    fn the_status_row_says_how_to_get_out_while_the_repl_has_the_keys() {
+        // The usual list is a lie in there: `q` is a character, so somebody who
+        // tabbed in needs to be told the way out before the way to quit.
+        let mut state = with_watches_and_repl();
+        state.focus = Focus::Repl;
+
+        let drawn = render(120, 6, |frame| view(frame, &mut state));
+        let status = drawn.last().expect("a status row");
+        assert!(status.contains("Esc leave"), "got: {status}");
+        assert!(status.contains("/ adapter command"), "got: {status}");
+        assert!(!status.contains("q quit"), "got: {status}");
+    }
+
+    #[test]
+    fn an_open_prompt_is_drawn_over_the_panes_rather_than_behind_them() {
+        // `Clear` first, or the pane's own text shows through the box.
+        let mut state = with_watches_and_repl();
+        state.modal = Some(crate::state::Modal::AddWatch(
+            crate::panes::input::TextInput::new("tokens[pos]"),
+        ));
+
+        let drawn = screen(&mut state);
+        let box_row = drawn
+            .iter()
+            .find(|row| row.contains("watch expression"))
+            .expect("the prompt is drawn");
+        assert!(box_row.contains('┌'), "got: {box_row}");
+
+        let typed = drawn
+            .iter()
+            .find(|row| row.contains("tokens[pos]█"))
+            .expect("what has been typed, with a cursor");
+        assert!(
+            !typed.contains("line 1"),
+            "the file behind it must not show through: {typed}",
+        );
     }
 
     #[test]
