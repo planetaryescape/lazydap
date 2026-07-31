@@ -174,3 +174,40 @@ form is unsettled; line 7 weakens substantially — pexpect-driven lldb demonstr
 REFUTES the novelty framing via debug-skill/debugger-cli/dapi. Single most dangerous
 argument: debug-skill, plus the category-scale concession that most agent coding succeeds
 without dynamic debugging.)*
+
+## Appendix D — empirical bake-off vs debug-skill's `dap` (2026-07-31)
+
+lazydap v0.1.0-era build (codelldb) vs `dap` v1.0.10 (lldb-dap), nine torture cases, all
+run live, evidence verbatim in the session transcript. Verdicts: six lazydap-better, two
+equivalent, none dap-better overall.
+
+**The moat claims that are now citable fact:**
+- `dap` discards all program output before the first stop *by design*
+  (`daemon.go:59: captureOutput bool // only capture output after first stop`) — on every
+  backend. lazydap's watermark delivery lost nothing in any case.
+- `dap` has no bounded wait: a `continue` on a never-stopping program blocks to a 5-minute
+  socket deadline, and concurrent commands wedge behind it. lazydap returns
+  `state:"timeout"` with output-so-far and a live session.
+- `dap`'s `--json` silently degrades to plain text at program termination and on every
+  error — the two moments an agent most needs parseable output — and errors print to
+  stdout. lazydap's exit paths stay structured JSON on stderr with the documented codes.
+- `dap`'s session evaporates on exit (exit code unrecoverable one command later) and turns
+  into raw `broken pipe`/`EOF` errors after adapter death. lazydap retains queryable
+  `exited`/`adapter_died` state.
+- Reason normalization validated twice over: codelldb's raw entry stop really is
+  `"exception"` (lazydap: `reason:"entry"` + `raw_reason`), and `dap`'s pause-interrupt
+  surfaces as `reason:"exception", SIGSTOP` deep in `__semwait_signal` — a routine pause an
+  agent could misread as a crash.
+
+**Where the moat does not hold, kept honest:**
+- `dap` did not orphan the debuggee on adapter kill -9 (macOS ptrace behaviour); D045's
+  worst case did not occur for it.
+- `dap` rejects a second `continue` cleanly where lazydap queues it — and the queued
+  continue silently carried the program past a breakpoint. The reject philosophy is
+  arguably safer against agent double-fire; review filed.
+- `dap`'s error prose (exact env var + URL to fix a missing adapter) beats lazydap's
+  equivalents even though its error plumbing loses.
+
+**Adopted into the roadmap from `dap`:** inline source-snippet + locals in the stop blob
+(saves a stack+scopes round-trip per stop); install-hint error messages; a daemon-restart
+race test; compile-from-source convenience noted but not adopted.

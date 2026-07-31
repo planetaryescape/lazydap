@@ -117,6 +117,10 @@ runs on `v*` tags and has never fired.
 - Theming + mouse support
 - HTTP bridge (separate crate, optional binary)
 - AI advisor extension points (see [`docs/blueprint/12-ai-future.md`](docs/blueprint/12-ai-future.md))
+- Auto-context in the `--wait` blob: inline source snippet with a current-line marker and top-frame locals, so a stop costs zero follow-up calls (bake-off: dap does this well)
+- Double-continue semantics review: queueing a second `continue` silently carries past a breakpoint; a clean rejection may be safer against agent double-fire (bake-off finding; touches D021)
+- Install-hint error prose: adapter-missing errors name the exact env var/URL fix (bake-off: dap's messages are better than ours)
+- Daemon-restart race test: stop then immediate relaunch raced to a transport EOF in the rival CLI; assert lazydap's path
 - Cargo "locator": resolve `cargo build` artifacts into codelldb launch configs without a launch.json (Zed-style)
 
 ## Open decisions awaiting input
