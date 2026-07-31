@@ -265,6 +265,16 @@ fn assert_no_orphans() {
         .filter(|line| !line.is_empty())
         .collect();
 
+    // Not an assertion while the test is already failing. This runs in `Drop`,
+    // and a second panic during unwind aborts the process — taking the first
+    // panic's message, the one that explains the failure, with it. Report the
+    // orphans and step aside; the real failure is the one worth reading.
+    if std::thread::panicking() {
+        if !survivors.is_empty() {
+            eprintln!("orphans left by a failing test: {survivors:?}");
+        }
+        return;
+    }
     assert!(
         survivors.is_empty(),
         "a debuggee outlived its session — pids {} under {}. \

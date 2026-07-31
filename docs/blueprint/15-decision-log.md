@@ -1022,3 +1022,30 @@ so they cannot drift from it either.
 The stream that is *not* carrying the announcement is drained into the log rather than left
 unread, which it had to be anyway: a child whose pipe fills up blocks writing to it, and an
 adapter blocked in a log call answers no requests.
+
+## D063 — the protocol goes to v6 for the `Delve` adapter variant
+
+**Status:** accepted (M22, review of D061)
+
+Adding `AdapterKind::Delve` changes the wire without adding a request or a field, which is
+the subtle half of a breaking change and the one M22 first shipped without catching. A
+`LaunchRequest` carrying `adapter: "delve"` is written by a build that has the variant and
+cannot be deserialised by one that does not: `AdapterKind` is an externally-tagged enum with
+no fallback, so an unknown variant fails the whole envelope.
+
+Left at v5, the failure surfaced in the worst place. A v5 daemon left running from before
+this branch passes the version handshake — its version *is* 5 — and only then, on the first
+Go launch, fails to decode the request and drops the connection. The client reports that as
+"the daemon closed the connection", not as the `VersionMismatch` that `lazydap shutdown`
+clears and the auto-spawn path resolves on its own. codelldb and debugpy launches stayed
+decodable by a v5 daemon, which is exactly why it was easy to miss.
+
+**Decision:** bump `LAZYDAP_PROTOCOL_VERSION` to 6, same reasoning as D043/D056 — move the
+failure back to the handshake, where it is recognised and repaired. The full rationale lives
+on the constant itself (`crates/protocol/src/types.rs`), where every bump since v2 is
+recorded.
+
+**Consequences:** none for the frozen `Shutdown` escape hatch, which carries the *daemon's*
+version rather than ours and is tested against a literal v1 frame — so a v5 daemon still
+answers a v6 client's shutdown and restarts as v6. That cross-version path is what makes a
+variant-only bump safe to ship: the stale daemon is replaced, not merely rejected.

@@ -43,7 +43,20 @@ use std::path::PathBuf;
 /// `0` and a closed connection, which the client cannot match to its request
 /// and reports as "the daemon closed the connection before answering". The bump
 /// is what turns that into the `VersionMismatch` `lazydap shutdown` clears.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 5;
+///
+/// v6 (M22, D061): a third [`AdapterKind`], `Delve`. Unlike every bump above
+/// this one adds no request and no field — it adds a *variant* to an enum that
+/// already crosses the wire, which is the subtler break. A `LaunchRequest`
+/// carrying `adapter: "delve"` is written by a v6 client and cannot be
+/// deserialised by a v5 daemon: `AdapterKind` is externally tagged with no
+/// fallback, so the unknown variant fails the whole envelope. Without the bump
+/// that v5 daemon passes the version handshake — its version *is* 5 — and then
+/// closes the connection on the first Go launch, which the client reports as a
+/// dropped connection rather than the `VersionMismatch` that would have
+/// restarted it. The bump moves the failure back to the handshake, where
+/// `lazydap shutdown` clears it. codelldb and debugpy launches were decodable
+/// by a v5 daemon and are the reason this was easy to miss.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 6;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

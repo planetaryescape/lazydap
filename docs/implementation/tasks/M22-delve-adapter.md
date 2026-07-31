@@ -134,3 +134,40 @@ reaper at whatever matches.
   `std::thread::panicking()`, so a failing test there aborts the process and loses its own
   message — which is what happened here before `wait_delve.rs` guarded against it. Not
   changed in those files (blast radius), but they have the same latent hazard.
+
+## Review fixes (2026-07-31)
+
+Four issues found in adversarial review, fixed before merge:
+
+1. **Protocol bump to v6 (D063).** Adding the `Delve` variant changed the wire without a new
+   request or field, so a v5 daemon passed the version handshake and then dropped the
+   connection on the first Go launch instead of triggering the `VersionMismatch`
+   auto-replacement. Bumped `LAZYDAP_PROTOCOL_VERSION` to 6; the frozen `Shutdown` escape
+   hatch and its cross-version test are version-agnostic and hold.
+2. **`mode` read from `launch.json`.** The adapter guessed `debug` from the `.go` extension
+   alone, so a `mode: "debug"` on a package *directory* went out as `exec` and delve rejected
+   it, and a deferred `mode: "test"` config was marked runnable. Now: the adapter infers a
+   directory as `debug`; the import maps debug/exec/test explicitly, blocks `test` as deferred
+   (`NotRunnable::DelveMode`), and blocks `exec` naming a `.go` source. Five new import tests
+   plus a package-directory adapter test.
+3. **Bounded the port-announcement wait.** `spawn_tcp` waited forever for the marker; the
+   30s launch deadline only starts later at the handshake, so an adapter that lived but never
+   announced hung the client and held the session slot, bricking future launches. Added a
+   15s spawn deadline (injectable for the test) that kills the child and returns an honest
+   error; the reservation frees on that error like any launch failure. Applies to codelldb
+   too (shared path). Tested with a `sleep` process that never announces.
+4. **Track and delete the `mode: debug` temp binary.** delve deletes it on a clean
+   `disconnect`, but an adapter that died, or a session that *exited* and was then shut down,
+   left it behind. `Session::clean_compiled_artifact` (guarded by the `lazydap-delve-` prefix
+   + temp-dir, so a user's `exec` binary is never touched) is now called on all four teardown
+   paths: adapter death, disconnect, shutdown drain, and finished-slot reap. The
+   exited-then-shutdown gap was the one the live run caught. `wait_delve`'s stray check gained
+   a baseline-scoped file sweep, and a dedicated shutdown-cleanup regression test.
+
+Also fixed the `Drop`-without-`panicking()`-guard in `wait_codelldb` and `wait_debugpy`
+(their `assert_no_orphans` aborted on a double panic and ate the real failure's message —
+the hazard that bit `wait_delve` during M22).
+
+Gates at fix time: fmt/clippy clean, boundaries ok (7 crates), wait suites
+**codelldb 13 / debugpy 9 / delve 12**, daemon lib 209, config 75, dap 21, protocol 21.
+Go live loop re-run green; zero strays including temp binaries.

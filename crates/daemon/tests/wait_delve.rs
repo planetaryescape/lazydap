@@ -108,6 +108,11 @@ struct Sandbox {
     root: PathBuf,
     project: PathBuf,
     instance: String,
+    /// The `lazydap-delve-` files already in the temp directory when this
+    /// sandbox started — another machine's, another worktree's, or debris a
+    /// crash left behind. The file-leak check subtracts these so it flags only
+    /// what *this* session created, never pre-existing clutter.
+    preexisting_artifacts: std::collections::HashSet<PathBuf>,
 }
 
 impl Sandbox {
@@ -131,6 +136,7 @@ impl Sandbox {
             root,
             project,
             instance,
+            preexisting_artifacts: artifact_files(),
         }
     }
 
@@ -204,7 +210,7 @@ impl Drop for Sandbox {
         // — so a stray check meant to explain a failure would instead hide
         // one. The strays still get reported, just as output rather than as an
         // assertion nobody can read.
-        let survivors = strays();
+        let survivors = self.strays();
         if std::thread::panicking() {
             if !survivors.is_empty() {
                 eprintln!("strays left behind by a failing test: {survivors:?}");
@@ -213,43 +219,89 @@ impl Drop for Sandbox {
         }
         assert!(
             survivors.is_empty(),
-            "a Go debuggee outlived its session — {}. The adapter died without \
-             stopping it and nothing reaped it; see D045.",
+            "a Go debuggee or its compiled binary outlived its session — {}. The \
+             adapter died without stopping it and nothing reaped it; see D045.",
             survivors.join(", "),
         );
     }
 }
 
-/// Anything of ours still running: adapters, and the binaries delve compiled.
-///
-/// The Python suite can look for its fixture path because an interpreter runs
-/// the `.py` by name. Nothing here does: `mode: "debug"` compiles the source
-/// and runs the *result*, so a leaked Go debuggee appears in the process table
-/// as the binary — which is why lazydap names that binary itself, under the
-/// `lazydap-delve-` prefix (quirk 5). Both are checked anyway: the fixture path
-/// still catches an `exec`-mode debuggee and delve's own command line.
-fn strays() -> Vec<String> {
-    let fixtures = repo_root().join("examples/go-fixtures");
-    let patterns = [fixtures.display().to_string(), "lazydap-delve-".to_string()];
+impl Sandbox {
+    /// Anything of ours left behind: processes still running, and files still
+    /// on disk.
+    ///
+    /// Two kinds of leak, because delve produces two. A **process** leak — the
+    /// Python suite finds these by the fixture path, but nothing runs a `.go`
+    /// by name: `mode: "debug"` compiles the source and runs the *result*, so a
+    /// leaked Go debuggee is in the process table as the compiled binary, under
+    /// the `lazydap-delve-` prefix lazydap gives it (quirk 5). A **file** leak —
+    /// the compiled binary itself, left on disk if the adapter died before
+    /// deleting it (finding 4); a process-only check cannot see this. Both are
+    /// strays, so the adapter-kill test's poll-until-clean loop and the `Drop`
+    /// assertion cover files as well as processes with no extra machinery.
+    ///
+    /// Files present when this sandbox started are subtracted: another run's
+    /// debris is not this test's leak.
+    fn strays(&self) -> Vec<String> {
+        let fixtures = repo_root().join("examples/go-fixtures");
+        let patterns = [fixtures.display().to_string(), "lazydap-delve-".to_string()];
 
-    patterns
-        .iter()
-        .flat_map(|pattern| {
-            let output = Command::new("pgrep")
-                .args(["-fl", pattern])
-                .output()
-                .expect("run pgrep");
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(|line| line.trim().to_string())
-                .filter(|line| !line.is_empty())
-                // `dlv dap` itself is not a stray while the daemon that owns
-                // it is still shutting down; only the debuggee and a compiled
-                // binary are. An adapter with no session is caught by the
-                // daemon's own teardown, which `Drop` has already run.
-                .filter(|line| !line.contains("dlv dap"))
-                .collect::<Vec<_>>()
+        let mut strays: Vec<String> = patterns
+            .iter()
+            .flat_map(|pattern| {
+                let output = Command::new("pgrep")
+                    .args(["-fl", pattern])
+                    .output()
+                    .expect("run pgrep");
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    // `dlv dap` itself is not a stray while the daemon that owns
+                    // it is still shutting down; only the debuggee and a
+                    // compiled binary are. An adapter with no session is caught
+                    // by the daemon's own teardown, which `Drop` has already run.
+                    .filter(|line| !line.contains("dlv dap"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        strays.extend(
+            self.new_artifacts()
+                .iter()
+                .map(|path| format!("file {}", path.display())),
+        );
+        strays
+    }
+
+    /// The `lazydap-delve-` files that have appeared since this sandbox started
+    /// — the ones *this* session is responsible for.
+    fn new_artifacts(&self) -> Vec<PathBuf> {
+        artifact_files()
+            .difference(&self.preexisting_artifacts)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Every `lazydap-delve-` file currently directly in the temp directory.
+///
+/// A set so a sandbox can subtract the ones that were already there. The name
+/// carries the daemon's pid, not the test's, so there is nothing tighter than
+/// the prefix to key on — the baseline subtraction is what makes that safe.
+fn artifact_files() -> std::collections::HashSet<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return std::collections::HashSet::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("lazydap-delve-"))
         })
+        .map(|entry| entry.path())
         .collect()
 }
 
@@ -393,6 +445,49 @@ fn a_program_that_never_stops_times_out_without_ending_the_session() {
     assert_eq!(status["session"]["state"], "running", "got: {status}");
 }
 
+/// Finding 4, the case that slipped past the other tests: a program that
+/// exited, then `shutdown` with no `disconnect` first.
+///
+/// delve deletes its compiled binary when it handles a `disconnect`; an exited
+/// session never sends one, and `shutdown` used to just kill the adapter — so
+/// the binary leaked. The other tests miss this because the sandbox always
+/// disconnects in `Drop` before it shuts down, which cleans the file the other
+/// way. This one shuts down directly.
+#[test]
+fn the_compiled_binary_is_removed_when_an_exited_session_is_shut_down() {
+    let (_dlv, _turn) = require_dlv!();
+    let sandbox = Sandbox::new("artifact");
+
+    sandbox.launch(&fixture("exits.go"));
+    let blob = sandbox.wait("30");
+    assert_eq!(blob["state"], "exited", "got: {blob}");
+
+    // `mode: "debug"` compiled exactly one binary, and delve has not deleted it
+    // — it is waiting for a disconnect that an exited session never sends.
+    let created = sandbox.new_artifacts();
+    assert_eq!(
+        created.len(),
+        1,
+        "debug mode should have left one compiled binary on disk: {created:?}",
+    );
+    let binary = &created[0];
+    assert!(binary.exists(), "the binary should exist before shutdown");
+
+    // Shut down with no prior disconnect — the path that leaked.
+    sandbox.run(&["shutdown"]);
+    for _ in 0..30 {
+        if !binary.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !binary.exists(),
+        "shutdown must remove delve's compiled binary: {}",
+        binary.display(),
+    );
+}
+
 #[test]
 fn a_lot_of_output_arrives_in_order() {
     let (_dlv, _turn) = require_dlv!();
@@ -448,17 +543,19 @@ fn a_killed_adapter_takes_its_go_debuggee_with_it() {
     );
 
     // `spins.go` sleeps rather than spinning, so an orphan costs no CPU and
-    // would be that much easier to miss. Give the cleanup a moment to land.
+    // would be that much easier to miss. The compiled binary must go too — the
+    // adapter died before deleting it (finding 4). Give the cleanup a moment to
+    // land; `strays` covers both the process and the file.
     for _ in 0..20 {
-        if strays().is_empty() {
+        if sandbox.strays().is_empty() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     unreachable!(
-        "the debuggee outlived its adapter — {}",
-        strays().join(", ")
+        "the debuggee or its compiled binary outlived its adapter — {}",
+        sandbox.strays().join(", "),
     );
 }
 

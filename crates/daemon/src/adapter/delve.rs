@@ -90,18 +90,38 @@ const EXEC: &str = "exec";
 
 /// Whether delve should build `program` or just run it.
 ///
-/// Read off the extension, which is the same thing
-/// [`AdapterKind::for_program`] reads and means the same thing here: a `.go`
-/// file is source, and anything else a caller has aimed at delve is a binary
-/// they have already built. Getting this wrong is not subtle — delve rejects a
-/// `.go` file in `exec` mode and a binary in `debug` mode, both with a message
-/// naming the file.
+/// Three shapes, two modes. A **directory** is a Go package and a **`.go`
+/// file** is a source file — both are things delve compiles, so both are
+/// `debug`. Anything else is a binary the caller has already built, so `exec`.
+///
+/// The directory case is the one this cannot get from the extension, and
+/// getting it wrong is not subtle: the previous version read only the
+/// extension, so a package directory — the *standard* way a `launch.json`
+/// names a Go program — fell through to `exec`, and delve rejects a directory
+/// in `exec` mode with a message naming it. `is_dir` is reliable here because
+/// the client has already canonicalised the program (it fails the launch if it
+/// does not exist), so by the time this runs the path is real.
+///
+/// A `launch.json` that declares a *conflicting* mode — `exec` on a `.go`
+/// file — never reaches this: the import blocks it (`launch_json.rs`), so the
+/// shape the caller sent and the mode inferred here always agree.
 fn launch_mode(program: &Path) -> &'static str {
+    if program.is_dir() {
+        return DEBUG;
+    }
     match program.extension().and_then(|extension| extension.to_str()) {
         Some("go") => DEBUG,
         _ => EXEC,
     }
 }
+
+/// The filename prefix every binary delve compiles for lazydap wears.
+///
+/// The one thing that marks such a file as ours to delete (quirk 5). The
+/// reaper checks it before removing anything, so an `exec`-mode debuggee — a
+/// binary the *user* built and named — is never mistaken for a temporary of
+/// ours.
+const ARTIFACT_PREFIX: &str = "lazydap-delve-";
 
 /// Where `mode: "debug"` should leave the binary it compiles.
 ///
@@ -114,9 +134,26 @@ fn compiled_binary_path() -> String {
         .map(|since| since.as_nanos())
         .unwrap_or_default();
     std::env::temp_dir()
-        .join(format!("lazydap-delve-{}-{unique}", std::process::id()))
+        .join(format!("{ARTIFACT_PREFIX}{}-{unique}", std::process::id()))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Whether `path` is a binary lazydap had delve compile — safe to delete on
+/// teardown.
+///
+/// Two conditions, both required, because the alternative is deleting somebody
+/// else's program: the file sits directly in the system temporary directory,
+/// and its name carries [`ARTIFACT_PREFIX`]. delve removes this itself when it
+/// handles a clean `disconnect`, so this only ever finds something after an
+/// adapter died without one (quirk 5) — the sole case the file leaks.
+pub(crate) fn is_compiled_artifact(path: &Path) -> bool {
+    let in_temp_dir = path.parent() == Some(std::env::temp_dir().as_path());
+    let named_ours = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(ARTIFACT_PREFIX));
+    in_temp_dir && named_ours
 }
 
 #[cfg(test)]
@@ -165,6 +202,23 @@ mod tests {
                 .to_string()
                 .contains(r#""mode":"exec""#),
         );
+    }
+
+    #[test]
+    fn a_package_directory_is_compiled_not_run() {
+        // The bug this fixes: a directory is the standard way a `launch.json`
+        // names a Go program, and reading only the extension sent it as `exec`
+        // — which delve rejects. A real directory is needed because the check
+        // is `is_dir`, not a string test.
+        let dir = std::env::temp_dir().join(format!("lazydap-delve-pkg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the package directory");
+
+        let json = Delve
+            .launch_args(&request(&dir.to_string_lossy()))
+            .to_string();
+        assert!(json.contains(r#""mode":"debug""#), "got: {json}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

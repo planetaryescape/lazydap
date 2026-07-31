@@ -228,6 +228,10 @@ async fn finish(session: &Arc<Session>, error: &TransportError) {
         detail.push_str("; ");
         detail.push_str(&reaped);
     }
+    // The adapter never ran its own cleanup, so delve's compiled binary is
+    // still on disk (delve quirk 5). Remove it here — the process it belonged
+    // to has just been reaped above.
+    session.clean_compiled_artifact();
 
     if session.end_once(EndReason::AdapterDied {
         detail: detail.clone(),

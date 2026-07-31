@@ -132,6 +132,10 @@ pub enum NotRunnable {
     UnresolvedVariables { variables: Vec<String> },
     /// The configuration's arguments could not be read as a list.
     BadArguments { problem: String },
+    /// A delve launch mode lazydap will not run as written: `test` (deferred to
+    /// a later milestone), or `exec` naming a `.go` source rather than a built
+    /// binary. Listed with the reason rather than run into an adapter error.
+    DelveMode { problem: String },
 }
 
 impl std::fmt::Display for NotRunnable {
@@ -160,6 +164,10 @@ impl std::fmt::Display for NotRunnable {
             Self::BadArguments { problem } => {
                 write!(f, "its arguments could not be read: {problem}")
             }
+            // The `problem` is already a full sentence, built where the mode is
+            // known — there are two unrelated causes and one phrasing here
+            // could not fit both.
+            Self::DelveMode { problem } => f.write_str(problem),
         }
     }
 }

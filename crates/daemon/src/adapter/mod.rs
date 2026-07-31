@@ -49,6 +49,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 
+/// delve's temp-binary predicate, for the teardown cleanup in [`crate::state`].
+/// The `delve` module stays private; only this one path check leaves it.
+pub(crate) use delve::is_compiled_artifact;
 pub use handshake::{Launched, StartedProcess, launch};
 pub use pump::spawn_pump;
 
