@@ -82,16 +82,11 @@ pub struct TcpSpawn {
     /// codelldb logs its port at debug level, so without `RUST_LOG=debug` it
     /// is silent and the line loop below waits forever.
     pub env: Vec<(String, String)>,
-    pub announcement: PortAnnouncement,
-}
-
-/// Where the port shows up and what it is called.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PortAnnouncement {
-    pub stream: AdapterStream,
+    /// Which of the child's streams the announcement arrives on.
+    pub port_stream: AdapterStream,
     /// The text immediately before the address. What follows is read as either
     /// `port N` or a `host:port`.
-    pub marker: &'static str,
+    pub port_marker: &'static str,
 }
 
 /// Which of a child's two output streams something arrives on.
@@ -132,7 +127,7 @@ impl DapTransport {
     /// nothing about their own startup: different flags, different environment,
     /// and the announcement on a different stream under different words.
     pub async fn spawn_tcp(spawn: &TcpSpawn) -> Result<Self> {
-        let (stdout, stderr) = match spawn.announcement.stream {
+        let (stdout, stderr) = match spawn.port_stream {
             AdapterStream::Stdout => (Stdio::piped(), Stdio::piped()),
             AdapterStream::Stderr => (Stdio::null(), Stdio::piped()),
         };
@@ -150,7 +145,7 @@ impl DapTransport {
         // The stream the announcement is *not* on still has to be drained: a
         // child whose pipe fills up blocks writing to it, and an adapter
         // blocked in a log call answers no requests.
-        let announcing: Source = match spawn.announcement.stream {
+        let announcing: Source = match spawn.port_stream {
             AdapterStream::Stdout => {
                 drain(child.stderr.take().expect("stderr piped"));
                 Box::new(child.stdout.take().expect("stdout piped"))
@@ -162,7 +157,7 @@ impl DapTransport {
         let mut port: Option<u16> = None;
         while let Some(line) = lines.next_line().await? {
             tracing::debug!(target: "dap.adapter.announce", "{line}");
-            if let Some((_, rest)) = line.split_once(spawn.announcement.marker) {
+            if let Some((_, rest)) = line.split_once(spawn.port_marker) {
                 // Both spellings the two adapters use: codelldb's
                 // "Listening on port 1234" and an address, "127.0.0.1:1234",
                 // which is what codelldb's other builds and delve both print.

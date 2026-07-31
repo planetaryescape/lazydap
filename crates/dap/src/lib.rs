@@ -2,8 +2,7 @@ pub mod transport;
 pub mod types;
 
 pub use transport::{
-    AdapterStream, DapReader, DapTransport, DapWriter, Incoming, PortAnnouncement, TcpSpawn,
-    TransportError,
+    AdapterStream, DapReader, DapTransport, DapWriter, Incoming, TcpSpawn, TransportError,
 };
 pub use types::{
     Breakpoint, Capabilities, ConfigurationDoneArgs, ContinueArgs, ContinueResponse, DapEvent,

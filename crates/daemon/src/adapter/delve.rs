@@ -23,7 +23,7 @@
 
 use super::{DebugAdapter, Spawn};
 use lazydap_core::AdapterKind;
-use lazydap_dap::{AdapterStream, GoLaunchArgs, PortAnnouncement, TcpSpawn};
+use lazydap_dap::{AdapterStream, GoLaunchArgs, TcpSpawn};
 use lazydap_protocol::LaunchRequest;
 use std::path::Path;
 
@@ -52,10 +52,8 @@ impl DebugAdapter for Delve {
             program: command.to_path_buf(),
             args: vec!["dap".into(), "--listen=127.0.0.1:0".into()],
             env: Vec::new(),
-            announcement: PortAnnouncement {
-                stream: AdapterStream::Stdout,
-                marker: PORT_MARKER,
-            },
+            port_stream: AdapterStream::Stdout,
+            port_marker: PORT_MARKER,
         })
     }
 
@@ -210,10 +208,10 @@ mod tests {
         match Delve.spawn(Path::new("/usr/local/bin/dlv")) {
             Spawn::Tcp(spawn) => {
                 assert_eq!(spawn.args, vec!["dap", "--listen=127.0.0.1:0"]);
-                assert_eq!(spawn.announcement.stream, AdapterStream::Stdout);
+                assert_eq!(spawn.port_stream, AdapterStream::Stdout);
                 assert!(spawn.env.is_empty());
                 assert!(
-                    "DAP server listening at: 127.0.0.1:54421".contains(spawn.announcement.marker),
+                    "DAP server listening at: 127.0.0.1:54421".contains(spawn.port_marker),
                     "the marker has to match what delve actually prints",
                 );
             }

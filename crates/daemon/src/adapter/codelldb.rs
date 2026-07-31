@@ -8,7 +8,7 @@
 
 use super::{DebugAdapter, Spawn};
 use lazydap_core::{AdapterKind, PauseReason};
-use lazydap_dap::{AdapterStream, LaunchArgs, PortAnnouncement, TcpSpawn};
+use lazydap_dap::{AdapterStream, LaunchArgs, TcpSpawn};
 use lazydap_protocol::LaunchRequest;
 use std::path::Path;
 
@@ -33,10 +33,8 @@ impl DebugAdapter for CodeLldb {
             program: command.to_path_buf(),
             args: vec!["--port".into(), "0".into()],
             env: vec![("RUST_LOG".into(), "debug".into())],
-            announcement: PortAnnouncement {
-                stream: AdapterStream::Stderr,
-                marker: "Listening on ",
-            },
+            port_stream: AdapterStream::Stderr,
+            port_marker: "Listening on ",
         })
     }
 
