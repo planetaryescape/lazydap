@@ -80,6 +80,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'Recipes', slug: 'guides/recipes' },
             { label: 'Why lazydap', slug: 'guides/why-lazydap' },
             { label: 'Debug with an agent', slug: 'guides/agents' },
             { label: 'The --wait contract', slug: 'guides/wait' },
