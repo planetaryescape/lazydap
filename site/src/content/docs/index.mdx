@@ -1,9 +1,9 @@
 ---
 title: Debug from the shell.
-description: Set a breakpoint, run to it, read the JSON that comes back. A scriptable debugger for C, C++ and Rust, driven by shell subcommands.
+description: Set a breakpoint, run to it, read the JSON that comes back. A scriptable debugger for C, C++, Rust and Python, driven by shell subcommands.
 template: splash
 hero:
-  tagline: lazydap turns a debugger into shell subcommands that print JSON. Set a breakpoint, run to it, read what came back, decide what to do next — from a script, a Makefile, or an agent that only knows how to run commands.
+  tagline: lazydap turns a debugger into shell subcommands that print JSON. Set a breakpoint, run to it, read what came back, decide what to do next - from a script, a Makefile, or an agent that only knows how to run commands.
   actions:
     - text: Install
       link: /getting-started/install/
@@ -55,8 +55,17 @@ One command, one JSON object, one decision. `--wait` is what makes that possible
 until the program is somewhere worth looking at, then hands back everything that happened on
 the way, including every line the program printed.
 
-[Run this yourself](/getting-started/quickstart/) — it takes a `gcc` invocation and four
+[Run this yourself](/getting-started/quickstart/) - it takes a `gcc` invocation and four
 commands.
+
+## Who it's for
+
+lazydap is aimed at the debugging a print statement cannot reach: memory you manage by hand in
+C and C++, unsafe Rust, the native library underneath a Python stack, a race that vanishes the
+moment you add a log. Most work does not need a debugger and this does not pretend otherwise.
+When yours does, and "add a print and rerun" has turned into a wall, this is the tool - and
+once an agent is driving it, reaching for it costs about what the print would.
+[The longer answer](/guides/why-lazydap/#who-it-is-actually-for).
 
 ## What it is
 
@@ -91,9 +100,9 @@ Six trade-offs, each with a defensible opposite that other tools take:
 
 ## Where to go
 
-- [Install](/getting-started/install/) — codelldb first, then lazydap from source
-- [Quickstart](/getting-started/quickstart/) — a C program, a breakpoint, and a variable
-- [Recipes](/guides/recipes/) — segfaults, CI assertions, `launch.json`, cleanup
-- [Debug with an agent](/guides/agents/) — the skill and the `--wait` discipline
-- [CLI reference](/reference/cli/) — generated from the binary
-- [Troubleshooting](/troubleshooting/) — when a breakpoint never binds
+- [Install](/getting-started/install/) - codelldb first, then lazydap from source
+- [Quickstart](/getting-started/quickstart/) - a C program, a breakpoint, and a variable
+- [Recipes](/guides/recipes/) - segfaults, CI assertions, `launch.json`, cleanup
+- [Debug with an agent](/guides/agents/) - the skill and the `--wait` discipline
+- [CLI reference](/reference/cli/) - generated from the binary
+- [Troubleshooting](/troubleshooting/) - when a breakpoint never binds

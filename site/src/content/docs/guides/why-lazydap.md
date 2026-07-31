@@ -4,13 +4,13 @@ description: The six trade-offs lazydap makes, who the tool is actually for, and
 ---
 
 Decide whether lazydap fits before you install it. Every choice below has a defensible
-opposite, and a real tool takes that opposite — so this page is mostly about what lazydap
+opposite, and a real tool takes that opposite - so this page is mostly about what lazydap
 gives up.
 
 ## The gap it fills
 
 Debuggers are reachable three ways today: through an IDE, through a debugger's own REPL, or
-through DAP if you already speak DAP. During 2026 a fourth way appeared — a small cluster of
+through DAP if you already speak DAP. During 2026 a fourth way appeared - a small cluster of
 tools that each independently wrapped a debugger daemon in shell commands for coding agents:
 [debug-skill](https://github.com/AlmogBaku/debug-skill),
 [debug-that](https://github.com/theodo-group/debug-that),
@@ -29,26 +29,59 @@ autocommand has no MCP host.
 The research points the same way, with appropriate modesty. Microsoft Research's
 [debug-gym](https://arxiv.org/abs/2503.21557) is an environment for studying agents that use
 an interactive debugger, and their write-up reports "significant performance improvement" on
-SWE-bench Lite when the agent can actually use debugging tools — while being blunt about the
+SWE-bench Lite when the agent can actually use debugging tools - while being blunt about the
 ceiling: "Even with debugging tools, our simple prompt-based agent rarely solves more than
 half of the SWE-bench Lite issues"
 ([Microsoft Research blog](https://www.microsoft.com/en-us/research/blog/debug-gym-an-environment-for-ai-coding-tools-to-learn-how-to-debug-code-like-programmers/)).
 
 Microsoft's follow-up, [Debug2Fix](https://arxiv.org/html/2602.18571v2), added two findings
 that shaped this tool: a cheap model with a debugger beat an expensive one without, and
-exposing raw debugger commands to the model produced negligible gains — the improvement came
+exposing raw debugger commands to the model produced negligible gains - the improvement came
 from a mediated interface that bundles context at every stop. That mediated interface is
 what `--wait` is.
 
 ### Who it is actually for
 
-Most developers ship most days without a debugger, and so do most agents — a print
-statement and a rerun genuinely cover a lot of work. lazydap is not aimed at all of it.
-It is for the territory where that loop stops working: C and C++, where memory is managed
-by hand and a crash destroys its own evidence; unsafe Rust; the native extension underneath
-a Python stack; races that disappear when you add a print. If your agent works in that
-territory, "add a log and run it again" is not a loop, it is a wall — and that is the
-segment this tool is built for, even if the rest of the world finds it merely convenient.
+Most developers ship most days without a debugger, and so do most agents. A print statement
+and a rerun genuinely cover a lot of work. lazydap is not aimed at all of it. It is aimed at
+the territory where that loop stops working: C and C++, where you manage memory by hand and a
+crash destroys its own evidence; unsafe Rust; the native extension underneath a Python stack;
+races that vanish the moment you add a print. In that territory "add a log and run it again"
+is not a loop, it is a wall. That is the segment lazydap is built for, even if the rest of the
+world finds it merely convenient.
+
+### The segment is where it starts, not where it stops
+
+That segment is who lazydap wins without an argument. It is not the whole reach, and the
+reason is friction rather than need.
+
+It is worth being honest about why most developers skip the debugger most of the time. It is
+rarely that a print statement tells them more. It is that the debugger costs a small ceremony
+the print does not: a launch config, breakpoints set by hand, the commands half-remembered,
+the trip out of the editor and back. A print costs one line where you already are, so it wins
+on effort even when it loses on information.
+
+Drive the debugger through an agent and that ceremony is the agent's problem, not yours. The
+part you do shrinks to asking, and at that price the old comparison flips. One
+`continue --wait` hands back more than a print ever could - where it stopped, why, the locals,
+every line it emitted - for the same sentence. Log points make it sharpest:
+`break --log "x={x}"` is the print workflow itself, minus the edit, minus the rebuild, on a
+release binary, with structured output you can pipe. lazydap does the thing print does, better,
+before it adds anything print cannot.
+
+I do not want to oversell that. It is not free. There is latency, because a daemon and an
+adapter and a session have to exist first. There are tokens, because the agent runs a handful
+of commands. And there is install, which a print never needs and which lazydap has not yet
+made painless - the honest reason `brew install` and a one-line installer sit on the critical
+path rather than in a someday pile.
+
+So the reach is wider than the segment, but the order matters. The segment converts with no
+persuasion. The friction argument is what pulls the rest of the market in behind it. Leading
+with friction would be the mistake: "frictionless debugging for everyone" is a sentence any
+competitor can say, and Cursor already says a stronger version by taking the debugger out of
+the loop entirely. The claim only holds when it is concrete - one sentence in, one settled
+answer out, no polling and no MCP host - which is the [`--wait` contract](/guides/wait/)
+wearing a friction label.
 
 ## The six trade-offs
 
@@ -59,7 +92,7 @@ agent whose only tool is Bash.
 
 **What it costs.** No tool discovery, and no typed schema handed to your model by a host. An
 MCP-native debugger gives you both, and the model never has to be told the commands exist.
-Nearly every other project in this space is MCP-first for exactly that reason —
+Nearly every other project in this space is MCP-first for exactly that reason  - 
 [`debugmcp/mcp-debugger`](https://github.com/debugmcp/mcp-debugger),
 [`Govinda-Fichtner/debugger-mcp`](https://github.com/Govinda-Fichtner/debugger-mcp),
 [`KashunCheng/dap_mcp`](https://github.com/KashunCheng/dap_mcp), and the go-delve org's own
@@ -106,8 +139,8 @@ the opposite bet, and it works right up until the release that changes a column.
 DWARF parsing, ptrace, evaluating an expression in the debuggee's language: LLDB does all of
 that already, better than a rewrite would.
 
-**What it costs.** codelldb's quirks become yours —
-[eight of them are written down](/reference/codelldb-quirks/) — along with bugs lazydap
+**What it costs.** codelldb's quirks become yours  - 
+[nine of them are written down](/reference/codelldb-quirks/) - along with bugs lazydap
 cannot fix because they live a layer down.
 
 **Why this way round.** The porcelain/plumbing split is not new: lazygit over git, `httpie`
@@ -168,8 +201,8 @@ Worth stating, since a positioning page that cannot be falsified is marketing:
 - MCP becomes the only channel agents get. Mitigated, not eliminated, by the socket being
   bridgeable.
 - A cluster member ships the same contract: if debug-skill or debug-that publishes a stable
-  documented schema, an exit-code contract and a specified wait-blob — with their wider
-  adapter coverage — the differentiation collapses to execution quality.
+  documented schema, an exit-code contract and a specified wait-blob - with their wider
+  adapter coverage - the differentiation collapses to execution quality.
 - An IDE vendor goes headless: VS Code's Copilot debugging or JetBrains Junie leaving the
   IDE would put a giant in this lane overnight.
 - Cursor flips its Debug Mode bet from log instrumentation to a real debugger.
@@ -178,6 +211,6 @@ Worth stating, since a positioning page that cannot be falsified is marketing:
 
 ## See also
 
-- [Architecture](/guides/architecture/) — how the client/daemon/adapter split is enforced
-- [Debug with an agent](/guides/agents/) — the case this was built for
-- [The `--wait` contract](/guides/wait/) — the design decision the whole thing rests on
+- [Architecture](/guides/architecture/) - how the client/daemon/adapter split is enforced
+- [Debug with an agent](/guides/agents/) - the case this was built for
+- [The `--wait` contract](/guides/wait/) - the design decision the whole thing rests on
