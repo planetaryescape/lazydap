@@ -205,17 +205,12 @@ impl WatchesView {
 fn describe(value: Option<&WatchValue>) -> String {
     match value {
         None => "…".to_string(),
-        Some(WatchValue::Error(error)) => first_line(error),
+        Some(WatchValue::Error(error)) => super::first_line(error),
         Some(WatchValue::Value(result)) => match result.type_name.as_deref() {
             Some(type_name) => format!("{} : {type_name}", result.value),
             None => result.value.clone(),
         },
     }
-}
-
-/// Adapters return multi-line diagnostics, and a pane row is one line.
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_string()
 }
 
 #[cfg(test)]

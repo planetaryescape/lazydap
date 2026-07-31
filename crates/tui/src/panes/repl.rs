@@ -229,7 +229,7 @@ fn output_row(output: &ReplOutput) -> Line<'static> {
             Line::from(Span::styled("  …", Style::default().fg(Color::DarkGray)))
         }
         ReplOutput::Error(error) => Line::from(Span::styled(
-            format!("  {}", first_line(error)),
+            format!("  {}", super::first_line(error)),
             Style::default().fg(Color::Red),
         )),
         ReplOutput::Value(result) => {
@@ -243,11 +243,6 @@ fn output_row(output: &ReplOutput) -> Line<'static> {
             ))
         }
     }
-}
-
-/// Adapters return multi-line diagnostics, and a scrollback row is one line.
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_string()
 }
 
 /// Split a submitted line into what to evaluate and whether it is a command.
