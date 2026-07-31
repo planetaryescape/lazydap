@@ -48,7 +48,8 @@ corpus is at /llms-full.txt.
 
 ## Known limitations
 
-codelldb only, so no Python, Go or Node. One session per project at a time. macOS and Linux;
-Windows is not a target. No config file yet, so adapter discovery is PATH-only. No attach,
-watches or restart. Breakpoint conditions, hit counts and log points are CLI-only; the TUI's
-`b` sets a plain one. `variables_reference` values expire whenever the program moves.
+C, C++ and Rust via codelldb; Python via debugpy. No Go or Node yet. One session per
+project at a time. macOS and Linux; Windows is not a target. Adapter discovery is config-pin
+then PATH. No attach or restart. Breakpoint conditions, hit counts and log points are
+CLI-only; the TUI's `b` sets a plain one. `variables_reference` values expire whenever the
+program moves.

@@ -72,8 +72,10 @@ path to the daemon's internals. The crate graph enforces that, not a code review
 
 ## What it isn't
 
-Five trade-offs, each with a defensible opposite that other tools take:
+Six trade-offs, each with a defensible opposite that other tools take:
 
+- **The CLI is the product, not the plumbing under a skill.** One binary, one documented
+  contract, serving your agent, your scripts and your CI alike.
 - **Shell subcommands, not an MCP server.** Anything that can run a command can drive it.
   The cost is no tool discovery and no typed schema handed to your model by a host.
 - **One blob per command, not an event stream.** Better for a script deciding what to do

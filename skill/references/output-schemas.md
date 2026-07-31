@@ -223,7 +223,7 @@ Reading it does not consume it.
   "instance": "lazydap-myproject",
   "daemon_pid": 77256,
   "uptime_ms": 776,
-  "protocol_version": 2,
+  "protocol_version": 5,
   "lazydap_version": "0.1.0",
   "session": {
     "session_id": "971baa06-...",

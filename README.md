@@ -1,8 +1,12 @@
 # lazydap
 
-Debug a C, C++ or Rust program from the shell. Set a breakpoint with `lazydap break hello.c:6`, run to it with `lazydap continue --wait`, read the JSON that comes back, decide what to do next. A daemon holds the debug session so each command can be a separate process; a terminal UI ships in the same binary, as a client of the same socket the CLI talks to.
+Debug from the shell: one command per step, one JSON answer per command — for your agent, your scripts, and your CI.
 
-> **Pre-release.** `v0.1.0` is not tagged and there are no published binaries. Install from source, as below. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
+lazydap turns a real debugger into shell subcommands that answer in JSON you can build on. Set a breakpoint with `lazydap break hello.c:6`, run to it with `lazydap continue --wait`, read one object that says where the program stopped, why, and everything it printed on the way. A daemon holds the session so each command can be a separate process; an agent drives it with nothing but a Bash tool ([the skill ships in this repo](#for-agents)); CI branches on its exit codes. The schema and the exit codes are contracts — kept stable on purpose and tested against real codelldb and debugpy.
+
+It exists for the work where a debugger is not optional: memory you manage by hand, crashes that destroy their own evidence, races you cannot printf around, and the native library underneath your Python.
+
+> **Early.** `v0.1.0` is a prerelease and everything past it ships with the next tag. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
 
 ## The loop
 
@@ -81,7 +85,9 @@ $ lazydap step --wait --format json
 
 ## What it isn't
 
-Five deliberate trade-offs. Each one has a defensible opposite, and plenty of tools take it.
+Six deliberate trade-offs. Each one has a defensible opposite, and a real tool takes it.
+
+**The CLI is the product, not the plumbing under a skill.** Several 2026 tools wrap a debugger daemon for agents and lead with the agent skill — the binary underneath is undocumented infrastructure. lazydap inverts that: the same binary, with the same documented schema and exit codes, serves an agent's Bash tool, a shell script, a Makefile, and a CI assertion. Pipe it into `jq`, branch on exit code `4`, clear every breakpoint with `--format ids | xargs`. The cost is that the agent gets no curated abstraction beyond the skill's advice — an agent-only surface can be simpler because nothing else has to compose with it.
 
 **Shell subcommands, not an MCP server.** Anything that can run a command can drive lazydap: a CI job, a Makefile, a vim autocommand, an agent with a Bash tool and nothing else. The cost is that you get no tool discovery and no typed schema handed to your model by a host — an MCP-native debugger gives you that, and every other project in this niche is MCP-first for exactly that reason. An MCP bridge over this protocol is a small separate crate, and it isn't in this repo.
 
@@ -89,7 +95,7 @@ Five deliberate trade-offs. Each one has a defensible opposite, and plenty of to
 
 **The JSON is the contract. The table output is not.** `--format json` has a stable schema and breaking it costs a decision-log entry. `--format table` is for your eyes and will be reflowed whenever it reads badly. Tools that ship one pretty output and tell you to parse it are making the opposite bet, and it works fine right up until the day it doesn't.
 
-**It wraps codelldb rather than being a debugger.** DWARF parsing, ptrace, expression evaluation in the debuggee's language: LLDB already does all of that, better than a rewrite would. The bill comes as codelldb's quirks becoming yours — [seven of them are written down](docs/reference/codelldb-quirks.md) — and as bugs lazydap cannot fix because they live a layer down.
+**It wraps codelldb rather than being a debugger.** DWARF parsing, ptrace, expression evaluation in the debuggee's language: LLDB already does all of that, better than a rewrite would. The bill comes as codelldb's quirks becoming yours — [nine of them are written down](docs/reference/codelldb-quirks.md) — and as bugs lazydap cannot fix because they live a layer down.
 
 **One debug session per project at a time.** The daemon is per project root and holds one session. Launching a second while the first is live gets you `SessionAlreadyActive`. Multi-session is designed for (session ids are in the protocol from the start) and not built. If you want to debug four services at once today, this is the wrong tool.
 
@@ -205,7 +211,7 @@ Most repositories with a non-trivial debug setup already carry a `.vscode/launch
 $ lazydap launches list
 NAME          SOURCE       ADAPTER  REQUEST  PROGRAM                          RUNNABLE
 Debug binary  launch.json  lldb     launch   /Users/you/demo/build/demo       yes
-API           launch.json  python   launch   /Users/you/demo/app.py           no (it needs a `python` adapter, and lazydap ships codelldb only)
+API           launch.json  python   launch   /Users/you/demo/app.py           yes
 Pick one      launch.json  lldb     launch   /Users/you/demo/${command:pickProcess}  no (nothing could expand ${command:pickProcess}, so its paths are not paths)
 
 warning: `Pick one` uses ${command:pickProcess}, which nothing here can expand; it is left as written
@@ -250,11 +256,11 @@ For agents working *on* this repo rather than with it, [`AGENTS.md`](AGENTS.md) 
 
 ## What works today
 
-Launch, breakpoints (set, list, remove, toggle, conditional), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, captured output, launches, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints. A daemon per project with a live event stream clients can subscribe to. A three-pane TUI that reconnects on its own.
+Launch, breakpoints (set, list, remove, toggle, conditions, hit counts, log points), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, watches, captured output, launches, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints and watches. A config file for adapter pins and the default timeout, and `.vscode/launch.json` import. A daemon per project with a live event stream clients can subscribe to. A TUI with source, stack, scopes, watches and REPL panes that reconnects on its own.
 
-Scope for v0.1: **codelldb only** (C, C++, Rust), **one session at a time**, **macOS and Linux**.
+Scope today: **C, C++ and Rust via codelldb, Python via debugpy**, **one session at a time**, **macOS and Linux**. (The v0.1.0 release is codelldb-only; Python, watches and the REPL landed after that tag and ship with the next one. Build from source for everything on this page.)
 
-Not built, in rough order: watches; a REPL pane; `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, debugpy for Python, then delve and js-debug, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
+Not built, in rough order: `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, delve and js-debug, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
 
 Windows is not a target. Nothing here phones home ([`PRIVACY.md`](PRIVACY.md)).
 

@@ -1,6 +1,6 @@
 ---
 title: Why lazydap
-description: The five trade-offs lazydap makes, what each buys, and when to use something else.
+description: The six trade-offs lazydap makes, who the tool is actually for, and when to use something else.
 ---
 
 Decide whether lazydap fits before you install it. Every choice below has a defensible
@@ -10,7 +10,16 @@ gives up.
 ## The gap it fills
 
 Debuggers are reachable three ways today: through an IDE, through a debugger's own REPL, or
-through DAP if you already speak DAP. None of those is "run a command, read JSON."
+through DAP if you already speak DAP. During 2026 a fourth way appeared — a small cluster of
+tools that each independently wrapped a debugger daemon in shell commands for coding agents:
+[debug-skill](https://github.com/AlmogBaku/debug-skill),
+[debug-that](https://github.com/theodo-group/debug-that),
+[debugger-cli](https://github.com/akiselev/debugger-cli),
+[dapi](https://github.com/shmulc8/dapi). lazydap is a member of that cluster, not its
+origin, and this page is honest about what distinguishes it inside the cluster as well as
+outside it: the schema and exit codes are documented contracts rather than flags, the
+`--wait` reply is a specified state machine rather than "some context", and the CLI is the
+product rather than the plumbing under a skill.
 
 That matters because a large share of the things that now want to inspect runtime state can
 only run shell commands. An agent with a Bash tool cannot open VS Code. A CI job asserting
@@ -25,10 +34,23 @@ ceiling: "Even with debugging tools, our simple prompt-based agent rarely solves
 half of the SWE-bench Lite issues"
 ([Microsoft Research blog](https://www.microsoft.com/en-us/research/blog/debug-gym-an-environment-for-ai-coding-tools-to-learn-how-to-debug-code-like-programmers/)).
 
-So: a debugger helps, and it is not a solved problem. Giving a model one it can actually
-invoke from a shell is the part lazydap is for.
+Microsoft's follow-up, [Debug2Fix](https://arxiv.org/html/2602.18571v2), added two findings
+that shaped this tool: a cheap model with a debugger beat an expensive one without, and
+exposing raw debugger commands to the model produced negligible gains — the improvement came
+from a mediated interface that bundles context at every stop. That mediated interface is
+what `--wait` is.
 
-## The five trade-offs
+### Who it is actually for
+
+Most developers ship most days without a debugger, and so do most agents — a print
+statement and a rerun genuinely cover a lot of work. lazydap is not aimed at all of it.
+It is for the territory where that loop stops working: C and C++, where memory is managed
+by hand and a crash destroys its own evidence; unsafe Rust; the native extension underneath
+a Python stack; races that disappear when you add a print. If your agent works in that
+territory, "add a log and run it again" is not a loop, it is a wall — and that is the
+segment this tool is built for, even if the rest of the world finds it merely convenient.
+
+## The six trade-offs
 
 ### 1. Shell subcommands, not an MCP server
 
@@ -115,6 +137,18 @@ possible. Building it before anything else worked would have been the wrong orde
 
 **Take the opposite** if simultaneous multi-process debugging is the job.
 
+### 6. The CLI is the product, not the plumbing under a skill
+
+The nearest tools in this space lead with the agent skill; the binary underneath is
+supporting infrastructure, documented for the agent that drives it. lazydap inverts that
+bet: one binary with one documented contract serves the agent, the shell script, the CI
+job and the TUI identically. Pipe `--format json` into `jq`; stream `--format jsonl` into
+`while read`; clear every breakpoint with `--format ids | xargs`; branch on exit code `4`
+in CI. The cost is real: an agent-only surface can be simpler and terser, because nothing
+else ever has to compose with it, and a skill-first tool can redesign its output every week
+without breaking anyone. Take the opposite if the only consumer you will ever have is one
+agent reading one screen.
+
 ## When to use something else
 
 - **You are happy in your IDE's debugger.** lazydap is not better than VS Code's debugger
@@ -123,8 +157,8 @@ possible. Building it before anything else worked would have been the wrong orde
 - **You want a TUI above all.** The TUI is real but deliberately second: it gets features
   after the CLI does, because the CLI is where they are defined.
 - **You are debugging in a browser.** No CDP support, and none planned.
-- **Python, Go or Node today.** codelldb only, which means C, C++, Rust and anything else
-  LLDB handles. debugpy, delve and js-debug are planned.
+- **Go or Node today.** codelldb and debugpy cover C, C++, Rust and Python; delve and
+  js-debug are next on the roadmap.
 - **You want it hosted.** There is no lazydap cloud. Nothing here phones home.
 
 ## What would prove this wrong
@@ -133,7 +167,12 @@ Worth stating, since a positioning page that cannot be falsified is marketing:
 
 - MCP becomes the only channel agents get. Mitigated, not eliminated, by the socket being
   bridgeable.
-- VS Code's Copilot Debug Agent leaves VS Code and becomes generally drivable.
+- A cluster member ships the same contract: if debug-skill or debug-that publishes a stable
+  documented schema, an exit-code contract and a specified wait-blob — with their wider
+  adapter coverage — the differentiation collapses to execution quality.
+- An IDE vendor goes headless: VS Code's Copilot debugging or JetBrains Junie leaving the
+  IDE would put a giant in this lane overnight.
+- Cursor flips its Debug Mode bet from log instrumentation to a real debugger.
 - Record-and-replay debugging in the style of Replay.io becomes the norm, and stepping a live
   process stops being the interesting thing.
 
