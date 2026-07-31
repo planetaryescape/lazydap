@@ -254,6 +254,10 @@ impl StoredLaunchConfig {
             cwd: self.cwd.map(|cwd| absolutise(&cwd, root)),
             env: self.env,
             stop_on_entry: self.stop_on_entry,
+            // Not spelled in lazydap's own file. `[adapter.<kind>] command`
+            // in the user config is where a pinned adapter binary goes here,
+            // and it applies to every launch rather than one of them.
+            adapter_command: None,
             source: LaunchConfigSource::ProjectState,
             // Nothing substitutes variables in lazydap's own file: it is
             // lazydap's, so a path in it means what it says.

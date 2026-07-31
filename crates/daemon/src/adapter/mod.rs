@@ -149,8 +149,15 @@ pub enum AdapterError {
         searched: Vec<PathBuf>,
     },
 
-    #[error("{adapter} is pinned to {path} in lazydap's config, and that is not an executable")]
-    ConfiguredAdapterMissing { adapter: AdapterKind, path: PathBuf },
+    #[error("{adapter} is pinned to {path} by {pinned_by}, and that is not an executable")]
+    ConfiguredAdapterMissing {
+        adapter: AdapterKind,
+        path: PathBuf,
+        /// Which file said so: [`PIN_USER_CONFIG`] or [`PIN_LAUNCH_CONFIG`].
+        /// Not named `source`, which `thiserror` reads as the underlying error
+        /// rather than as a field to interpolate.
+        pinned_by: &'static str,
+    },
 
     /// Found, and cannot do the job. Only debugpy can reach this: it is a
     /// Python module, so an interpreter being present says nothing about the
@@ -203,10 +210,14 @@ impl AdapterError {
                 "adapter": adapter.as_str(),
                 "searched": searched,
             })),
-            Self::ConfiguredAdapterMissing { adapter, ref path } => IpcError::new(
+            Self::ConfiguredAdapterMissing {
+                adapter,
+                ref path,
+                pinned_by,
+            } => IpcError::new(
                 ErrorCode::AdapterNotFound,
                 format!(
-                    "{adapter} is pinned to {} in lazydap's config, and that is not an executable",
+                    "{adapter} is pinned to {} by {pinned_by}, and that is not an executable",
                     path.display(),
                 ),
             )
@@ -728,6 +739,53 @@ pub fn discover_with(kind: AdapterKind, config: &lazydap_config::Config) -> Resu
     discover_in(kind, config, &std::env::var_os("PATH").unwrap_or_default())
 }
 
+/// The adapter binary for a launch, honouring one the launch configuration
+/// named.
+///
+/// A `launch.json` debugpy configuration routinely pins its interpreter —
+/// `"python": "${workspaceFolder}/.venv/bin/python"` — and that pin is the
+/// entire point of a per-project virtualenv: the named interpreter has the
+/// project's dependencies and the first one on `PATH` does not. So it replaces
+/// discovery rather than seeding it.
+///
+/// It is checked here, in the client, for the same reason everything else
+/// about a launch is (D050) — and checked at all because the failure it
+/// prevents is otherwise unrecognisable: an interpreter without debugpy
+/// installed starts, fails to import a module, and is reported as an adapter
+/// that crashed on startup.
+pub fn resolve_with(
+    kind: AdapterKind,
+    config: &lazydap_config::Config,
+    pinned: Option<&Path>,
+) -> Result<PathBuf> {
+    let Some(pinned) = pinned else {
+        return discover_with(kind, config);
+    };
+
+    if !is_executable(pinned) {
+        return Err(AdapterError::ConfiguredAdapterMissing {
+            adapter: kind,
+            path: pinned.to_path_buf(),
+            pinned_by: PIN_LAUNCH_CONFIG,
+        });
+    }
+    usable(kind, pinned)?;
+
+    tracing::debug!(
+        target: "daemon.session",
+        adapter = %kind,
+        path = %pinned.display(),
+        "using the adapter the launch configuration named",
+    );
+    Ok(pinned.to_path_buf())
+}
+
+/// Where a pinned adapter path came from, for an error that has to name it.
+/// A caller told to check "lazydap's config" when the path is in their
+/// `launch.json` goes looking in the wrong file.
+const PIN_USER_CONFIG: &str = "lazydap's config";
+const PIN_LAUNCH_CONFIG: &str = "the launch configuration";
+
 /// The lookup itself, with the config and `PATH` passed in so tests do not
 /// have to mutate the process environment (which edition 2024 makes `unsafe`,
 /// and this workspace forbids).
@@ -754,6 +812,7 @@ fn discover_in(
             return Err(AdapterError::ConfiguredAdapterMissing {
                 adapter: kind,
                 path: command.to_path_buf(),
+                pinned_by: PIN_USER_CONFIG,
             });
         }
         usable(kind, command)?;
@@ -929,6 +988,116 @@ mod tests {
         assert_eq!(ipc.code, ErrorCode::AdapterNotFound);
         assert_eq!(ipc.details["configured"], serde_json::json!(binary));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A directory laid out like a virtualenv, with `bin/python` either a real
+    /// interpreter (a copy of this machine's) or a stub that cannot import
+    /// debugpy.
+    fn fake_venv(label: &str, real_interpreter: bool) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lazydap-venv-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("create");
+
+        let python = bin.join("python");
+        let script = match real_interpreter {
+            // Delegates to whatever python is on PATH, so `import debugpy`
+            // behaves exactly as it does for the interpreter that runs the
+            // rest of this suite.
+            true => "#!/bin/sh\nexec python3 \"$@\"\n",
+            // An interpreter with no debugpy in it. `exit 0` on purpose: the
+            // check must not be satisfied by a command that merely succeeds.
+            false => "#!/bin/sh\nexit 0\n",
+        };
+        std::fs::write(&python, script).expect("write");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        (dir, python)
+    }
+
+    #[test]
+    fn an_interpreter_named_by_a_launch_configuration_wins_over_discovery() {
+        // The virtualenv case: the whole reason the configuration names one is
+        // that the interpreter on `PATH` is the wrong one.
+        let (dir, python) = fake_venv("wins", true);
+
+        let resolved = resolve_with(
+            AdapterKind::Debugpy,
+            &lazydap_config::Config::default(),
+            Some(&python),
+        );
+
+        match resolved {
+            Ok(found) => assert_eq!(found, python),
+            // A machine with no debugpy cannot tell these apart, and the
+            // integration suite already skips loudly for that.
+            Err(AdapterError::Incomplete { .. }) => {}
+            Err(other) => unreachable!("got: {other}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_named_interpreter_that_cannot_import_debugpy_says_so_and_names_it() {
+        // Falling back to `PATH` here would run the program under an
+        // interpreter the configuration deliberately did not choose, and say
+        // nothing about having done so.
+        let (dir, python) = fake_venv("empty", false);
+
+        let error = resolve_with(
+            AdapterKind::Debugpy,
+            &lazydap_config::Config::default(),
+            Some(&python),
+        )
+        .expect_err("a stub interpreter cannot import debugpy");
+
+        let ipc = error.into_ipc();
+        assert_eq!(ipc.code, ErrorCode::AdapterNotFound);
+        assert_eq!(ipc.details["found"], serde_json::json!(python));
+        assert!(
+            ipc.message.contains("debugpy"),
+            "the message has to name what is missing: {}",
+            ipc.message,
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_interpreter_that_is_not_there_names_the_launch_configuration() {
+        // Which file to go and fix. A caller sent to "lazydap's config" when
+        // the path is in their launch.json looks in the wrong place.
+        let error = resolve_with(
+            AdapterKind::Debugpy,
+            &lazydap_config::Config::default(),
+            Some(Path::new("/nowhere/.venv/bin/python")),
+        )
+        .expect_err("that path does not exist");
+
+        assert!(
+            error.to_string().contains("the launch configuration"),
+            "got: {error}",
+        );
+    }
+
+    #[test]
+    fn naming_no_interpreter_falls_back_to_discovery() {
+        // Without a pin, `resolve_with` must be exactly `discover_with` —
+        // asserted as "the same answer" rather than "some answer", so it holds
+        // whether or not this machine has the adapter at all.
+        let config = lazydap_config::Config::default();
+
+        let resolved = resolve_with(AdapterKind::Codelldb, &config, None);
+        let discovered = discover_with(AdapterKind::Codelldb, &config);
+
+        match (resolved, discovered) {
+            (Ok(resolved), Ok(discovered)) => assert_eq!(resolved, discovered),
+            (Err(resolved), Err(discovered)) => {
+                assert_eq!(resolved.to_string(), discovered.to_string());
+            }
+            (resolved, discovered) => {
+                unreachable!("a pin of `None` must change nothing: {resolved:?} vs {discovered:?}",)
+            }
+        }
     }
 
     /// The message codelldb actually sends, captured from a real run.

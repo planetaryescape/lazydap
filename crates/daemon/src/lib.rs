@@ -97,6 +97,10 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                     cwd,
                     env: session::parse_env(&env)?,
                     adapter,
+                    // `lazydap launch` names a program, not an adapter binary;
+                    // pinning one is the config file's job (D026) or a launch
+                    // configuration's.
+                    adapter_command: None,
                     stop_on_entry,
                 },
                 format,

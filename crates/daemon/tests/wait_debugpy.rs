@@ -222,6 +222,39 @@ fn assert_no_orphans() {
     );
 }
 
+/// Children of `parent` whose command line contains `pattern`.
+///
+/// Matched on the whole command line rather than the process name, because the
+/// adapter has no name of its own: it is `python3 -m debugpy.adapter`, and on
+/// macOS the executable is called `Python`. Scoped to this daemon's children so
+/// a suite running in another worktree keeps its adapters.
+fn children_matching(parent: u64, pattern: &str) -> Vec<u32> {
+    let output = Command::new("pgrep")
+        .args(["-P", &parent.to_string(), "-f", pattern])
+        .output()
+        .expect("run pgrep");
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// Whether any process is still running one of the Python fixtures.
+fn fixtures_running() -> Vec<String> {
+    let fixtures = repo_root().join("examples/py-fixtures");
+    let output = Command::new("pgrep")
+        .args(["-f", &fixtures.display().to_string()])
+        .output()
+        .expect("run pgrep");
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 fn output_texts(blob: &Value) -> Vec<String> {
     blob["captured_output"]
         .as_array()
@@ -410,6 +443,62 @@ fn a_lot_of_output_arrives_in_order() {
     let first = joined.find("line 0").expect("the first line");
     let last = joined.find("line 199").expect("the last line");
     assert!(first < last, "output arrived out of order: {joined}");
+}
+
+/// D045 for Python: the adapter is killed mid-wait, and nothing is left behind.
+///
+/// What this can and cannot show, stated plainly, because the difference
+/// matters to whoever reads a failure here. It shows the *outcome*: the wait
+/// ends as `adapter_died` rather than sitting until its timeout (D022), and no
+/// debuggee survives. It does **not** discriminate lazydap's reap from
+/// debugpy's own cleanup — observed on 1.8.21, the launcher kills the debuggee
+/// itself the moment the adapter socket drops, so the pid is already gone when
+/// the reap looks at it.
+///
+/// The reap is therefore belt-and-braces here rather than the only thing
+/// standing between a user and an orphan. That it works for an
+/// interpreter-run program at all is checked where it can be:
+/// `debuggee::tests::a_script_running_under_an_interpreter_is_recognised_and_killed`.
+#[test]
+fn a_killed_adapter_takes_its_python_debuggee_with_it() {
+    let (_python, _turn) = require_python!();
+    let sandbox = Sandbox::new("dead");
+
+    sandbox.launch(&fixture("spins.py"));
+    let daemon_pid = sandbox.json(&["--format", "json", "status"])["daemon_pid"]
+        .as_u64()
+        .expect("a daemon pid");
+
+    // Kill the adapter while a wait is in flight — nothing sends `terminated`,
+    // which is the case D022 exists for, and nothing stops the debuggee, which
+    // is the case D045 exists for.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        for pid in children_matching(daemon_pid, "debugpy.adapter") {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+        }
+    });
+
+    let blob = sandbox.wait("20");
+    assert_eq!(blob["state"], "adapter_died", "got: {blob}");
+    assert!(
+        blob["elapsed_ms"].as_u64().unwrap_or(u64::MAX) < 20_000,
+        "it must not have waited out the timeout: {blob}",
+    );
+
+    // `spins.py` sleeps rather than spinning, so an orphan costs no CPU and
+    // would be that much easier to miss. Give the cleanup a moment to land.
+    for _ in 0..20 {
+        if fixtures_running().is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    unreachable!(
+        "the debuggee outlived its adapter — pids {}",
+        fixtures_running().join(", "),
+    );
 }
 
 #[test]

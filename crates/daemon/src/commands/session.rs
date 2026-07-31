@@ -24,6 +24,9 @@ pub struct LaunchOptions {
     /// Which adapter to debug under, when the caller said. `None` means read
     /// it off the program — see [`AdapterKind::for_program`].
     pub adapter: Option<AdapterKind>,
+    /// The adapter binary a launch configuration named, when one did. `None`
+    /// leaves it to discovery.
+    pub adapter_command: Option<PathBuf>,
     pub stop_on_entry: bool,
 }
 
@@ -84,8 +87,12 @@ pub async fn launch(
     // environment is whatever it inherited whenever it started, so a
     // `LAZYDAP_CONFIG_PATH` set for this command would mean nothing there.
     // Failing now also beats failing after a daemon has been spawned.
-    let adapter_command = crate::adapter::discover_with(adapter, &instance.config)
-        .map_err(|error| CliError::from(error.into_ipc()))?;
+    let adapter_command = crate::adapter::resolve_with(
+        adapter,
+        &instance.config,
+        options.adapter_command.as_deref(),
+    )
+    .map_err(|error| CliError::from(error.into_ipc()))?;
 
     let mut client = ensure_daemon_running(instance).await?;
     let response = client

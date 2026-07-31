@@ -2,7 +2,7 @@
 
 use super::{Result, find_session, live_session};
 use crate::adapter;
-use crate::state::{DaemonState, Session};
+use crate::state::{DaemonState, RunClaim, Session};
 use crate::wait::{DEFAULT_TIMEOUT, Wait, WaitOptions};
 use lazydap_core::{EndReason, SessionId, SessionState, StepKind};
 use lazydap_protocol::{ErrorCode, Event, IpcError, Response, WaitMode};
@@ -218,12 +218,17 @@ pub async fn disconnect(
 ///    just the message, is what stops a second `continue --wait` from resuming
 ///    the program past the stop this one is waiting for and returning that
 ///    stop as its own.
-/// 2. **Subscribe**, inside the permit. A fast program can hit its breakpoint
+/// 2. **Claim the run** — [`Session::claim_run`]. One locked operation that
+///    both decides whether the adapter needs asking and moves the session to
+///    `Running`. It comes before the subscription rather than after because a
+///    stop arriving in between is not lost: [`Wait::begin`] reads the
+///    undelivered backlog as well as subscribing.
+/// 3. **Subscribe**, inside the permit. A fast program can hit its breakpoint
 ///    before the adapter has acknowledged the `continue`, so a subscription
 ///    taken after the send would miss the stop it exists to catch.
-/// 3. **Send.**
+/// 4. **Send**, unless step 2 said there was nothing to ask for.
 ///
-/// `pause` skips step 1 — see [`AdapterHandle::interrupt`].
+/// `pause` skips steps 1 and 2 — see [`AdapterHandle::interrupt`].
 pub async fn execute(
     state: &Arc<DaemonState>,
     session_id: SessionId,
@@ -241,49 +246,38 @@ pub async fn execute(
         _ => Some(session.adapter().execution_permit().await),
     };
 
-    // Step 2. After the permit, so nothing observed here belongs to an earlier
+    // Step 2. `continue` on a program that is already running is a request to
+    // do the thing it is already doing. codelldb answers it anyway and nothing
+    // happens; debugpy does not answer it at all, and the acknowledgement
+    // timeout that follows is treated as a wedged adapter and kills the
+    // session (see `AdapterHandle::execute`). The sequence that reaches it is
+    // ordinary rather than exotic: launch without `--stop-on-entry`, then
+    // `continue --wait` to reach the first breakpoint (D055).
+    //
+    // Deciding that and writing the state are one locked operation, because
+    // the pump can record a stop between any two of these lines — see
+    // `claim_run` for what each interleaving used to corrupt.
+    let claim = match movement {
+        Movement::Pause => None,
+        _ => Some(session.claim_run(matches!(movement, Movement::Continue))),
+    };
+
+    // Step 3. After the permit, so nothing observed here belongs to an earlier
     // run; before the send, so nothing this run causes is missed.
     let waiting = wait.is_waiting().then(|| Wait::begin(&session));
 
-    let previous = session.state();
-    if !matches!(movement, Movement::Pause) {
-        // Before the request, not after: the stop that ends this run can
-        // arrive while we are still here, and writing `running` over the
-        // `paused` it set would leave the session lying about itself.
-        session.set_state(SessionState::Running);
-    }
-
-    // Step 3 — unless there is nothing to ask for.
-    //
-    // `continue` on a program that is already running is a request to do the
-    // thing it is already doing. codelldb answers it anyway and nothing
-    // happens; debugpy does not answer it at all, and the acknowledgement
-    // timeout that follows is treated as a wedged adapter and kills the
-    // session (see `execute`'s doc on `AdapterHandle`). The sequence that
-    // reaches it is ordinary rather than exotic: launch without
-    // `--stop-on-entry`, then `continue --wait` to reach the first breakpoint.
-    //
-    // So it is not sent. What the caller wants — the next stable state — is
-    // what `--wait` is already subscribed for, and skipping a request that
-    // could only have been a no-op costs nothing on either adapter. The
-    // subscription is taken above, before this decision, so a stop that
-    // happens while we are here is caught either way.
-    let already_running =
-        matches!(movement, Movement::Continue) && previous == SessionState::Running;
-
-    if already_running {
-        tracing::debug!(
-            target: "daemon.session",
-            session_id = %session_id,
-            "continue on an already-running program; waiting rather than asking again",
-        );
-    } else if let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await {
+    // Step 4.
+    if !matches!(claim, Some(RunClaim::AlreadyRunning))
+        && let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await
+    {
         // Put back only the state *we* wrote. By now the pump may have
         // recorded a real ending — an adapter can execute the request, emit
         // `terminated` and die before acknowledging — and stamping `paused`
         // over that would leave a dead session looking live, refusing every
         // later launch.
-        session.restore_state(SessionState::Running, previous);
+        if let Some(RunClaim::Ask { previous }) = claim {
+            session.restore_state(SessionState::Running, previous);
+        }
         return Err(error.into_ipc());
     }
 

@@ -311,6 +311,20 @@ impl Drop for SessionTeardown {
     }
 }
 
+/// What [`Session::claim_run`] decided, and the only way to find out: the
+/// state it was decided from is not readable afterwards without racing the
+/// pump all over again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunClaim {
+    /// Ask the adapter. The session is now `Running`, and `previous` is what
+    /// it was — what [`Session::restore_state`] puts back if the request
+    /// fails.
+    Ask { previous: SessionState },
+    /// Do not ask, and do not touch the state: the program is already doing
+    /// what was requested.
+    AlreadyRunning,
+}
+
 /// One live debug session.
 pub struct Session {
     pub id: SessionId,
@@ -457,6 +471,46 @@ impl Session {
 
     pub fn set_state(&self, state: SessionState) {
         *write(&self.state) = state;
+    }
+
+    /// Take the session to `Running`, and say whether the adapter has to be
+    /// asked to make that true.
+    ///
+    /// The decision and the transition are one operation under one lock, and
+    /// they have to be. Sampling the state, deciding, and then writing it —
+    /// which is what this replaces — leaves two windows for the pump to record
+    /// a stop in between, and each one corrupts a different thing:
+    ///
+    /// - A stop landing **before the sample** made an already-running program
+    ///   look paused, so a `continue` was sent that resumed the program past
+    ///   the very stop the caller was about to be told about.
+    /// - A stop landing **after the sample** was overwritten by the
+    ///   unconditional `Running` that followed, leaving `--wait` returning a
+    ///   paused blob while the session claimed to be running — and every later
+    ///   `stack`, `scopes` and `eval` refused, because those need a stable
+    ///   state.
+    ///
+    /// `resume_only` marks a movement a running program is *already* carrying
+    /// out, which is `continue` and nothing else. For those, finding the
+    /// session already `Running` means there is nothing to ask for: no request
+    /// is sent, and — importantly — no state is written, so a stop the pump
+    /// records a moment later stands (D055). `step` passes `false`: "step" has
+    /// no reading that means "wait for whatever happens next".
+    pub fn claim_run(&self, resume_only: bool) -> RunClaim {
+        let mut state = write(&self.state);
+
+        if resume_only && *state == SessionState::Running {
+            tracing::debug!(
+                target: "daemon.session",
+                session_id = %self.id,
+                "the program is already running; nothing to ask the adapter for",
+            );
+            return RunClaim::AlreadyRunning;
+        }
+
+        let previous = *state;
+        *state = SessionState::Running;
+        RunClaim::Ask { previous }
     }
 
     /// Undo a state this code wrote, and only if nothing has moved on since.
@@ -1019,6 +1073,81 @@ mod tests {
 
         let (all, _) = session.buffered_output(None);
         assert_eq!(all.len(), 2, "reading must not consume");
+    }
+
+    /// The first of the two interleavings `claim_run` exists for: a `continue`
+    /// arriving while the program is running.
+    ///
+    /// Sampling the state and then writing it left a window where the pump
+    /// recorded a stop in between; the handler saw `Paused`, sent `continue`,
+    /// and resumed the program past the very stop the caller was about to be
+    /// told about. Deciding under the lock is what closes it — a stop can only
+    /// land before the claim (in which case this is an ordinary resume) or
+    /// after it (in which case nothing was sent and the stop stands).
+    #[test]
+    fn a_continue_on_a_running_program_asks_for_nothing() {
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+
+        assert_eq!(session.claim_run(true), RunClaim::AlreadyRunning);
+        assert_eq!(
+            session.state(),
+            SessionState::Running,
+            "and the state is the pump's to move, not ours",
+        );
+    }
+
+    /// The second interleaving: the stop lands *after* the decision.
+    ///
+    /// The unconditional `set_state(Running)` that used to follow the sample
+    /// overwrote it, so `--wait` returned a paused blob while the session
+    /// claimed to be running — and every later `stack`, `scopes` and `eval`
+    /// was refused, because those need a stable state.
+    #[test]
+    fn a_suppressed_continue_never_overwrites_a_stop_that_lands_after_it() {
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+
+        assert_eq!(session.claim_run(true), RunClaim::AlreadyRunning);
+        // The pump, a moment later.
+        session.set_state(SessionState::Paused);
+
+        assert_eq!(
+            session.state(),
+            SessionState::Paused,
+            "the suppression path writes no state, so the stop stands",
+        );
+    }
+
+    #[test]
+    fn a_continue_on_a_paused_program_asks_the_adapter_and_takes_it_running() {
+        let session = ended_session();
+        session.set_state(SessionState::Paused);
+
+        assert_eq!(
+            session.claim_run(true),
+            RunClaim::Ask {
+                previous: SessionState::Paused,
+            },
+        );
+        assert_eq!(session.state(), SessionState::Running);
+    }
+
+    #[test]
+    fn a_step_is_always_asked_for_even_on_a_running_program() {
+        // "step" has no reading that means "wait for whatever happens next",
+        // so there is nothing to suppress. It reaches the adapter and, on a
+        // running program, may well reach a timeout — the same on both
+        // adapters, and a known follow-up rather than something D055 fixed.
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+
+        assert_eq!(
+            session.claim_run(false),
+            RunClaim::Ask {
+                previous: SessionState::Running,
+            },
+        );
     }
 
     #[test]

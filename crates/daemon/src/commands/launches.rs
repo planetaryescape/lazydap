@@ -132,6 +132,11 @@ pub async fn run(
             ),
             env: config.env.clone(),
             adapter: config.adapter,
+            // The interpreter the configuration insists on, when it names one
+            // (`python` / `pythonPath`). It replaces discovery rather than
+            // seeding it: a virtualenv is named precisely because the one on
+            // `PATH` is the wrong one.
+            adapter_command: config.adapter_command.clone(),
             // `--stop-on-entry` on the command line adds to the configuration
             // rather than replacing it: nobody asks for it and means "and turn
             // the file's setting off".
@@ -281,6 +286,7 @@ mod tests {
             cwd: None,
             env: BTreeMap::new(),
             stop_on_entry: false,
+            adapter_command: None,
             source,
             unresolved: Vec::new(),
             blocked: None,

@@ -119,7 +119,7 @@ in the languages, not in lazydap: a signal is something the debugger sees
 whether or not anybody asked for it. Changing this means choosing exception
 filters on everyone's behalf; see D054's closing note.
 
-## 7. `console` must be `internalConsole`
+## 7. `console` must be `internalConsole`, and `python` pins the interpreter
 
 Any other value makes debugpy ask for a terminal with a `runInTerminal`
 reverse request that lazydap does not advertise, and sends the debuggee's
@@ -130,6 +130,16 @@ Likewise `subProcess: false`: following a subprocess means debugpy asking us to
 open a second debug session with `startDebugging`, and lazydap runs one session
 at a time (D007). Reverse requests are refused rather than ignored either way
 (D053) — this just avoids provoking them.
+
+A `launch.json` debugpy configuration also routinely names its interpreter, as
+`"python"` (a string, or a list whose head is the interpreter) or the older
+`"pythonPath"`. lazydap honours it: that pin is the entire point of a
+per-project virtualenv, since the named interpreter has the project's
+dependencies and the first one on `PATH` does not. It replaces discovery rather
+than seeding it, and is checked before the launch — an interpreter that is
+missing, or that cannot import debugpy, is an `AdapterNotFound` naming the
+configured path and the file that named it, not an adapter that mysteriously
+crashed on startup.
 
 ## 8. It will not send `initialized` until it has seen `launch`
 
@@ -161,13 +171,32 @@ request then trips the execution timeout, which lazydap correctly treats as a
 wedged adapter and kills the session over (D021/D022) — so the symptom is a
 dead session, ten seconds after a command that should have worked.
 
-**What lazydap does:** does not send it. See D055.
+**What lazydap does:** does not send it, deciding that atomically with the
+state transition so the pump cannot slip a stop between the two. See D055.
 
 `step` on a running program has the same shape and is *not* handled, because
 "step" has no reading that means "wait for whatever happens next". It remains a
 way to reach an adapter timeout on both adapters.
 
-## 10. Noisy events lazydap ignores
+## 10. It cleans up its own debuggee when the adapter dies
+
+Kill `debugpy.adapter` mid-session and the debuggee goes with it: the launcher
+notices the socket drop and stops the program. By the time lazydap's own reaper
+(D045) looks at the pid it recorded, the process is already gone.
+
+Worth knowing for two reasons. The reap is *belt-and-braces* for Python rather
+than the only thing between a user and an orphaned process, as it is for
+codelldb — and, less comfortably, an integration test that kills the adapter
+and then checks for survivors passes whether or not lazydap's reaping works at
+all. That check lives in `debuggee.rs`'s unit tests, against a real `python3
+script.py` process and a real `ps` line, where it can actually fail.
+
+The identity check itself needed fixing for this adapter: it compared what was
+launched against `ps` output as a *prefix*, which is true of codelldb (it execs
+the binary) and false of every Python debuggee (`python3 /path/to/main.py`).
+The path is now also matched as a whole argument anywhere in the command.
+
+## 11. Noisy events lazydap ignores
 
 `debugpySockets` (repeatedly, as internal ports open and close), `module` for
 every import, and `output` events with `category: "telemetry"` carrying
@@ -179,7 +208,7 @@ from `is_debuggee()`, so they do not reach `captured_output`. If that
 classification ever changed, every Python session would start with two lines of
 adapter branding in the program's output.
 
-## 11. `justMyCode` and the frames it hides
+## 12. `justMyCode` and the frames it hides
 
 Not a quirk so much as a default lazydap deliberately overrides — debugpy
 defaults it to `true`. See D054. The visible cost: the stack at a stop-on-entry
