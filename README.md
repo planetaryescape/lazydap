@@ -101,8 +101,6 @@ Six deliberate trade-offs. Each one has a defensible opposite, and a real tool t
 
 ## Install
 
-**Rust toolchain.** [rustup](https://rustup.rs/); the pinned channel comes from `rust-toolchain.toml` on first `cargo` invocation in the repo.
-
 **codelldb**, on `PATH`. Grab the `.vsix` for your platform from the [latest release](https://github.com/vadimcn/codelldb/releases/latest) (a `.vsix` is a renamed zip; VS Code is not involved):
 
 ```bash
@@ -126,7 +124,19 @@ codelldb --help      # --version is not a flag it knows
 
 Other platforms: `codelldb-linux-x64.vsix`, `codelldb-linux-arm64.vsix`, `codelldb-darwin-x64.vsix`.
 
-**lazydap itself**, from source:
+**lazydap itself**, by Homebrew:
+
+```bash
+brew install planetaryescape/lazydap/lazydap
+```
+
+Or by script, which reads `uname`, downloads the matching build, checks its SHA-256 **before** unpacking it, and puts the binary in `~/.local/bin` — `LAZYDAP_INSTALL_DIR` moves that, and nothing here uses `sudo`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/planetaryescape/lazydap/main/install.sh | bash
+```
+
+Or from source, which is the route on any platform outside the released builds — those cover macOS arm64 and x86_64 and Linux x86_64. Needs a [rustup](https://rustup.rs/) toolchain; the pinned channel comes from `rust-toolchain.toml` on the first `cargo` invocation in the repo:
 
 ```bash
 git clone https://github.com/planetaryescape/lazydap

@@ -281,8 +281,16 @@ If the user says `ship it`, run the full release flow:
    - **Git install**: `cargo install --git https://github.com/planetaryescape/lazydap
      --tag v{version} --locked --root "$(mktemp -d)" lazydap-daemon`, run
      `bin/lazydap version`.
-   - There is **no Homebrew tap and no install.sh yet** — do not claim them anywhere until
-     they exist (candidate milestone; mxr's release pipeline is the template).
+   - **install.sh**, with no version argument so it resolves the newest release for itself:
+     `LAZYDAP_INSTALL_DIR="$(mktemp -d)" ./install.sh`, then run `lazydap version` out of
+     that directory. It must report the new version, which also proves the release assets
+     and their `.sha256` files are both attached and agree.
+   - **Homebrew**: `brew update && brew install planetaryescape/lazydap/lazydap`, run
+     `lazydap version`, then `HOMEBREW_NO_AUTOREMOVE=1 brew uninstall lazydap`. Keep that
+     variable — a plain `brew uninstall` sweeps unrelated orphaned formulae off the
+     machine on its way out. If the workflow's `homebrew` job logged
+     `HOMEBREW_TAP_TOKEN not set; skipping tap update`, the tap still carries the previous
+     version and this channel has not shipped.
 7. One real debug session against the released tarball's binary: `break`, `launch`,
    `continue --wait` to a breakpoint, `disconnect`, `shutdown`, zero strays
    (`pgrep -x codelldb`, `pgrep -x lazydap`, and `pgrep -f` on the fixture path).

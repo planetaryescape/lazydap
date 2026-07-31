@@ -1,19 +1,19 @@
 ---
 title: Install lazydap
-description: Install codelldb and build lazydap from source, then check both with doctor.
+description: Install codelldb and lazydap by Homebrew, script or source, then check both with doctor.
 ---
 
 Install codelldb first, then lazydap, then run `lazydap doctor` to confirm each piece is
-where lazydap expects it. There are no published binaries yet, so lazydap is a `cargo
-install` from a clone.
+where lazydap expects it.
 
 ## Prerequisites
 
-A **Rust toolchain**, from [rustup](https://rustup.rs/). The pinned channel comes from
-`rust-toolchain.toml` on the first `cargo` command you run in the repository, so there is
-nothing to choose.
+macOS or Linux. Windows is not a target. Released builds cover macOS arm64 and x86_64 and
+Linux x86_64; anything else builds from source.
 
-macOS or Linux. Windows is not a target.
+Building from source needs a **Rust toolchain**, from [rustup](https://rustup.rs/). The
+pinned channel comes from `rust-toolchain.toml` on the first `cargo` command you run in the
+repository, so there is nothing to choose. Homebrew and the install script do not need it.
 
 ## 1. Install codelldb
 
@@ -61,13 +61,42 @@ update can wedge the binary, and the fix is a re-copy.
 
 ## 2. Install lazydap
 
+Whichever route you take, it installs one binary, `lazydap`. The daemon, the CLI and the TUI
+are all inside it.
+
+### Homebrew
+
+```bash
+brew install planetaryescape/lazydap/lazydap
+```
+
+The formula comes from the `planetaryescape/homebrew-lazydap` tap, which the release
+workflow updates as part of cutting a version.
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/planetaryescape/lazydap/main/install.sh | bash
+```
+
+It reads `uname`, downloads the matching release build, and checks its SHA-256 **before**
+unpacking it — a checksum checked afterwards only tells you what you already extracted. The
+binary lands in `~/.local/bin`; set `LAZYDAP_INSTALL_DIR` to put it somewhere else. Nothing
+in it uses `sudo`.
+
+Pass a tag to pin a version rather than take the newest:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/planetaryescape/lazydap/main/install.sh | bash -s -- v0.1.0
+```
+
+### From source
+
 ```bash
 git clone https://github.com/planetaryescape/lazydap
 cd lazydap
 cargo install --path crates/daemon
 ```
-
-That installs one binary, `lazydap`. The daemon, the CLI and the TUI are all inside it.
 
 ## 3. Check the pieces
 

@@ -208,7 +208,18 @@ jobs:
             echo
             echo "## Install"
             echo
-            echo "Download the archive for your platform below, verify it, then unpack it and put the binary on your \`PATH\`:"
+            echo "This downloads the right build for your platform, verifies it, and puts \`lazydap\` in \`~/.local/bin\`:"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG_NAME}/install.sh | bash"
+            echo '```'
+            echo
+            # No Homebrew line here. The tap lives in another repository and the
+            # job that updates it runs after this one, so anything written now
+            # would be a promise made before the thing it promises. That job
+            # appends the line itself, once the tap actually carries this
+            # version.
+            echo "Or by hand. Download the archive for your platform below, verify it, then unpack it and put the binary on your \`PATH\`:"
             echo
             echo '```bash'
             echo "shasum -a 256 -c lazydap-${VERSION}-<target>.tar.gz.sha256"
@@ -253,6 +264,132 @@ jobs:
               $PRERELEASE \
               dist/*
           fi
+
+  # The tap lives in another repository, so this is the one job in a release
+  # that can fail for reasons this repository does not control. It runs after
+  # the release exists, because a formula pointing at assets nobody can download
+  # yet is worse than a formula that lands a minute late.
+  homebrew:
+    name: Update the Homebrew tap
+    needs: publish
+    # Same reasoning as publish: a rehearsal pointed at a tag must not push a
+    # formula for a release it did not create.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The workflow's own concurrency group is keyed on the ref, which is right
+    # for gates and builds — two tags should build in parallel. It is wrong for
+    # a shared external repository: two releases in flight would each clone the
+    # tap, each see the state before the other, and race to push. The loser is
+    # either rejected non-fast-forward or, worse, wins and quietly puts the
+    # older formula back. This group is global, so tap updates queue instead.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Rendered before the token is checked, on purpose: a broken template or a
+      # missing checksum should fail a release even when there is no tap to push
+      # to, rather than lie dormant until the day the secret is added.
+      - name: Render the formula
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/render_homebrew_formula.sh "${TAG_NAME#v}" dist Formula/lazydap.rb
+          echo "--- Formula/lazydap.rb ---"
+          cat Formula/lazydap.rb
+
+      - name: Push it to the tap
+        id: tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Forks and rehearsals do not have the secret. Neither of them is a
+          # broken release, so say what is being skipped and stop.
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set; skipping tap update"
+            exit 0
+          fi
+
+          NEW_VERSION="${TAG_NAME#v}"
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/planetaryescape/homebrew-lazydap.git" tap
+
+          # What the tap serves right now. The concurrency group above keeps two
+          # releases from interleaving, but a job can also be re-run by hand long
+          # after a later version shipped, and that must not roll the tap back.
+          CURRENT_VERSION=""
+          if [ -f tap/Formula/lazydap.rb ]; then
+            CURRENT_VERSION="$(sed -n 's/^  version "\(.*\)"$/\1/p' tap/Formula/lazydap.rb)"
+          fi
+
+          if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$NEW_VERSION" ]; then
+            NEWEST="$(printf '%s\n%s\n' "$CURRENT_VERSION" "$NEW_VERSION" | sort -V | tail -n 1)"
+            if [ "$NEWEST" != "$NEW_VERSION" ]; then
+              echo "tap carries ${CURRENT_VERSION}, which is newer than ${NEW_VERSION}; refusing to downgrade it"
+              exit 0
+            fi
+          fi
+
+          mkdir -p tap/Formula
+          cp Formula/lazydap.rb tap/Formula/lazydap.rb
+
+          # --porcelain rather than `diff --quiet`, which sees nothing when the
+          # formula is new to the tap and would report the first push as a no-op.
+          if [ -z "$(git -C tap status --porcelain -- Formula/lazydap.rb)" ]; then
+            echo "tap already carries this formula; nothing to push"
+            echo "serving=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C tap add Formula/lazydap.rb
+          git -C tap commit -m "lazydap ${NEW_VERSION}"
+          git -C tap push origin HEAD:main
+          echo "serving=true" >> "$GITHUB_OUTPUT"
+
+      # Only now is the Homebrew line true, so only now is it written. If the
+      # step above skipped — no secret, or a newer formula already in the tap —
+      # the release notes never mention brew, and nobody is sent at an install
+      # command that would hand them the wrong version or none at all.
+      - name: Add the Homebrew line to the release notes
+        if: steps.tap.outputs.serving == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          LINE="brew install planetaryescape/lazydap/lazydap"
+
+          BODY="$(gh release view "$TAG_NAME" --json body -q .body)"
+          if printf '%s' "$BODY" | grep -qF "$LINE"; then
+            echo "release notes already carry the Homebrew line"
+            exit 0
+          fi
+
+          {
+            printf '%s\n' "$BODY"
+            echo
+            echo "### Homebrew"
+            echo
+            echo "The tap now serves this version:"
+            echo
+            echo '```bash'
+            echo "$LINE"
+            echo '```'
+          } > notes-with-brew.md
+
+          gh release edit "$TAG_NAME" --notes-file notes-with-brew.md
 
   # NOT DONE HERE: publishing to crates.io. Every crate carries
   # `publish = false`, which is the recorded default and matches mxr's stance.

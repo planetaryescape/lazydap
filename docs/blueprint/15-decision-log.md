@@ -890,3 +890,66 @@ about the wrong moment. Counting writes catches that; comparing states does not.
 before asking their real question. `stack_trace` and `variables` take one step and have no
 gap of their own. M16's watches made this reachable in ordinary use rather than only under
 contention: a stop fires one evaluation per expression, and they queue behind each other.
+
+## D060 — the Homebrew formula ships the release binary, and `install.sh` does not trust `releases/latest`
+
+**Status:** decided (2026-07-31, M21).
+
+**Why a binary formula.** `brew install` could build lazydap from source, and Homebrew would
+happily drive `cargo install` for it. That makes every user install a Rust toolchain and
+spend minutes recompiling something the release workflow already compiled on a native runner
+and checksummed. The formula points at the release tarball for the three targets we build —
+macOS arm64 and x86_64, Linux x86_64 — and Homebrew verifies the same SHA-256 the workflow
+published. Anything outside those three still builds from source, which is the honest answer
+rather than a formula that pretends to cover platforms with no build behind them.
+
+The formula states `version` explicitly instead of letting Homebrew scan it out of the URL.
+`brew audit --strict` calls that redundant and it is, for a release like `0.1.0`. It stops
+being redundant at the first prerelease: `lazydap-0.2.0-rc1-aarch64-apple-darwin.tar.gz` is
+not a filename to hand a version parser and hope. A cosmetic audit warning in a
+single-project tap is a smaller cost than a formula that installs the wrong version once.
+
+**Why `install.sh` resolves "latest" through the release list.** The obvious move is the
+`releases/latest` redirect, which is what mxr's installer does. It is wrong here for two
+independent reasons, and it was wrong on the day this was written: this repository also
+publishes `chapter-*` releases for the learn-by-LLM book, and product releases below 1.0 go
+out as prereleases, which that redirect skips. Asked on 2026-07-31 it answered
+`chapter-08` — a book chapter, not a debugger. The installer reads
+`/repos/{owner}/{repo}/releases` and takes the newest tag beginning `v` instead. It costs an
+API call against an unauthenticated rate limit, and a failure there names the fix: pass a
+version.
+
+**Two notions of prerelease, treated differently.** GitHub's prerelease *flag* is ignored
+when resolving `latest`: every `v0.*` release sets it deliberately, because a 0.x release is
+not a stability promise, so honouring it would leave `latest` finding nothing at all until
+v1.0. A semver prerelease *suffix* is skipped: somebody who named no version wants the
+newest release meant for them, not `v0.2.0-rc1`. Tags are `vX.Y.Z` or `vX.Y.Z-suffix`, so a
+hyphen is the whole test.
+
+**What the checksum proves, and what it does not.** The installer parses the `.sha256`
+manifest itself rather than handing it to `shasum -c`. `-c` lets the manifest choose which
+file gets checked, which makes the manifest — the untrusted half — the one deciding whether
+anything is verified at all; a manifest naming some other file passes while the archive is
+never hashed. So: exactly one entry, a 64-hex digest, and a filename that must equal the
+archive about to be installed; then hash the download directly and compare strings. Downloads
+are restricted to `https://` and `file://`, because over plain http the same attacker serves
+both the archive and the digest vouching for it.
+
+None of that is authenticity. The archive and its digest share an origin, and whoever
+controls that origin can serve a matching pair. Requiring https keeps a network attacker out
+of the origin; closing the rest needs a signature over the release, which is recorded as a
+follow-up in the M21 task file rather than pretended at here.
+
+**Consequences:** the tap (`planetaryescape/homebrew-lazydap`) is a second repository, so
+the release workflow's `homebrew` job needs a `HOMEBREW_TAP_TOKEN` secret it cannot create
+for itself. Without the secret the job renders the formula, logs that it is skipping the
+push, and succeeds — forks and rehearsals are not broken releases. The rendered formula is
+printed to the job log either way, which is also how the tap gets its first copy.
+
+Because the tap is shared state outside this repository, that job carries a global
+concurrency group rather than the workflow's per-ref one, and refuses to push when the tap
+already serves a newer version. Two releases in flight would otherwise race, and the loser
+could quietly put the older formula back. For the same reason the Homebrew line is appended
+to the release notes by that job *after* the push succeeds, rather than written into the
+notes the publish job builds: a release whose tap update skipped never mentions `brew`, so
+the notes cannot advertise an install command that would hand somebody the wrong version.
