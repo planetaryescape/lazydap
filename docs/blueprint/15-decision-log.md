@@ -321,6 +321,8 @@ v0.1 ships one adapter (D013). A trait with a single implementor does not abstra
 
 **Trigger to revisit:** M18, when debugpy gives us a second implementor and therefore a real basis for the interface. At that point this module becomes the trait plus `adapter-codelldb`, and `crates/adapter-*` appears in the boundary script.
 
+**Resolved at M18 — see D052.** The trait was written and the interface it landed on is narrower than this entry expected: the launch, and nothing after it. The second half of the trigger did not happen and should not — the adapters stayed *modules* inside `crates/daemon/src/adapter/` rather than becoming `crates/adapter-*`, because separate crates would buy nothing the module boundary and its `grep` do not already buy, and would spread `lazydap_dap` across more manifests to do it.
+
 **Alternatives considered:** the trait in `lazydap-core` now (core would have to name adapter concepts it otherwise knows nothing about, and the trait would be written blind); no seam at all (DAP types spread through the daemon, which is the anti-pattern that paid for this rule).
 
 ---
@@ -665,7 +667,7 @@ None outstanding. One question is parked for M15: whether to publish crates to c
 
 ## Decisions to revisit at v0.1 → v0.2 boundary
 
-- D013 (codelldb-only) → debugpy + js-debug + delve.
+- D013 (codelldb-only) → **debugpy landed at M18**; js-debug + delve still open.
 - D007 (single-session enforcement) → multi-session lift.
 - D023 (AI external) → re-evaluate. May want to ship a thin `lazydap-mcp` server crate as an officially-maintained client.
 
@@ -682,3 +684,55 @@ workflow has no publish job.
 
 **Revisit when:** someone asks to depend on `lazydap-protocol` or `lazydap-dap` as a
 library. That request is the signal the seams have become APIs.
+
+---
+
+## D052 — the `DebugAdapter` trait lives in the daemon's adapter module, not in `lazydap-core`
+
+**Status:** decided (2026-07-31, M18). **Completes D029.**
+
+**Why:** D029 deferred the trait until a second adapter existed, on the grounds that a trait with one implementor hides where the seam is rather than marking it. debugpy is that second adapter, so the trait is now written — and the question D029 left open is *where*.
+
+Not in `lazydap-core`. Every method on it speaks DAP: the `adapterID` for `initialize`, the adapter's `launch` arguments, the `reason` string on a `stopped` event. `lazydap-core` is depended on by every other crate, so putting the trait there would carry the DAP vocabulary into all of them — undoing the single thing this boundary exists to do (`ARCHITECTURE.md`, anti-pattern 4), and doing it in the name of the abstraction that was supposed to enforce it.
+
+So it lives in `crates/daemon/src/adapter/`, and the module boundary keeps doing the enforcing: `lazydap_dap` is imported nowhere else in the daemon, checked by `scripts/check_architecture_boundaries.sh`. Non-negotiable #5 — "the daemon depends on the `DebugAdapter` trait, not raw DAP messages" — is now literally true of `handlers::session`, which calls `adapter::launch` and never names an adapter.
+
+**Shape:** object-safe and synchronous. Starting an adapter is described as a `Spawn` value (`Tcp { command }` or `Stdio { program, args }`) rather than performed by the trait, so no method is `async` and nothing has to box a future — which is what lets `for_kind` return a `&'static dyn DebugAdapter` with no allocation and no `async-trait` dependency. It also makes the difference between the two adapters assertable in a unit test instead of only observable by running a process.
+
+**What is *not* in the trait:** everything after the launch. Stepping, stacks, scopes, variables, evaluation and breakpoints are specified precisely enough that both adapters answer them identically, and all of it stays in the one `AdapterHandle`. The trait is four required methods and two defaulted ones; if it grows, that is evidence of a real divergence, not of a missing abstraction.
+
+---
+
+## D053 — DAP transports are stdio as well as TCP, and reverse requests are refused rather than fatal
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** codelldb listens on a TCP port and announces it on stderr; debugpy speaks DAP over its own stdin and stdout and is not a binary at all (`python3 -m debugpy.adapter`). The framing is identical either way — `Content-Length` headers and a JSON body — so `DapReader`/`DapWriter` now hold boxed `AsyncRead`/`AsyncWrite` instead of TCP halves, and `DapTransport` offers `spawn_tcp` and `spawn_stdio`. Boxed rather than generic so that no type holding a transport grows a parameter it does nothing with; the cost is one virtual call per read of a stream already crossing a process boundary.
+
+**Reverse requests.** A message with `type: "request"` arriving *from* the adapter used to fall through `read_incoming`'s match into `TransportError::Dap`, which the pump reads as the adapter dying — so a question would have killed the session. There are two in the wild, `runInTerminal` and `startDebugging`, and lazydap advertises neither. Every launch it builds is also configured not to provoke them: codelldb gets `terminal: "console"`, debugpy gets `console: "internalConsole"` and `subProcess: false`.
+
+An adapter that asks anyway is now answered with `success: false` (`DapWriter::refuse`) in both the handshake and the pump. Silence is the worse failure: the adapter waits for a reply that never comes, the debuggee never starts, and the session dies at a timeout naming the wrong thing. A refusal it can read leaves it free to fall back or to fail in its own words.
+
+---
+
+## D054 — lazydap launches Python with `justMyCode: false`
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** debugpy defaults `justMyCode` to `true`, which hides library and standard-library frames from the stack and steps over them. That default is written for a human debugging their own application in an editor. lazydap's first-class caller is an agent asked why a program failed, and that failure is as likely to be in a dependency as in the project — a stack that silently omits where the program actually is makes it unfindable, and nothing in the output says frames were removed.
+
+**The cost, stated plainly:** the stack at a stop-on-entry pause includes debugpy's own `runpy` frames, because that is genuinely where the interpreter is. That is noise; a stack that lies is worse.
+
+**Related, and deliberately not decided here:** lazydap sends no `setExceptionBreakpoints` filters, so an uncaught Python exception is *not* a pause — the program exits non-zero with its traceback on stderr, exactly as it would unattended. codelldb's segfault case does pause, because a signal is something the debugger sees whether or not anybody asked. Making Python match would mean choosing exception filters for every caller, which is a bigger decision than M18 gets to make on its own. `crates/daemon/tests/wait_debugpy.rs` asserts the current behaviour so that changing it has to be deliberate.
+
+---
+
+## D055 — `continue` on a program that is already running is not sent to the adapter
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** found by running the agent loop against debugpy, not by reading code. `lazydap launch` without `--stop-on-entry` returns while the program runs; the natural next command is `continue --wait` to reach the first breakpoint, and it is what `launches run` does for any `launch.json` configuration that does not set `stopOnEntry`. codelldb acknowledges such a `continue` and nothing happens. debugpy does not answer it at all — there is no paused thread to resume — so the acknowledgement timeout fires, and `AdapterHandle::execute` correctly reads an unacknowledged execution request as a wedged adapter and kills the session (D021, D022).
+
+**What changes:** when the session is already `Running`, `continue` is not sent. What the caller wants is the next stable state, which `--wait` is already subscribed for; the subscription is taken before the decision, so a stop occurring meanwhile is still caught. On codelldb the observable outcome is unchanged, minus one request that could only ever have been a no-op.
+
+**Not changed:** `step` on a running program. It has no equivalent reading — "step" cannot mean "wait for whatever happens next" — and giving it one would be inventing behaviour rather than removing a redundant message. It remains a way to reach an adapter timeout, on both adapters.
