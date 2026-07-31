@@ -91,8 +91,8 @@ pub async fn launch(
     // must not do this: the process was somebody else's before we looked at
     // it, and killing it because our adapter crashed would destroy something
     // we never started (D045).
-    if let Some(pid) = launched.debuggee_pid {
-        session.set_debuggee(pid);
+    if let Some(started) = launched.debuggee {
+        session.set_debuggee(started);
     }
 
     session.seed_events(

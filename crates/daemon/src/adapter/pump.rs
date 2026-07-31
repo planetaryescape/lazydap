@@ -9,7 +9,7 @@
 //! reached through channels.
 
 use super::Pending;
-use super::handshake::{PumpStart, output_chunk, system_process_id};
+use super::handshake::{PumpStart, output_chunk, started_process};
 use crate::state::Session;
 use lazydap_core::{
     AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
@@ -81,8 +81,8 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
         // leave the session with no pid to reap (D045). `set_debuggee` keeps
         // the first answer, so both paths recording it is not two records.
         "process" => {
-            if let Some(pid) = system_process_id(&event) {
-                session.set_debuggee(pid);
+            if let Some(started) = started_process(&event) {
+                session.set_debuggee(started);
             }
         }
         "stopped" => {

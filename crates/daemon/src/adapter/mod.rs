@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 
-pub use handshake::{Launched, launch};
+pub use handshake::{Launched, StartedProcess, launch};
 pub use pump::spawn_pump;
 
 /// What one debug adapter does differently from another.
@@ -892,15 +892,17 @@ fn usable(kind: AdapterKind, command: &Path) -> Result<()> {
                 &["-c".into(), format!("import debugpy; print('{PROOF}')")],
                 |stdout| stdout.trim() == PROOF,
             );
-            answered.then_some(()).ok_or_else(|| AdapterError::Incomplete {
-                adapter: kind,
-                path: command.to_path_buf(),
-                problem: "it cannot import debugpy".to_string(),
-                hint: format!(
-                    "install it with `{} -m pip install debugpy`",
-                    command.display(),
-                ),
-            })
+            answered
+                .then_some(())
+                .ok_or_else(|| AdapterError::Incomplete {
+                    adapter: kind,
+                    path: command.to_path_buf(),
+                    problem: "it cannot import debugpy".to_string(),
+                    hint: format!(
+                        "install it with `{} -m pip install debugpy`",
+                        command.display(),
+                    ),
+                })
         }
         AdapterKind::Delve => {
             // `dlv help dap` rather than `dlv version`: the version is printed

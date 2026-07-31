@@ -436,20 +436,28 @@ impl Session {
     ///
     /// Only the first: codelldb prints its launch line once, and a later one
     /// would mean something we have no model for.
-    pub fn set_debuggee(&self, pid: u32) {
+    ///
+    /// The adapter's own word for *what* it started wins over what was
+    /// launched, when it gives one. Usually they are the same file; under
+    /// delve's `mode: "debug"` they are not, because the `.go` source was
+    /// compiled to a binary somewhere else, and the reaper matching on the
+    /// source path would decline to kill its own debuggee (D061).
+    pub fn set_debuggee(&self, started: crate::adapter::StartedProcess) {
         let mut held = lock(&self.debuggee);
         if held.is_some() {
             return;
         }
+        let program = started.program.unwrap_or_else(|| self.program.clone());
         tracing::debug!(
             target: "daemon.session",
             session_id = %self.id,
-            pid,
+            pid = started.pid,
+            program = %program.display(),
             "the adapter told us the debuggee's pid",
         );
         *held = Some(Debuggee {
-            pid,
-            program: self.program.clone(),
+            pid: started.pid,
+            program,
         });
     }
 
