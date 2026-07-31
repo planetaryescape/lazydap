@@ -685,6 +685,7 @@ workflow has no publish job.
 **Revisit when:** someone asks to depend on `lazydap-protocol` or `lazydap-dap` as a
 library. That request is the signal the seams have become APIs.
 
+
 ---
 
 ## D052 — the `DebugAdapter` trait lives in the daemon's adapter module, not in `lazydap-core`
@@ -740,3 +741,84 @@ An adapter that asks anyway is now answered with `success: false` (`DapWriter::r
 **Residual, stated rather than hidden:** a stop that lands before the handler runs at all is indistinguishable from a session that was simply paused when the caller typed `continue` — which is the ordinary, correct case. Such a `continue` resumes, and the wait may report the stop it did not cause. Telling those apart means deciding whether `--wait` should ever report a stop from before its own request, which is a wider question than D055.
 
 **Not changed:** `step` on a running program. It has no equivalent reading — "step" cannot mean "wait for whatever happens next" — and giving it one would be inventing behaviour rather than removing a redundant message. It remains a way to reach an adapter timeout, on both adapters.
+---
+
+## D056 — watches are project state with session-scoped values; protocol goes to v5
+
+**Status:** decided (2026-07-31, with M16).
+
+**Why the split.** A watch is two things with two different lifetimes, and keeping them
+apart is the whole design. The **expression** is the project's: it lives in
+`.lazydap/state.toml` beside the breakpoints, it exists before any session and it outlives
+the daemon and the machine. The **value** belongs to one stop — the moment the program
+moves, it describes somewhere the program has been. Persisting the second would be
+persisting a lie: a file saying `pos = 4` read back tomorrow claims it still is.
+
+So `Watch` is stored and `WatchValue` never is, and the TUI drops every value on
+`Continued`, `SessionEnded` and `DaemonGone` while keeping every expression. It is the same
+division `Breakpoint` makes against `AdapterBreakpoint` (D043), arrived at from the same
+direction.
+
+**Why the daemon does not evaluate.** `lazydap watch list` returns expressions, not values.
+The daemon stores; whoever wants a number asks for one with `Request::Eval`, which is what
+the TUI does at every stop and what `lazydap eval` already exposes. A `watch list` that
+evaluated would need a paused session to answer at all, which would make the one command
+that reads project state fail exactly when there is no session — the state it is for.
+
+**Why the protocol bumps.** `Request` is an externally-tagged `serde` enum with no
+fallback, so a variant an older daemon does not know does not fail *softly*: the whole
+`IpcMessage` fails to deserialise, and the daemon never reaches the `version` field it
+would have refused on. Verified against the real codec — the frame
+`{"version":4,"id":7,"payload":{"Request":"WatchList"}}` produces `unknown variant
+'WatchList', expected one of 'Ping', ...`, and `serve_client` answers `BadRequest` on id
+`0` and closes. The client filters replies by request id, so it discards that frame and
+reports "the daemon closed the connection before answering" with exit 3. The bump turns
+that into the `VersionMismatch` `ensure_daemon_running` already clears by restarting the
+daemon — the same reasoning as D032, D043 and D050, and the reason a "purely additive"
+variant is not additive here. `Shutdown` stays frozen and version-exempt regardless.
+
+**`Event::WatchUpdated` is project scope only.** `BreakpointUpdated` needs an
+`Option<SessionId>` because an adapter can hold an opinion about a breakpoint. Nothing
+installs a watch — there is no DAP request for one — so no session can have an opinion, and
+the event carries a `WatchId` and nothing else. What it means is D043's lesson applied
+before the bug rather than after it: "the list is not what you last read; read it again".
+An add and a removal arrive identically, and only the list tells them apart.
+
+**Consequences:** `WatchReport` has no `applied_to_session`, because there is nothing for a
+session to have been told. `lazydap watch` uses real subcommands rather than `break`'s
+flags: `break`'s add case carries a location and four modifiers and reads better without a
+verb, whereas a watch is an expression and nothing else.
+
+---
+
+## D057 — the REPL evaluates in `watch` context, and `/` reaches the adapter
+
+**Status:** decided (2026-07-31, with M17).
+
+**Why:** M17's own task file calls the REPL "the natural UX for raw adapter commands", which
+is true and is not the same as making that the default. D034 already established what
+`repl` context means to codelldb: the string goes to LLDB's *command* interpreter, so `x`
+on a program with an `int x = 5` runs `memory read` and fails on a missing address
+(quirk 7). A REPL pane whose most obvious possible input fails is not a REPL.
+
+So the pane sends `EvalContext::Watch` by default — the same context `lazydap eval` sends,
+for the same reason, so the pane and the subcommand cannot disagree about what typing an
+expression means. Adapter commands keep their place behind a `/` prefix: `/bt` is LLDB's
+`bt`. One character, and unambiguous, because no expression begins with a division.
+
+**Which frame.** The one the stack pane has selected, falling back to `None` — "the top
+frame", which the daemon resolves by fetching it fresh — whenever the stack on screen
+belongs to a stop the program has left. That keeps the REPL, the scopes pane and the
+watches pane all talking about the same function, which is also why selecting a caller
+frame re-evaluates the watches against it.
+
+**History is per-session.** It lives in the pane and dies with the process. The phase-E
+sketch left this open; persisting it is a config option for after v0.1, and a debugger that
+wrote every expression you tried into a file in your repository is a surprise nobody asked
+for.
+
+**Consequences:** while the cursor is in the REPL, `q` is a `q` and `c` is a `c` — the pane
+claims every key that could be part of an expression. The keys that move the *program* are
+all function keys, none of which can appear in an expression, so those still work while
+typing. `Esc` clears a half-typed line and then leaves the pane, because `q` cannot be the
+way out and a user who tabbed in should not have to already know about `Tab`.

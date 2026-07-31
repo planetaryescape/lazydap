@@ -35,7 +35,7 @@ use std::path::PathBuf;
 /// `lazydap shutdown` clears is a far better failure than a debugger that
 /// obeys the wrong configuration without saying so.
 ///
-/// v5 (M16, D052): the watch requests and [`Event::WatchUpdated`]. A new
+/// v5 (M16, D056): the watch requests and [`Event::WatchUpdated`]. A new
 /// `Request` variant is not additive in either direction — `Request` is an
 /// externally-tagged enum with no fallback, so an older daemon fails to
 /// deserialise the *whole envelope* and never reaches the `version` field it
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn a_request_variant_this_build_does_not_know_is_a_hard_decode_failure() {
         // This is the whole reason M16 bumped the protocol rather than adding
-        // variants quietly (D052). `Request` is externally tagged with no
+        // variants quietly (D056). `Request` is externally tagged with no
         // fallback, so an unknown variant does not fail *softly* — the whole
         // envelope fails to deserialise, which means the daemon never reaches
         // the `version` field it would have refused on. Two builds both
