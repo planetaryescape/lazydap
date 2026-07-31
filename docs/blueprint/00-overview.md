@@ -36,6 +36,33 @@ In rough priority order:
 
 lazydap is **not** for: people who already love their IDE debugger and are happy. Use what works for you.
 
+### The segment that actually needs this (strategic anchor, 2026-07-31)
+
+The list above is *who by interface*. This is *who by need*, and it is the sharper cut — it
+decides roadmap priority and positioning.
+
+Most developers ship most days without a debugger, and their agents can too: a print
+statement and a rerun genuinely cover a lot of work. lazydap would be *useful* to all of
+them; it is *aimed* at the minority for whom that loop breaks down and the work turns painful
+without a debugger:
+
+- **Manual memory management** — C, C++, Zig, unsafe Rust. Use-after-free and corruption,
+  where the crash site is not the bug site and the crash destroys its own evidence.
+- **The FFI boundary** — Python or Node calling a native extension. The segfault lives
+  *beneath* the interpreter; a print statement cannot cross the language boundary. lazydap's
+  codelldb + debugpy pairing serves exactly this seam.
+- **Races and timing** — bugs that adding a print statement makes disappear, because the
+  print changes the scheduling. Breakpoints and watchpoints perturb less.
+- **Release-only bugs** — where a printf costs a full rebuild and a breakpoint does not.
+- **Crash forensics** — the process is dying; the state must be read at the moment of death,
+  not logged before it.
+
+The strategic consequence: when a feature serves the checklist but not this segment, the
+segment wins. `attach` (debugging a live, misbehaving native process) serves it more than a
+fourth GC'd-language adapter does, and that is why `attach` precedes js-debug on the roadmap.
+The competitive audit ([`docs/research/2026-07-31-agent-debugger-landscape.md`](../research/2026-07-31-agent-debugger-landscape.md))
+found no one in the convergence cluster has `attach` at all.
+
 ## Principles
 
 These guide every decision. Ordered by precedence — when they conflict, top wins.
