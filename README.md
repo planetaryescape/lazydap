@@ -136,7 +136,7 @@ $ lazydap doctor --format json
   "checks": [
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (0 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v4", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v5", "name": "daemon", "ok": true }
   ],
   "ok": true
 }

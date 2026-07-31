@@ -206,6 +206,57 @@ Usage: lazydap break [OPTIONS] [FILE:LINE]
 | `--disabled` | no | `false` | Record it, but leave it switched off |
 | `--dry-run` | no | `false` | Report what would change, and change nothing |
 
+### `lazydap watch`
+
+*Also spelled:* `w`
+
+Add, list or remove watch expressions.
+
+Watches are project state, exactly as breakpoints are: they are remembered in `.lazydap/state.toml` and outlive the session, the daemon and the machine. What one *evaluates to* is not remembered — ask for that with `lazydap eval`, or watch the TUI's watches pane, which re-evaluates all of them every time the program stops.
+
+```
+Usage: lazydap watch [OPTIONS] <COMMAND>
+```
+
+
+#### `lazydap watch add`
+
+Watch an expression at every stop
+
+```
+Usage: lazydap watch add [OPTIONS] <EXPRESSION>
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `<EXPRESSION>` | yes | - | Handed to the adapter untouched. Quote it if it has spaces |
+| `--label <LABEL>` | no | - | Show this instead of the expression, when the expression is long |
+| `--dry-run` | no | `false` | Report what would change, and change nothing |
+
+#### `lazydap watch list`
+
+Show every watch in the project
+
+```
+Usage: lazydap watch list [OPTIONS]
+```
+
+
+#### `lazydap watch remove`
+
+Stop watching. Name the expression, or select by id
+
+```
+Usage: lazydap watch remove [OPTIONS] [EXPRESSION]
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `<EXPRESSION>` | no | - | The expression, matched whole |
+| `--id <ID>` | no | - | Select by id. Repeatable, and what `--format ids` output feeds |
+| `--all` | no | `false` | Remove every watch in the project |
+| `--dry-run` | no | `false` | Report what would change, and change nothing |
+
 ### `lazydap stack`
 
 Show the call stack of a paused program

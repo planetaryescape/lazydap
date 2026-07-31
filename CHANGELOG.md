@@ -4,7 +4,25 @@ All notable changes to lazydap are recorded here.
 
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The **lazydap protocol** is versioned separately from the binary. It is at **v4**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+The **lazydap protocol** is versioned separately from the binary. It is at **v5**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+
+## [Unreleased]
+
+### Added
+
+**Watch expressions.** `lazydap watch add <expression>`, `watch list` and `watch remove`, with `--dry-run` on both mutations and `--format ids` for piping. A watch is project state, recorded in `.lazydap/state.toml` beside your breakpoints: you can set one before anything is running, and it is still there after the daemon has gone. What it *evaluates to* is not recorded, because that is only true while the program is sitting still.
+
+**A watches pane in the TUI.** `Tab` reaches it, `a` adds an expression, `dd` removes the selected one. Every expression is re-evaluated each time the program stops, and again when you select a different stack frame — so the watches and the scopes pane are always talking about the same function. An expression that is out of scope keeps its row and shows the adapter's complaint, because the same expression is usually back in scope a few steps later.
+
+**A REPL pane in the TUI.** `Tab` reaches it, type an expression and press `<CR>`; the answer appears under the line that asked for it. It sends the same request `lazydap eval` sends, in the same `watch` context and for the same reason — `repl` context makes codelldb run an LLDB *command*, so `x` becomes a memory read rather than your variable. Adapter commands are still one keystroke away: a line starting with `/` goes to the adapter, so `/bt` is a backtrace. `<C-p>` and `<C-n>` walk the history, which lasts for the session.
+
+### Changed
+
+**Protocol v4 → v5.** The watch requests and the `WatchUpdated` event. A `Request` variant an older daemon does not know is not a soft failure — it cannot decode the frame at all, so it never reaches the version field it would have refused on. The bump turns "old daemon still running" into the `VersionMismatch` that `lazydap shutdown` clears and auto-spawn replaces.
+
+### Fixed
+
+**The TUI no longer writes its own log lines across its panes.** Every other command logs to stderr, which is right for one that prints and exits and wrong for the one that takes the terminal over. Its logs now go to the instance log file, which `lazydap logs` already reads.
 
 ## [0.1.0] — 2026-07-31
 
