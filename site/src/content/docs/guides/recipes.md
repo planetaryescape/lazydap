@@ -389,6 +389,55 @@ The config file is per user, never per project — project state lives in `.lazy
 Unknown keys are accepted and skipped, so only `[adapter.<name>] command` and
 `[general] wait_timeout_seconds` do anything in this build.
 
+## Trace a variable over time and find its peak
+
+**You want to know how a value evolves — where it peaks, when it drops — but the program never
+prints it.** Stopping at a breakpoint on every iteration would work and would be slow. A log
+point samples the value on every pass without pausing, so one `continue --wait` brings back
+the whole series.
+
+Given a loop whose body updates `v` on line 8:
+
+```console
+$ lazydap break signal.c:8 --log "i={i} v={v}" --format json
+$ lazydap launch ./signal --stop-on-entry --format json
+$ lazydap continue --wait --format json > run.json
+```
+
+The program runs to completion at full speed. Every sample is in the blob's
+`captured_output`, one interpolated line per pass:
+
+```json
+{ "category": "console", "output": "i=29 v=97.533029379599526\n", ... }
+{ "category": "console", "output": "i=30 v=100.90572645692235\n", ... }
+{ "category": "console", "output": "i=31 v=97.601712495361525\n", ... }
+```
+
+Extract and analyse with anything that reads JSON — here, the peak:
+
+```console
+$ jq -r '.captured_output[].output' run.json \
+    | grep -o 'i=[0-9]* v=[0-9.-]*' \
+    | sort -t= -k3 -g | tail -1
+i=30 v=100.90572645692235
+```
+
+Feed the same series to gnuplot, matplotlib, or a spreadsheet via `--format csv` thinking:
+the data is already structured, so charting is whatever tool you have. An agent can render
+the chart itself.
+
+A chunk of `captured_output` is not one line — fast loops batch many samples into one chunk,
+so split on newlines, not on chunks. Braces interpolate variables in the paused frame's
+scope; for expressions log points cannot express (struct fields through pointers, function
+calls), fall back to a breakpoint plus a `continue --wait` loop with `eval` at each stop —
+slower, but the expression runs with full debugger power.
+
+**If it fails:** an unverified log point (`"verified": false` before launch) binds during
+launch like any breakpoint — check `breakpoint_updates` in the first blob. No samples at all
+usually means the line is never reached: confirm with a plain breakpoint first. And if the
+series is truncated, check `output_truncated` in the blob — a chatty enough loop can overflow
+the buffer, in which case sample less often with `--condition "i % 10 == 0"`.
+
 ## Clean up after yourself
 
 **Breakpoints outlive sessions and daemons outlive commands.** Leaving both behind means the
