@@ -52,7 +52,9 @@ pub async fn scopes(
     frame_id: Option<i64>,
 ) -> Result<Response> {
     let session = paused_session(state, session_id)?;
+    let fence = session.stop_generation();
     let frame_id = resolve_frame(&session, frame_id).await?;
+    still_paused(&session, fence)?;
 
     let scopes = session
         .adapter()
@@ -87,10 +89,13 @@ pub async fn eval(
     context: EvalContext,
 ) -> Result<Response> {
     let session = paused_session(state, session_id)?;
+    // Taken beside the check, not after the await below it. See `still_paused`.
+    let fence = session.stop_generation();
     // An expression without a frame is evaluated in the global scope, where
     // none of the local variables the caller means exist. Defaulting to the
     // frame they are looking at is what they meant.
     let frame_id = Some(resolve_frame(&session, frame_id).await?);
+    still_paused(&session, fence)?;
 
     let result = session
         .adapter()
@@ -98,6 +103,40 @@ pub async fn eval(
         .await
         .map_err(AdapterError::into_ipc)?;
     Ok(Response::Evaluated(result))
+}
+
+/// Refuse unless the session is still sitting at the stop `fence` was taken at.
+///
+/// `paused_session` is a check, not a hold — nothing here owns the session's
+/// state, and another client is free to `continue` while this handler is
+/// awaiting the adapter. A handler that reads a paused program in two steps
+/// therefore has a window between them, and what falls into it is not
+/// harmless: the second request reaches a *running* program, which answers
+/// with values from wherever it has got to, or more often does not answer at
+/// all until the adapter's own timeout fires ten seconds later. Neither reads
+/// as "you asked about a program that is no longer stopped".
+///
+/// Comparing the generation rather than only re-reading the state is what makes
+/// resume-and-stop-again fail too: that is a *different* stop, every frame id
+/// resolved a moment ago addresses nothing in it, and answering would be the
+/// right shape of reply about the wrong moment.
+fn still_paused(session: &Arc<Session>, fence: u64) -> Result<()> {
+    if session.still_at(fence) {
+        return Ok(());
+    }
+    tracing::debug!(
+        target: "daemon.session",
+        session_id = %session.id,
+        fence,
+        now = session.stop_generation(),
+        state = session.state().as_str(),
+        "the program moved while this request was being prepared",
+    );
+    Err(IpcError::new(
+        ErrorCode::SessionNotPaused,
+        "the program resumed while this request was being prepared; \
+         it is no longer stopped where the request was about",
+    ))
 }
 
 /// Debuggee output the daemon buffered, without asking the adapter anything.

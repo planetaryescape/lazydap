@@ -38,6 +38,12 @@ impl TextInput {
         self.value.push(c);
     }
 
+    /// Append pasted text, which arrives whole rather than a character at a
+    /// time.
+    pub fn push_str(&mut self, text: &str) {
+        self.value.push_str(text);
+    }
+
     /// Delete the last *character*, not the last byte.
     ///
     /// `String::truncate` on `len() - 1` panics on anything non-ASCII, and an

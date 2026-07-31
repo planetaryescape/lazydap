@@ -120,6 +120,21 @@ pub struct AppState {
     /// own id rather than its position: the scrollback is trimmed from the
     /// front, so a position is not a stable name for an entry.
     pub(crate) pending_repl: BTreeMap<u64, u64>,
+    /// The `WatchList` currently in flight, if there is one.
+    ///
+    /// At most one, ever. A local mutation is answered *and* announced — the
+    /// daemon tells every subscriber, including the client that asked — so
+    /// removing three watches used to produce four full refreshes, each one
+    /// re-evaluating every remaining expression, all queued to the single
+    /// adapter ahead of whatever `continue` the user pressed next.
+    pub(crate) pending_watch_list: Option<u64>,
+    /// Whether something asked for the list while one was already in flight.
+    ///
+    /// Consumed when that one lands, which collapses any number of overlapping
+    /// announcements into exactly one more request — and still cannot miss a
+    /// change, because the flag is only cleared by a fetch that started after
+    /// the change was seen.
+    pub(crate) watch_list_dirty: bool,
     /// Whether the daemon is reachable, and how the attempts to get it back
     /// are going (M19).
     pub(crate) connection: Connection,

@@ -81,6 +81,33 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// What a watch removal did: the ones that went, and the ids that matched
+/// nothing.
+///
+/// One value rather than two calls, because the two have to be decided under
+/// the same lock — see [`ProjectStore::remove_watches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    pub watches: Vec<Watch>,
+    pub not_found: Vec<WatchId>,
+}
+
+/// Which of the ids a selector named matched nothing.
+///
+/// Only meaningful for an id selector: every other kind describes a set, and a
+/// set that turns out to be empty is an answer rather than a mistake.
+fn unmatched(selector: &WatchSelector, picked: &[Watch]) -> Vec<WatchId> {
+    let WatchSelector::Ids(asked) = selector else {
+        return Vec::new();
+    };
+    let found: Vec<WatchId> = picked.iter().map(|watch| watch.id).collect();
+    asked
+        .iter()
+        .filter(|id| !found.contains(id))
+        .copied()
+        .collect()
+}
+
 /// One project's persisted state, cached in memory.
 pub struct ProjectStore {
     root: PathBuf,
@@ -294,13 +321,18 @@ impl ProjectStore {
         lock(&self.state).watches.clone()
     }
 
-    /// Which watches a selector picks out.
+    /// Which watches a selector picks out, and which of the ids it named
+    /// matched nothing.
     ///
     /// The one place watch selection is decided, so `--dry-run` and the real
-    /// removal cannot drift apart (non-negotiable #4). Both call this.
-    pub fn select_watches(&self, selector: &WatchSelector) -> Vec<Watch> {
+    /// removal cannot drift apart (non-negotiable #4). Both call this — the
+    /// preview directly, the removal through [`Self::remove_watches`], which
+    /// runs it inside the lock it mutates under.
+    pub fn select_watches(&self, selector: &WatchSelector) -> (Vec<Watch>, Vec<WatchId>) {
         let state = lock(&self.state);
-        selector.pick(&state.watches)
+        let picked = selector.pick(&state.watches);
+        let not_found = unmatched(selector, &picked);
+        (picked, not_found)
     }
 
     /// Add a watch, or return the existing one with that expression.
@@ -336,11 +368,26 @@ impl ProjectStore {
     }
 
     /// Remove every watch the selector picks. Returns what went.
-    pub fn remove_watches(&self, selector: &WatchSelector) -> Vec<Watch> {
+    /// Remove every watch the selector picks, and say what it did *not* find.
+    ///
+    /// Both under one lock, and that is the point. Selecting in one lock and
+    /// mutating in another lets two clients removing the same id both see it
+    /// there: the winner removes it, and the loser removes nothing while
+    /// reporting an empty `not_found` — success, for work it did not do. A
+    /// caller that piped ids in would be told every one of them was removed by
+    /// whichever call happened to lose.
+    pub fn remove_watches(&self, selector: &WatchSelector) -> Removed {
         let mut state = lock(&self.state);
         let doomed = selector.pick(&state.watches);
+        // Derived from what this call is actually about to remove, not from a
+        // snapshot somebody else may already have changed.
+        let not_found = unmatched(selector, &doomed);
+
         if doomed.is_empty() {
-            return doomed;
+            return Removed {
+                watches: doomed,
+                not_found,
+            };
         }
 
         let removing: Vec<WatchId> = doomed.iter().map(|watch| watch.id).collect();
@@ -348,7 +395,10 @@ impl ProjectStore {
         drop(state);
 
         self.touch();
-        doomed
+        Removed {
+            watches: doomed,
+            not_found,
+        }
     }
 
     /// Write now, whatever the debounce window says. Called on daemon
@@ -843,8 +893,33 @@ mod tests {
         let doomed = store.add_watch(new_watch("b"));
 
         let removed = store.remove_watches(&WatchSelector::Ids(vec![doomed.id]));
-        assert_eq!(removed, vec![doomed]);
+        assert_eq!(removed.watches, vec![doomed]);
+        assert!(removed.not_found.is_empty());
         assert_eq!(store.watches().len(), 1);
+    }
+
+    #[test]
+    fn a_removal_reports_what_it_removed_rather_than_what_it_once_saw() {
+        // Two clients racing on the same id. Selecting in one lock and
+        // mutating in another let both see it there: the winner removed it,
+        // and the loser removed nothing while reporting an empty `not_found` —
+        // success, for work it did not do.
+        let project = TempProject::new("watch-race");
+        let store = project.store();
+        let doomed = store.add_watch(new_watch("a"));
+        let selector = WatchSelector::Ids(vec![doomed.id]);
+
+        let winner = store.remove_watches(&selector);
+        assert_eq!(winner.watches, vec![doomed.clone()]);
+        assert!(winner.not_found.is_empty());
+
+        let loser = store.remove_watches(&selector);
+        assert!(loser.watches.is_empty(), "it removed nothing");
+        assert_eq!(
+            loser.not_found,
+            vec![doomed.id],
+            "and says so, rather than reporting a removal it did not make",
+        );
     }
 
     #[test]
@@ -857,11 +932,12 @@ mod tests {
         store.add_watch(new_watch("b"));
 
         let selector = WatchSelector::Expression("b".to_string());
-        let previewed = store.select_watches(&selector);
+        let (previewed, previewed_missing) = store.select_watches(&selector);
         assert_eq!(store.watches().len(), 2, "a preview changes nothing");
 
         let removed = store.remove_watches(&selector);
-        assert_eq!(previewed, removed);
+        assert_eq!(previewed, removed.watches);
+        assert_eq!(previewed_missing, removed.not_found);
     }
 
     #[test]

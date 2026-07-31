@@ -21,7 +21,7 @@
 
 use crate::msg::{Cmd, Msg};
 use crate::panes::input::TextInput;
-use crate::panes::repl::{self, ReplOutput};
+use crate::panes::repl::{self, ReplOutput, ReplView};
 use crate::panes::source::SourceView;
 use crate::state::{
     AppState, Connection, Focus, Location, Modal, PendingExpansion, PendingWatch, SessionSnapshot,
@@ -86,6 +86,7 @@ pub fn update(state: AppState, msg: Msg) -> (AppState, Cmd) {
         // well as presses. Acting on all three turns one keystroke into three.
         Msg::Key(key) if key.kind != KeyEventKind::Press => (state, Cmd::None),
         Msg::Key(key) => key_press(state, key),
+        Msg::Paste(text) => (pasted(state, &text), Cmd::None),
         Msg::DaemonEvent(event) => daemon_event(state, event),
         Msg::DaemonResponse { id, response } => {
             tracing::debug!(target: "tui.ipc", id, "the daemon answered");
@@ -117,7 +118,12 @@ fn connected(mut state: AppState) -> (AppState, Cmd) {
     // Breakpoints and watches are project state, not session state: they are
     // worth drawing whether or not anything is running.
     let breakpoints = send(&mut state, Request::BreakpointList);
-    let watches = send(&mut state, Request::WatchList);
+    // A reconnection re-runs these opening moves, so any list left in flight
+    // belongs to the connection that has gone. Forgetting it is what stops the
+    // new one being coalesced away against a reply that can never arrive.
+    state.pending_watch_list = None;
+    state.watch_list_dirty = false;
+    let watches = request_watch_list(&mut state);
     (state, Cmd::Batch(vec![subscribe, breakpoints, watches]))
 }
 
@@ -128,6 +134,36 @@ fn connected(mut state: AppState) -> (AppState, Cmd) {
 fn send(state: &mut AppState, request: Request) -> Cmd {
     let id = state.next_request_id();
     Cmd::SendIpc { id, request }
+}
+
+/// Ask for the project's watch list — at most one request at a time.
+///
+/// Every `WatchList` goes through here, and the reason is amplification. A
+/// mutation this TUI makes comes back twice: once as the answer to the request,
+/// and once as the `WatchUpdated` the daemon broadcasts to every subscriber
+/// (this one included). Each arrival used to ask for the whole list again, and
+/// each list answer re-evaluates every expression — so removing three watches
+/// cost four refreshes and four rounds of evaluation, every one of them queued
+/// to the single adapter (non-negotiable 6) ahead of the `continue` the user
+/// pressed next. On a program with a few watches that is a visible stall.
+///
+/// Coalescing is safe because the answer is a *snapshot*, not a delta: one
+/// fetch that starts after the last change sees all of them. The dirty flag is
+/// what guarantees the fetch starts after — an announcement landing while a
+/// request is in flight sets it, and the reply consumes it by asking once more.
+fn request_watch_list(state: &mut AppState) -> Cmd {
+    if state.pending_watch_list.is_some() {
+        // One already on the way. It may have been sent before the change this
+        // is about, so remember to ask again rather than dropping it.
+        state.watch_list_dirty = true;
+        return Cmd::None;
+    }
+    let id = state.next_request_id();
+    state.pending_watch_list = Some(id);
+    Cmd::SendIpc {
+        id,
+        request: Request::WatchList,
+    }
 }
 
 fn key_press(mut state: AppState, key: KeyEvent) -> (AppState, Cmd) {
@@ -143,24 +179,34 @@ fn key_press(mut state: AppState, key: KeyEvent) -> (AppState, Cmd) {
     let awaiting_d = std::mem::take(&mut state.awaiting_d);
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // A chord is not the keystroke it is built from. Without this every
+    // character binding below fired on its control form too, so `Ctrl-C` — the
+    // most reflexive key on a terminal — sent a `Continue` and resumed the
+    // debuggee. `Shift` is deliberately not disqualifying: `G` arrives with it.
+    let plain = !control
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SUPER);
 
     // The REPL is the other place text is typed, and unlike the modal it is a
     // pane rather than an overlay: the keys that move the *program* still work
     // while the cursor sits in it. They are all function keys, which is what
     // makes that possible — none of them can be part of an expression.
-    if state.focus.is_typing() && repl_claims(key, control) {
+    if state.focus.is_typing() && repl_claims(key) {
         return repl_key(state, key, control);
     }
 
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return (state, Cmd::Quit),
+        KeyCode::Char('q') if plain => return (state, Cmd::Quit),
+        KeyCode::Esc => return (state, Cmd::Quit),
 
         // Moving the program. Each of these is the request behind a
         // subcommand: F5 is `lazydap continue`, F10 is `lazydap step`, F11 is
         // `step-in`, shift-F11 is `step-out`. Same daemon, same request, same
         // outcome — which is the rule, not a coincidence (non-negotiable 2).
-        KeyCode::F(5) | KeyCode::Char('c') => return execute(state, Movement::Continue),
-        KeyCode::F(10) | KeyCode::Char('n') => {
+        KeyCode::F(5) => return execute(state, Movement::Continue),
+        KeyCode::Char('c') if plain => return execute(state, Movement::Continue),
+        KeyCode::F(10) => return execute(state, Movement::Step(StepKind::Over)),
+        KeyCode::Char('n') if plain => {
             return execute(state, Movement::Step(StepKind::Over));
         }
         KeyCode::F(11) if shift => return execute(state, Movement::Step(StepKind::Out)),
@@ -172,17 +218,19 @@ fn key_press(mut state: AppState, key: KeyEvent) -> (AppState, Cmd) {
 
         // Toggling a breakpoint on the line under the cursor, which only the
         // source pane has (M14).
-        KeyCode::Char('b') if state.focus == Focus::Source => return toggle_breakpoint(state),
+        KeyCode::Char('b') if plain && state.focus == Focus::Source => {
+            return toggle_breakpoint(state);
+        }
 
         // Adding and removing watches, which only the watches pane has (M16).
-        KeyCode::Char('a') if state.focus == Focus::Watches => {
+        KeyCode::Char('a') if plain && state.focus == Focus::Watches => {
             state.modal = Some(Modal::AddWatch(TextInput::default()));
             return (state, Cmd::None);
         }
-        KeyCode::Char('d') if awaiting_d && state.focus == Focus::Watches => {
+        KeyCode::Char('d') if plain && awaiting_d && state.focus == Focus::Watches => {
             return remove_watch(state);
         }
-        KeyCode::Char('d') if !control && state.focus == Focus::Watches => {
+        KeyCode::Char('d') if plain && state.focus == Focus::Watches => {
             state.awaiting_d = true;
             return (state, Cmd::None);
         }
@@ -190,11 +238,13 @@ fn key_press(mut state: AppState, key: KeyEvent) -> (AppState, Cmd) {
         KeyCode::Enter => return enter(state),
 
         // Moving within the focused pane.
-        KeyCode::Char('j') | KeyCode::Down => return (moved(state, 1), Cmd::None),
-        KeyCode::Char('k') | KeyCode::Up => return (moved(state, -1), Cmd::None),
-        KeyCode::Char('g') if awaiting_g => with_source(&mut state, SourceView::go_to_top),
-        KeyCode::Char('g') => state.awaiting_g = true,
-        KeyCode::Char('G') => with_source(&mut state, SourceView::go_to_bottom),
+        KeyCode::Down => return (moved(state, 1), Cmd::None),
+        KeyCode::Up => return (moved(state, -1), Cmd::None),
+        KeyCode::Char('j') if plain => return (moved(state, 1), Cmd::None),
+        KeyCode::Char('k') if plain => return (moved(state, -1), Cmd::None),
+        KeyCode::Char('g') if plain && awaiting_g => with_source(&mut state, SourceView::go_to_top),
+        KeyCode::Char('g') if plain => state.awaiting_g = true,
+        KeyCode::Char('G') if plain => with_source(&mut state, SourceView::go_to_bottom),
         KeyCode::Char('d') if control => with_source(&mut state, |s| s.move_cursor(s.half_page())),
         KeyCode::Char('u') if control => with_source(&mut state, |s| s.move_cursor(-s.half_page())),
         _ => {}
@@ -232,6 +282,39 @@ fn enter(state: AppState) -> (AppState, Cmd) {
     }
 }
 
+/// Pasted text goes to whatever is being typed into, and nowhere else.
+///
+/// **It is never a command.** A paste that reached the key handling would be
+/// read as the keystrokes it looks like, which is the whole bug: `counter\nc`
+/// pasted into the add-watch prompt submits on the newline and then continues
+/// the program on the `c`. Outside an input context there is nothing sensible
+/// for a paste to mean, so it is dropped rather than guessed at.
+///
+/// **Newlines are stripped rather than submitting.** Both places this can land
+/// hold a single expression, so a multi-line paste is either an accident or
+/// somebody pasting a wrapped line — and joining it is recoverable, whereas
+/// submitting the first line and evaluating the rest is not. `<CR>` stays the
+/// only thing that submits, which is also what makes "paste, then read it
+/// before pressing enter" possible.
+fn pasted(mut state: AppState, text: &str) -> AppState {
+    let text: String = text.split(['\n', '\r']).collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return state;
+    }
+
+    match state.modal.as_mut() {
+        Some(Modal::AddWatch(input)) => input.push_str(&text),
+        None if state.focus.is_typing() => state.repl.push_str(&text),
+        None => {
+            tracing::debug!(
+                target: "tui.input",
+                "dropping a paste: nothing on screen is taking text",
+            );
+        }
+    }
+    state
+}
+
 /// Whether a key means a character rather than a command, with the cursor in
 /// the REPL (M17).
 ///
@@ -241,17 +324,15 @@ fn enter(state: AppState) -> (AppState, Cmd) {
 /// halfway through typing `counter`. What is *not* claimed falls through, so
 /// F5 still continues and `Tab` still leaves: those are all function keys, and
 /// none of them can appear in an expression.
-fn repl_claims(key: KeyEvent, control: bool) -> bool {
-    match key.code {
-        // The history keys, which is why `<C-p>` is not free for anything else
-        // in this pane.
-        KeyCode::Char('p') | KeyCode::Char('n') if control => true,
-        // Every other control chord falls through: `<C-d>` and `<C-u>` scroll
-        // the source pane, and cannot be typed into an expression.
-        KeyCode::Char(_) if control => false,
-        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter | KeyCode::Esc => true,
-        _ => false,
-    }
+fn repl_claims(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        // Every `Char`, chorded or not. An input context swallows the lot
+        // rather than letting an allowlist decide which chords are safe to pass
+        // on: the allowlist is what let `Ctrl-C` through to resume the program,
+        // and any future binding would have to remember to join it.
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter | KeyCode::Esc
+    )
 }
 
 /// Handle a key [`repl_claims`] said belongs to the prompt.
@@ -259,6 +340,14 @@ fn repl_key(mut state: AppState, key: KeyEvent, control: bool) -> (AppState, Cmd
     match key.code {
         KeyCode::Char('p') if control => state.repl.previous(),
         KeyCode::Char('n') if control => state.repl.next(),
+        // The one every terminal user presses to mean "stop what you are
+        // typing". It cannot mean "interrupt the program" here — nothing in
+        // lazydap interrupts a debuggee from the keyboard — so clearing the
+        // line is the meaning closest to what a shell does with it.
+        KeyCode::Char('c') if control => state.repl.clear_input(),
+        // Any other chord: consumed and ignored. Better a key that does
+        // nothing in a text field than one that reaches past it.
+        KeyCode::Char(_) if control => {}
         KeyCode::Char(c) => state.repl.push_char(c),
         KeyCode::Backspace => state.repl.backspace(),
         KeyCode::Enter => return submit_repl(state),
@@ -394,6 +483,7 @@ fn remove_watch(mut state: AppState) -> (AppState, Cmd) {
 /// characters here.
 fn modal_key(mut state: AppState, modal: Modal, key: KeyEvent) -> (AppState, Cmd) {
     let Modal::AddWatch(mut input) = modal;
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
     match key.code {
         KeyCode::Esc => return (state, Cmd::None),
@@ -406,6 +496,12 @@ fn modal_key(mut state: AppState, modal: Modal, key: KeyEvent) -> (AppState, Cmd
             return add_watch(state, input.take());
         }
         KeyCode::Backspace => input.backspace(),
+        // The same meaning it has in the REPL, so the two prompts do not need
+        // to be learned separately.
+        KeyCode::Char('c') if control => input.clear(),
+        // Any other chord is consumed, not typed: without this `Ctrl-C` pushed
+        // a literal `c` into the expression.
+        KeyCode::Char(_) if control => {}
         KeyCode::Char(c) => input.push(c),
         _ => {}
     }
@@ -713,7 +809,7 @@ fn daemon_event(mut state: AppState, event: Event) -> (AppState, Cmd) {
     // only honest response is to read the list again — an add and a removal
     // arrive identically, and only the list distinguishes them (D043).
     if let Event::WatchUpdated { .. } = &event {
-        let cmd = send(&mut state, Request::WatchList);
+        let cmd = request_watch_list(&mut state);
         return (state, cmd);
     }
 
@@ -728,6 +824,21 @@ fn daemon_event(mut state: AppState, event: Event) -> (AppState, Cmd) {
 
     match event {
         Event::SessionStarted { session_id, .. } => {
+            // A *different* program. The REPL's history and scrollback are
+            // per-session by decision (D057), and carrying them over breaks
+            // that in the way that matters: `<C-p>` in a fresh debuggee
+            // recalling the last one's expressions offers to evaluate names
+            // that mean something else here, or nothing at all.
+            //
+            // Guarded on the id rather than done unconditionally, because a
+            // `SessionStarted` for the session already being followed is a
+            // re-announcement, not a new program.
+            let same = state.session.as_ref().map(|session| session.id) == Some(session_id);
+            if !same {
+                state.repl = ReplView::default();
+                state.pending_repl.clear();
+            }
+
             state.session = Some(SessionSnapshot {
                 id: session_id,
                 state: SessionState::Running,
@@ -965,10 +1076,30 @@ fn daemon_response(mut state: AppState, id: u64, response: Response) -> (AppStat
         // without either having to be reconstructed.
         Response::Watches(report) if !report.dry_run => {
             if report.action != WatchAction::Listed {
-                let cmd = send(&mut state, Request::WatchList);
+                // The mutation this TUI just made. The daemon will also
+                // announce it, and both arrivals go through the same funnel —
+                // which is what stops N removals costing N+1 refreshes.
+                let cmd = request_watch_list(&mut state);
                 return (state, cmd);
             }
+
+            if state.pending_watch_list != Some(id) {
+                // A list this TUI is no longer waiting on: two were in flight
+                // across a reconnection, or this is the older of them.
+                tracing::debug!(target: "tui.ipc", id, "dropping a superseded watch list");
+                return (state, Cmd::None);
+            }
+            state.pending_watch_list = None;
             state.watches.replace(report.watches);
+
+            // Something changed while this was in flight, so the snapshot just
+            // applied may already be out of date. Exactly one more request,
+            // however many announcements arrived.
+            if std::mem::take(&mut state.watch_list_dirty) {
+                let refresh = request_watch_list(&mut state);
+                return (state, refresh);
+            }
+
             // A watch added mid-session should show a value now rather than at
             // the next stop, which could be minutes away.
             let cmd = evaluate_watches(&mut state);
@@ -1187,6 +1318,13 @@ fn daemon_failed(mut state: AppState, id: u64, message: String) -> (AppState, Cm
     if let Some(entry) = state.pending_repl.remove(&id) {
         state.repl.answer(entry, ReplOutput::Error(message));
         return (state, Cmd::None);
+    }
+
+    // A refused list must not leave the funnel closed: nothing else would ever
+    // get through, and the pane would stop tracking the project for the rest of
+    // the session.
+    if state.pending_watch_list == Some(id) {
+        state.pending_watch_list = None;
     }
 
     state.notice = Some(message);
@@ -3553,14 +3691,32 @@ mod tests {
     fn with_watches() -> (AppState, SessionId) {
         let (state, session_id) = paused(20);
         let (state, _) = answer_stack(state, stack_trace(FILE, 19));
-        let (state, _) = answer(
-            state,
-            watch_report(
-                WatchAction::Listed,
-                vec![watch(1, "counter"), watch(2, "tokens[pos]")],
-            ),
-        );
+        let (state, _) =
+            deliver_watch_list(state, vec![watch(1, "counter"), watch(2, "tokens[pos]")]);
         (state, session_id)
+    }
+
+    /// Answer the `WatchList` the state is waiting on.
+    ///
+    /// The id matters: only one list is ever in flight, and an answer that is
+    /// not the one being waited on is dropped — which is the whole of the
+    /// coalescing rule.
+    fn deliver_watch_list(
+        mut state: AppState,
+        watches: Vec<lazydap_core::Watch>,
+    ) -> (AppState, Cmd) {
+        let id = state.pending_watch_list.unwrap_or_else(|| {
+            // Nothing outstanding: ask first, exactly as the reducer would.
+            let cmd = request_watch_list(&mut state);
+            request_id(&cmd)
+        });
+        update(
+            state,
+            Msg::DaemonResponse {
+                id,
+                response: Box::new(watch_report(WatchAction::Listed, watches)),
+            },
+        )
     }
 
     fn focus_watches(state: AppState) -> AppState {
@@ -3974,16 +4130,13 @@ mod tests {
     fn a_watch_added_mid_session_is_evaluated_at_once_rather_than_at_the_next_stop() {
         // Which could be minutes away, or never.
         let (state, _) = with_watches();
-        let (_, cmd) = answer(
+        let (_, cmd) = deliver_watch_list(
             state,
-            watch_report(
-                WatchAction::Listed,
-                vec![
-                    watch(1, "counter"),
-                    watch(2, "tokens[pos]"),
-                    watch(3, "pos"),
-                ],
-            ),
+            vec![
+                watch(1, "counter"),
+                watch(2, "tokens[pos]"),
+                watch(3, "pos"),
+            ],
         );
 
         let evaluated: Vec<Request> = requests(&cmd)
@@ -4014,10 +4167,7 @@ mod tests {
         let (state, cmd) = update(AppState::default(), Msg::Connected);
         assert!(requests(&cmd).contains(&Request::WatchList));
 
-        let (state, cmd) = answer(
-            state,
-            watch_report(WatchAction::Listed, vec![watch(1, "x")]),
-        );
+        let (state, cmd) = deliver_watch_list(state, vec![watch(1, "x")]);
         assert_eq!(state.watches.watches().len(), 1);
         assert_eq!(
             cmd,
@@ -4233,6 +4383,224 @@ mod tests {
             ReplOutput::Error("the daemon went away".to_string()),
             "an entry left saying `…` reads as a pane that has stopped working",
         );
+    }
+
+    // --- The review round's findings ---------------------------------------
+
+    #[test]
+    fn removing_three_watches_costs_one_refresh_rather_than_four() {
+        // Amplification: a mutation this TUI makes comes back twice — as the
+        // answer, and as the `WatchUpdated` the daemon broadcasts to every
+        // subscriber including this one. Each arrival used to ask for the whole
+        // list, and each list re-evaluates every expression, all queued to the
+        // single adapter ahead of whatever the user pressed next.
+        let (mut state, _) = with_watches();
+        let mut lists = 0;
+
+        // Three removals answered, and three announcements, interleaved as they
+        // would really arrive.
+        for _ in 0..3 {
+            let (next, cmd) = answer(
+                state,
+                watch_report(WatchAction::Removed, vec![watch(9, "gone")]),
+            );
+            lists += requests(&cmd)
+                .iter()
+                .filter(|r| **r == Request::WatchList)
+                .count();
+            let (next, cmd) = update(
+                next,
+                Msg::DaemonEvent(Event::WatchUpdated {
+                    watch_id: lazydap_core::WatchId(9),
+                }),
+            );
+            lists += requests(&cmd)
+                .iter()
+                .filter(|r| **r == Request::WatchList)
+                .count();
+            state = next;
+        }
+
+        assert_eq!(
+            lists, 1,
+            "one request in flight; the other five arrivals set the dirty flag",
+        );
+
+        // And the one still owed is asked for exactly once when that lands.
+        let (state, cmd) = deliver_watch_list(state, vec![watch(1, "counter")]);
+        let refreshes = requests(&cmd)
+            .iter()
+            .filter(|r| **r == Request::WatchList)
+            .count();
+        assert_eq!(
+            refreshes, 1,
+            "the dirty flag is consumed once, not six times"
+        );
+        assert!(!state.watch_list_dirty, "and cleared");
+    }
+
+    #[test]
+    fn a_refused_watch_list_does_not_wedge_the_funnel_shut() {
+        let (state, _) = with_watches();
+        let (state, cmd) = update(
+            state,
+            Msg::DaemonEvent(Event::WatchUpdated {
+                watch_id: lazydap_core::WatchId(1),
+            }),
+        );
+        let id = request_id(&cmd);
+
+        let (state, _) = update(
+            state,
+            Msg::DaemonFailed {
+                id,
+                error: IpcError::new(ErrorCode::DaemonInternalError, "no"),
+            },
+        );
+
+        assert_eq!(state.pending_watch_list, None);
+        let (_, cmd) = update(
+            state,
+            Msg::DaemonEvent(Event::WatchUpdated {
+                watch_id: lazydap_core::WatchId(1),
+            }),
+        );
+        assert_eq!(
+            one_request(&cmd),
+            Request::WatchList,
+            "the next change still gets through",
+        );
+    }
+
+    #[test]
+    fn control_c_in_the_repl_clears_the_line_and_does_not_continue_the_program() {
+        // The reflex key on a terminal. Every character binding used to fire on
+        // its control form too, so this resumed the debuggee.
+        let (state, _) = with_watches();
+        let state = focus_repl(state);
+        let state = type_in(state, "counter");
+
+        let (state, cmd) = press_control(state, KeyCode::Char('c'));
+
+        assert_eq!(cmd, Cmd::None, "no request at all, least of all a Continue");
+        assert_eq!(state.repl.input(), "", "it clears what was being typed");
+    }
+
+    #[test]
+    fn control_c_outside_an_input_context_is_not_a_continue_either() {
+        let (state, _) = with_watches();
+        let (_, cmd) = press_control(state, KeyCode::Char('c'));
+
+        assert_eq!(
+            cmd,
+            Cmd::None,
+            "a chord is not the keystroke it is built from"
+        );
+    }
+
+    #[test]
+    fn control_c_in_the_add_watch_prompt_clears_it_rather_than_typing_a_c() {
+        let (state, _) = with_watches();
+        let state = focus_watches(state);
+        let (state, _) = press(state, KeyCode::Char('a'));
+        let state = type_in(state, "counter");
+
+        let (state, cmd) = press_control(state, KeyCode::Char('c'));
+
+        assert_eq!(cmd, Cmd::None);
+        match state.modal.as_ref() {
+            Some(Modal::AddWatch(input)) => assert_eq!(input.as_str(), ""),
+            other => unreachable!("the prompt is still open, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pasted_expression_is_typed_rather_than_obeyed() {
+        // Without bracketed paste this arrives as keystrokes: the newline
+        // submits `counter` and the `c` after it continues the debuggee.
+        let (state, _) = with_watches();
+        let state = focus_watches(state);
+        let (state, _) = press(state, KeyCode::Char('a'));
+
+        let (state, cmd) = update(state, Msg::Paste("counter\nc".to_string()));
+
+        assert_eq!(cmd, Cmd::None, "a paste is never a command");
+        match state.modal.as_ref() {
+            Some(Modal::AddWatch(input)) => assert_eq!(
+                input.as_str(),
+                "counter c",
+                "joined onto one line, and nothing submitted",
+            ),
+            other => unreachable!("the prompt is still open, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_paste_into_the_repl_lands_on_the_prompt_without_submitting() {
+        let (state, _) = with_watches();
+        let state = focus_repl(state);
+
+        let (state, cmd) = update(state, Msg::Paste("total * 10\n".to_string()));
+
+        assert_eq!(cmd, Cmd::None);
+        assert_eq!(state.repl.input(), "total * 10 ");
+        assert!(
+            state.repl.entries().is_empty(),
+            "`<CR>` is still the only thing that submits",
+        );
+    }
+
+    #[test]
+    fn a_paste_with_nothing_taking_text_is_dropped() {
+        let (state, _) = with_watches();
+        let (state, cmd) = update(state, Msg::Paste("c".to_string()));
+
+        assert_eq!(cmd, Cmd::None, "and above all not a Continue");
+        assert!(state.modal.is_none());
+    }
+
+    #[test]
+    fn a_new_session_starts_the_repl_over() {
+        // The history is per-session by decision (D057). Carried over, `<C-p>`
+        // in a fresh debuggee offers the last one's expressions — names that
+        // mean something else here, or nothing at all.
+        let (state, _) = with_watches();
+        let state = focus_repl(state);
+        let state = type_in(state, "counter");
+        let (state, _) = press(state, KeyCode::Enter);
+        assert_eq!(state.repl.entries().len(), 1);
+
+        let (state, _) = update(
+            state,
+            Msg::DaemonEvent(Event::SessionStarted {
+                session_id: SessionId::new(),
+                adapter: AdapterKind::Codelldb,
+            }),
+        );
+
+        assert!(state.repl.entries().is_empty(), "the scrollback went");
+        let (state, _) = press_control(state, KeyCode::Char('p'));
+        assert_eq!(state.repl.input(), "", "and so did the history");
+    }
+
+    #[test]
+    fn a_re_announced_session_keeps_the_repl_it_already_had() {
+        // A `SessionStarted` for the session already being followed is a
+        // re-announcement, not a new program.
+        let (state, session_id) = with_watches();
+        let state = focus_repl(state);
+        let state = type_in(state, "counter");
+        let (state, _) = press(state, KeyCode::Enter);
+
+        let (state, _) = update(
+            state,
+            Msg::DaemonEvent(Event::SessionStarted {
+                session_id,
+                adapter: AdapterKind::Codelldb,
+            }),
+        );
+
+        assert_eq!(state.repl.entries().len(), 1, "nothing was thrown away");
     }
 
     #[test]

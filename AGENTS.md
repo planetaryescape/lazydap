@@ -272,7 +272,7 @@ end to end against a C binary. What exists today:
 - **All five formats:** `table`, `json`, `jsonl`, `csv`, `ids`, auto-detected from the tty.
 - **A real daemon:** per-project instance, auto-spawns on first use, Unix socket with length-delimited JSON, one debug session at a time (D007), a per-session read pump, and events buffered per session.
 - **Persistent breakpoints** in `.lazydap/state.toml` (D006), applied during each launch's configuration phase and surviving both the session and the daemon.
-- **Persistent watch expressions**, in the same file and with the same discipline (D052). `lazydap watch add/list/remove` sets them without a session; the TUI's watches pane re-evaluates every one of them at each stop, and again when you select another frame. Only the *expressions* are stored — a value belongs to one stop, and a file claiming `pos = 4` tomorrow would be lying.
+- **Persistent watch expressions**, in the same file and with the same discipline (D056). `lazydap watch add/list/remove` sets them without a session; the TUI's watches pane re-evaluates every one of them at each stop, and again when you select another frame. Only the *expressions* are stored — a value belongs to one stop, and a file claiming `pos = 4` tomorrow would be lying.
 - **The agent skill**, `lazydap.skill` at the repository root, built by `scripts/build-skill.sh` from `skill/`.
 - **Two adapter normalisations you should know about:** `--stop-on-entry` reports `reason: "entry"` with the adapter's `"exception"` kept in `raw_reason` (D033), and `eval` defaults to the `watch` context because `repl` runs an LLDB *command* (D034). Both are in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md).
 - **`Subscribe` and live event streaming.** A subscribed connection is pushed event frames as they happen, filtered to the kinds it asked for, interleaved with its own replies. It is answered with a `Response::Status` snapshot taken at the moment the stream starts, and replays nothing (D038).
@@ -283,7 +283,7 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
 
-Note the protocol is at **v5** (D052: the watch requests and `Event::WatchUpdated` — a
+Note the protocol is at **v5** (D056: the watch requests and `Event::WatchUpdated` — a
 `Request` variant an older daemon does not know cannot be decoded at all, so it never
 reaches the version field it would have refused on; v4 was D050, `LaunchRequest` carrying
 the adapter binary the *client* resolved, because the daemon's environment is not the

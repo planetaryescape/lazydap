@@ -94,6 +94,12 @@ impl ReplView {
         self.history_cursor = None;
     }
 
+    /// Append pasted text. Never submits — see [`crate::update`]'s `pasted`.
+    pub fn push_str(&mut self, text: &str) {
+        self.input.push_str(text);
+        self.history_cursor = None;
+    }
+
     pub fn backspace(&mut self) {
         self.input.backspace();
         self.history_cursor = None;

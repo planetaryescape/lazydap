@@ -822,3 +822,71 @@ claims every key that could be part of an expression. The keys that move the *pr
 all function keys, none of which can appear in an expression, so those still work while
 typing. `Esc` clears a half-typed line and then leaves the pane, because `q` cannot be the
 way out and a user who tabbed in should not have to already know about `Tab`.
+
+---
+
+## D058 — an input context swallows every chord, and a paste is never a command
+
+**Status:** decided (2026-07-31, review round after M16/M17).
+
+**Why:** two ways the TUI could be made to run a debug command by somebody who was only
+typing, both found by review of the panes M16 and M17 added.
+
+**Modifiers were not part of a binding.** The reducer matched on `KeyCode::Char('c')` and
+nothing else, so every character binding fired on its control form too: `Ctrl-C` — the most
+reflexive key on a terminal, and what a person presses to mean "stop" — sent a `Continue`
+and resumed the debuggee. A binding is now a *plain* key: no control, no alt, no super.
+`Shift` is deliberately still allowed, because `G` arrives with it.
+
+**Chords inside a text field are consumed there, not passed on.** The first version let
+`Ctrl-D` and `Ctrl-U` fall through from the REPL to scroll the source pane, which meant an
+allowlist decided which chords were safe to leak — and the allowlist is exactly what let
+`Ctrl-C` through. An input context now claims every `Char`, chorded or not. `Ctrl-C` clears
+the line, in both the REPL and the add-watch prompt, because that is the meaning a shell
+gives it and nothing in lazydap interrupts a debuggee from the keyboard. Any other chord is
+consumed and ignored: a key that does nothing in a text field is better than one that
+reaches past it.
+
+**A paste is not the keystrokes it resembles.** Without bracketed paste the terminal
+delivers pasted text as ordinary key events, so pasting `counter\nc` into the add-watch
+prompt submitted `counter` on the newline and then handed the `c` to the global bindings,
+which continued the program. Bracketed paste is now enabled for the life of the TUI and
+disabled on the way out — leaving it on would have the user's shell receiving `\x1b[200~`
+around everything they paste afterwards. A terminal that refuses it is not a reason to fail
+to start; it only means pastes arrive as keystrokes, as they always did.
+
+**Newlines in a paste are stripped, not obeyed.** Both places a paste can land hold a
+single expression, so a multi-line paste is either an accident or a wrapped line. Joining
+it onto one line is recoverable and visible before `<CR>`; submitting the first line and
+evaluating the remainder is neither. `<CR>` stays the only thing that submits. A paste
+arriving when nothing is taking text is dropped, because there is nothing sensible for it
+to mean and guessing is how this class of bug starts.
+
+---
+
+## D059 — a read of a paused program is fenced against it resuming underneath
+
+**Status:** decided (2026-07-31, review round after M16/M17).
+
+**Why:** `paused_session` is a check, not a hold. Nothing in the daemon owns a session's
+state for the length of a request, and the inspection handlers that need a frame do two
+awaits: resolve the frame, then ask the adapter the real question. Another client calling
+`continue` in the gap — a second terminal, or the TUI's own F5 — leaves the second request
+arriving at a *running* program. What comes back is either values from wherever it has got
+to, or nothing at all until the adapter's own timeout fires ten seconds later. Neither reads
+as "you asked about a program that is no longer stopped", which is what happened.
+
+Each session now counts the writes to its state. A handler samples that counter beside its
+pause check and re-verifies it immediately before the request it actually wanted to make;
+a mismatch is `SessionNotPaused`. This is D040's discipline — number the thing, drop what
+has been overtaken — applied daemon-side rather than in the TUI's reducer.
+
+**Why a counter rather than re-reading the state.** A program that resumed and stopped again
+is *paused*, so re-reading would say yes. It is a different stop: every frame id resolved a
+moment earlier addresses nothing in it, and answering would be the right shape of reply
+about the wrong moment. Counting writes catches that; comparing states does not.
+
+**Consequences:** applied to `eval` and `scopes`, the two handlers that resolve a frame
+before asking their real question. `stack_trace` and `variables` take one step and have no
+gap of their own. M16's watches made this reachable in ordinary use rather than only under
+contention: a stop fires one evaluation per expression, and they queue behind each other.

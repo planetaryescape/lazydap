@@ -24,19 +24,22 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 pub struct WatchesView {
     watches: Vec<Watch>,
-    /// What each expression came to at the stop [`Self::generation`] names.
-    /// Missing means "not answered yet", which is drawn as pending.
-    values: BTreeMap<WatchId, WatchValue>,
+    /// What each expression came to, and *which round it came from*.
+    ///
+    /// The round is stored per value rather than as one flag for the pane, and
+    /// that is load-bearing. A new round keeps the previous round's numbers on
+    /// screen — clearing them would make the pane blink empty on every step —
+    /// so "has this answered yet" cannot be `contains_key`: every stale entry
+    /// answers yes. A single `stale` flag cleared once every key was present
+    /// therefore un-dimmed the whole pane as soon as the *first* fresh result
+    /// landed, showing the previous stop's values as though they were current.
+    ///
+    /// Missing means "never answered"; present with an older round means "this
+    /// is where the program was".
+    values: BTreeMap<WatchId, Answer>,
     /// Index into [`Self::watches`].
     selected: usize,
-    /// Whether the values describe where the program is now.
-    ///
-    /// Set the moment a new stop is reported, cleared as answers arrive. In
-    /// between, the numbers on screen are the previous stop's — still worth
-    /// drawing, because clearing them would make the pane blink empty on every
-    /// step, but drawn dimmed so nobody reads them as current.
-    stale: bool,
-    /// Which round of evaluation the values belong to.
+    /// Which round of evaluation is being waited on.
     ///
     /// Every batch of watch evaluations takes a new one, and an answer carrying
     /// an older one is dropped. Without it, selecting a caller frame and then
@@ -46,6 +49,13 @@ pub struct WatchesView {
     generation: u64,
     viewport_height: usize,
     top: usize,
+}
+
+/// One answer, and the round it was computed for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Answer {
+    round: u64,
+    value: WatchValue,
 }
 
 impl WatchesView {
@@ -78,13 +88,13 @@ impl WatchesView {
         self.generation
     }
 
-    /// Begin a new round of evaluation, marking what is on screen as describing
-    /// where the program *was*.
+    /// Begin a new round of evaluation.
     ///
-    /// Returns the generation the answers must carry to be applied.
+    /// Nothing is cleared: what is on screen stays, and becomes "the previous
+    /// round" by virtue of the generation moving past it. Returns the
+    /// generation the answers must carry to be applied.
     pub fn begin_round(&mut self) -> u64 {
         self.generation += 1;
-        self.stale = true;
         self.generation
     }
 
@@ -94,13 +104,13 @@ impl WatchesView {
         if generation != self.generation {
             return false;
         }
-        self.values.insert(id, value);
-        // Stale until every expression in the round has answered. Clearing on
-        // the first would un-dim the ones still showing the previous stop.
-        self.stale = !self
-            .watches
-            .iter()
-            .all(|watch| self.values.contains_key(&watch.id));
+        self.values.insert(
+            id,
+            Answer {
+                round: generation,
+                value,
+            },
+        );
         true
     }
 
@@ -111,17 +121,27 @@ impl WatchesView {
     /// program was sitting still.
     pub fn forget_values(&mut self) {
         self.values.clear();
-        self.stale = false;
         // A round nobody can answer any more. Bumping it means a reply that
         // arrives after a reconnection cannot land on the cleared pane.
         self.generation += 1;
+    }
+
+    /// Whether this watch's value was computed for the round now being shown.
+    ///
+    /// `false` covers both "never answered" and "answered, but for a stop the
+    /// program has left" — which are drawn differently but are equally not
+    /// current.
+    pub fn is_current(&self, id: WatchId) -> bool {
+        self.values
+            .get(&id)
+            .is_some_and(|answer| answer.round == self.generation)
     }
 
     /// The pane draws from its own map, so this exists to let the reducer's
     /// tests assert on what an answer did without reaching inside.
     #[cfg(test)]
     pub fn value(&self, id: WatchId) -> Option<&WatchValue> {
-        self.values.get(&id)
+        self.values.get(&id).map(|answer| &answer.value)
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -183,19 +203,24 @@ impl WatchesView {
             }
         }
 
-        let value = self.values.get(&watch.id);
-        // Dimmed when it belongs to a stop the program has left, so a number
-        // that is no longer true does not read as one that is.
-        let value_style = match (self.stale, value) {
-            (_, None) => style.fg(Color::DarkGray),
-            (true, _) => style.fg(Color::DarkGray),
-            (false, Some(value)) if value.is_error() => style.fg(Color::Red),
-            (false, Some(_)) => style,
+        let answer = self.values.get(&watch.id);
+        // Decided per value, against the round now being waited on. A pane-wide
+        // flag cannot do this: the rows answer at different moments, so between
+        // the first result and the last one some are current and some are the
+        // previous stop's, and only the round each carries says which.
+        let value_style = match answer {
+            None => style.fg(Color::DarkGray),
+            // A number from a stop the program has left, dimmed so it does not
+            // read as one that is still true. Asked of `is_current` rather than
+            // compared here, so the rule has one definition.
+            Some(_) if !self.is_current(watch.id) => style.fg(Color::DarkGray),
+            Some(answer) if answer.value.is_error() => style.fg(Color::Red),
+            Some(_) => style,
         };
 
         Line::from(vec![
             Span::styled(format!("{} = ", watch.display_name()), style),
-            Span::styled(describe(value), value_style),
+            Span::styled(describe(answer.map(|answer| &answer.value)), value_style),
         ])
     }
 }
@@ -321,6 +346,39 @@ mod tests {
             view.value(WatchId(1)),
             Some(&value("fresh", None)),
             "and the current one lands",
+        );
+    }
+
+    #[test]
+    fn one_fresh_result_does_not_make_the_rest_of_the_round_look_current() {
+        // The bug this guards: a new round keeps the previous round's numbers,
+        // so "has it answered" cannot be asked of the map — every stale entry
+        // says yes. Deciding completeness that way un-dimmed the whole pane the
+        // moment the *first* fresh result landed, presenting the previous
+        // stop's values as current.
+        let mut view = two();
+        let first = view.begin_round();
+        view.record(first, WatchId(1), value("1", None));
+        view.record(first, WatchId(2), value("2", None));
+        assert!(view.is_current(WatchId(1)) && view.is_current(WatchId(2)));
+
+        // A second round: one answers, the other has not yet.
+        let second = view.begin_round();
+        assert!(!view.is_current(WatchId(1)), "a new round is not current");
+        assert!(!view.is_current(WatchId(2)));
+
+        view.record(second, WatchId(1), value("10", None));
+
+        assert!(view.is_current(WatchId(1)), "the one that answered is");
+        assert!(
+            !view.is_current(WatchId(2)),
+            "and the one still in flight must stay dimmed, showing the \
+             previous stop's value rather than claiming to be this stop's",
+        );
+        assert_eq!(
+            view.value(WatchId(2)),
+            Some(&value("2", None)),
+            "its previous number is still drawn, just not as current",
         );
     }
 

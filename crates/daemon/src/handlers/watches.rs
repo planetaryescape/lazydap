@@ -35,7 +35,7 @@ pub fn add(state: &Arc<DaemonState>, new: NewWatch, dry_run: bool) -> Result<Res
         // select until the watch exists. It looks the expression up instead,
         // which is the same key `add` dedupes on, so a preview of an add that
         // would be a no-op correctly shows the watch already there.
-        let existing = state
+        let (existing, _) = state
             .store
             .select_watches(&WatchSelector::Expression(new.expression.clone()));
         let previewed = existing.into_iter().next().unwrap_or(Watch {
@@ -71,10 +71,8 @@ pub fn remove(
     selector: WatchSelector,
     dry_run: bool,
 ) -> Result<Response> {
-    let picked = state.store.select_watches(&selector);
-    let not_found = missing(&selector, &picked);
-
     if dry_run {
+        let (picked, not_found) = state.store.select_watches(&selector);
         return Ok(Response::Watches(WatchReport {
             action: WatchAction::Removed,
             dry_run: true,
@@ -83,16 +81,21 @@ pub fn remove(
         }));
     }
 
+    // Selection and mutation under one lock, with `not_found` derived from what
+    // this call actually removed. Selecting first and mutating after let two
+    // clients removing the same id both see it there: the winner removed it,
+    // and the loser removed nothing while reporting an empty `not_found` —
+    // success, for work it did not do.
     let removed = state.store.remove_watches(&selector);
-    announce(state, &removed);
+    announce(state, &removed.watches);
 
     Ok(Response::Watches(WatchReport {
         action: WatchAction::Removed,
         dry_run: false,
         // Deliberately what was removed, not what is left: a caller that piped
         // ids in wants to know which of them went.
-        watches: removed,
-        not_found,
+        watches: removed.watches,
+        not_found: removed.not_found,
     }))
 }
 
@@ -106,22 +109,6 @@ fn announce(state: &Arc<DaemonState>, changed: &[Watch]) {
     for watch in changed {
         state.emit_project(Event::WatchUpdated { watch_id: watch.id });
     }
-}
-
-/// Which of the ids a selector named matched nothing.
-///
-/// Only meaningful for an id selector: every other kind describes a set, and a
-/// set that turns out to be empty is an answer rather than a mistake.
-fn missing(selector: &WatchSelector, picked: &[Watch]) -> Vec<WatchId> {
-    let WatchSelector::Ids(asked) = selector else {
-        return Vec::new();
-    };
-    let found: Vec<WatchId> = picked.iter().map(|watch| watch.id).collect();
-    asked
-        .iter()
-        .filter(|id| !found.contains(id))
-        .copied()
-        .collect()
 }
 
 #[cfg(test)]
