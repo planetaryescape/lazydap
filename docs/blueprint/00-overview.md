@@ -63,6 +63,38 @@ fourth GC'd-language adapter does, and that is why `attach` precedes js-debug on
 The competitive audit ([`docs/research/2026-07-31-agent-debugger-landscape.md`](../research/2026-07-31-agent-debugger-landscape.md))
 found no one in the convergence cluster has `attach` at all.
 
+### Why the segment is the beachhead and not the ceiling (2026-07-31)
+
+The segment above is *who wins unconditionally*. It is not the whole market, and the reason
+is friction, not need. Most developers skip the debugger not because a print statement tells
+them more, but because the debugger costs ceremony a print does not: a launch config,
+breakpoints set by hand, the commands remembered, the context-switch out of the editor. print
+costs one line where you already are.
+
+Driven by an agent, that ceremony collapses. The human action becomes *ask*, and at that
+price the debugger wins the comparison it used to lose: one `continue --wait` returns strictly
+more than a print — stop reason, frame, locals, and every line the program emitted — for the
+same one sentence. Log points are the sharpest proof: `break --log "x={x}"` is the print
+workflow itself, with none of print's cost (no edit, no rebuild, structured output, works on
+a release binary). lazydap does print-debugging better *and* adds the breakpoint workflow on
+top, from the same ask.
+
+Two disciplines keep this from becoming a generic pitch:
+
+1. **It is not free, and the honest claim is stronger for admitting it.** The remaining costs
+   print does not have are latency (spawn daemon, adapter, session), tokens (the agent runs
+   several commands), and **install** (the adapter is still a setup step; print needs none).
+   The claim is *same effort, strictly more information*, not *no cost*. Install is the one
+   friction lazydap has not yet removed — which is why distribution (`brew`, `install.sh`,
+   M21) is on the critical path, not a nicety.
+2. **Lead with the segment, not with friction.** "Frictionless debugging for everyone" fails
+   the differentiation test — no competitor claims they make debugging hard, and Cursor
+   undercuts it directly by removing the debugger entirely (log-instrumentation, even less
+   friction). Friction-removal is only defensible when it is concrete: *one sentence in, one
+   complete answer out, no polling, no MCP host* — which is the wait-blob contract wearing a
+   friction label. So: the segment is the beachhead that converts without persuasion; the
+   friction collapse is the wedge that pulls the adjacent market behind it.
+
 ## Principles
 
 These guide every decision. Ordered by precedence — when they conflict, top wins.
