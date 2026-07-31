@@ -127,11 +127,32 @@ enum Identity {
 
 /// Whether a `ps` command line is the program at `path`.
 ///
-/// Compared as a prefix rather than for equality: the debuggee's arguments
-/// follow its path, and a program launched with arguments is still ours.
+/// Two shapes have to match, because two adapters start programs differently:
+///
+/// - **The program is the command.** codelldb execs the binary, so `ps` shows
+///   `/tmp/spins --loud`. A prefix match covers it: the debuggee's arguments
+///   follow its path, and a program launched with arguments is still ours.
+/// - **The program is an argument.** debugpy runs a script under an
+///   interpreter, so `ps` shows `/opt/homebrew/bin/python3 /tmp/main.py`. The
+///   path we launched is in there, but not at the front.
+///
+/// So the path is also looked for as a **whole token** anywhere in the command.
+/// Whole-token, not substring: `/tmp/spins-other` contains `/tmp/spins`, and
+/// killing it would be killing a stranger — which is the failure this check
+/// exists to prevent, and is worse than the leak it exists to fix.
+///
+/// A path containing a space cannot be found this way, since `ps` gives no way
+/// to tell that space from an argument separator. The prefix match still
+/// covers the codelldb shape for such a path; the interpreter shape falls
+/// through to "not ours" and leaks, which is the safe direction to be wrong in.
 fn owns(command: &str, path: &Path) -> bool {
     let program = path.to_string_lossy();
-    command == program || command.starts_with(&format!("{program} "))
+    if command == program || command.starts_with(&format!("{program} ")) {
+        return true;
+    }
+    command
+        .split_whitespace()
+        .any(|argument| argument == program)
 }
 
 /// `kill -9`, through the command rather than a `libc` call.
@@ -169,6 +190,36 @@ mod tests {
         assert!(!owns("/usr/bin/vim", Path::new("/tmp/spins")));
     }
 
+    /// The debugpy shape. Without this, adapter death classifies every Python
+    /// debuggee as somebody else's process and orphans it — the exact bug D045
+    /// exists to prevent, reintroduced by the second adapter.
+    #[test]
+    fn a_script_run_under_an_interpreter_is_ours() {
+        // Captured from `ps -o command=` for a real debugpy session.
+        assert!(owns(
+            "/opt/homebrew/bin/python3 /tmp/py-fixtures/spins.py",
+            Path::new("/tmp/py-fixtures/spins.py"),
+        ));
+        // And with arguments on both sides of it.
+        assert!(owns(
+            "/usr/bin/python3 -X frozen_modules=off /tmp/main.py --loud",
+            Path::new("/tmp/main.py"),
+        ));
+    }
+
+    #[test]
+    fn an_interpreter_running_a_different_script_is_not_ours() {
+        assert!(!owns(
+            "/opt/homebrew/bin/python3 /tmp/somebody-elses.py",
+            Path::new("/tmp/main.py"),
+        ));
+        // Substring, not a whole argument: `/tmp/main.py.bak` is another file.
+        assert!(!owns(
+            "/opt/homebrew/bin/python3 /tmp/main.py.bak",
+            Path::new("/tmp/main.py"),
+        ));
+    }
+
     #[tokio::test]
     async fn a_pid_that_is_not_running_is_left_alone() {
         // Pid 0 is never a user process, so `ps` finds nothing for it.
@@ -187,6 +238,50 @@ mod tests {
             program: PathBuf::from("/tmp/definitely-not-this-test-binary"),
         };
         assert_eq!(debuggee.reap().await, None, "and we are still running");
+    }
+
+    /// The debugpy shape, end to end against a real process and a real `ps`.
+    ///
+    /// The unit tests above check the string comparison; this checks that the
+    /// comparison is fed what a running interpreter actually looks like. It is
+    /// here rather than in `wait_debugpy.rs` because it cannot be observed
+    /// there: debugpy's launcher kills the debuggee itself when the adapter
+    /// socket drops, so by the time the reap looks, the pid is already gone
+    /// and every branch of this check returns the same answer. The identity
+    /// check is still wrong without the fix — it just has nothing to be wrong
+    /// about while debugpy is cleaning up after itself, which is not something
+    /// to rely on.
+    #[tokio::test]
+    async fn a_script_running_under_an_interpreter_is_recognised_and_killed() {
+        let script = std::env::temp_dir().join(format!("lazydap-reap-{}.py", std::process::id()));
+        std::fs::write(&script, "import time\ntime.sleep(60)\n").expect("write the script");
+
+        let Ok(mut child) = tokio::process::Command::new("python3").arg(&script).spawn() else {
+            eprintln!("skipping: needs python3 on PATH");
+            let _ = std::fs::remove_file(&script);
+            return;
+        };
+        let pid = child.id().expect("a pid");
+
+        let detail = Debuggee {
+            pid,
+            program: script.clone(),
+        }
+        .reap()
+        .await;
+
+        // Unconditionally, before asserting: if the reap declined, the child
+        // is still sleeping, and waiting on it would turn a failed assertion
+        // into a minute of nothing.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let _ = std::fs::remove_file(&script);
+
+        // `ps` shows `python3 /tmp/lazydap-reap-N.py`, so the program we
+        // launched is an argument rather than the command. A prefix match
+        // calls that somebody else's process and leaves it running.
+        let detail = detail.expect("an interpreter-run debuggee is still ours to reap");
+        assert!(detail.contains("killed"), "got: {detail}");
     }
 
     #[tokio::test]

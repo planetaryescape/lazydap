@@ -11,6 +11,7 @@ mod inspect;
 mod launch;
 mod selector;
 mod session;
+mod watch;
 
 pub use breakpoint::{
     AdapterBreakpoint, BadLocation, Breakpoint, BreakpointId, BreakpointStatus, Location,
@@ -26,3 +27,4 @@ pub use session::{
     AdapterKind, EndReason, OutputCategory, OutputChunk, PauseReason, SessionId, SessionState,
     UnknownAdapter, now_ms,
 };
+pub use watch::{NewWatch, Watch, WatchId, WatchSelector, WatchValue};

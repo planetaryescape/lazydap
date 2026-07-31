@@ -37,6 +37,18 @@ pub struct LaunchConfig {
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
     pub stop_on_entry: bool,
+    /// The adapter binary this configuration insists on, when it names one.
+    ///
+    /// debugpy configurations routinely do, spelled `python` or the older
+    /// `pythonPath`, and it is the whole point of a per-project virtualenv:
+    /// the interpreter named here has the project's dependencies, and the
+    /// first one on `PATH` does not. Ignoring it runs the program under the
+    /// wrong Python and reports whatever import error follows as the
+    /// program's own.
+    ///
+    /// `None` means "find one" — discovery's usual config-then-`PATH` walk
+    /// (D026).
+    pub adapter_command: Option<PathBuf>,
     pub source: LaunchConfigSource,
     /// `${...}` variables in this configuration that nothing could expand,
     /// left in the strings exactly as they were written.
@@ -127,7 +139,7 @@ impl std::fmt::Display for NotRunnable {
         match self {
             Self::UnsupportedAdapter { adapter_type } => write!(
                 f,
-                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb only",
+                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb and debugpy only",
             ),
             Self::AttachNotSupported => {
                 f.write_str("it attaches to a running process, which lazydap cannot do yet")
@@ -203,6 +215,7 @@ mod tests {
             cwd: Some(PathBuf::from("/p")),
             env: BTreeMap::new(),
             stop_on_entry: false,
+            adapter_command: None,
             source: LaunchConfigSource::VsCodeLaunchJson,
             unresolved: Vec::new(),
             blocked: None,

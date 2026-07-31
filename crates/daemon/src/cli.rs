@@ -45,9 +45,10 @@ pub enum Command {
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
 
-        /// Which debug adapter to use.
-        #[arg(long, default_value = "codelldb")]
-        adapter: AdapterKind,
+        /// Which debug adapter to use. Defaults to the one the program's file
+        /// extension implies — debugpy for `.py`, codelldb otherwise.
+        #[arg(long)]
+        adapter: Option<AdapterKind>,
 
         /// Arguments for the debuggee, after a `--` separator. They are kept
         /// separate so a debuggee flag can never be mistaken for a lazydap one.
@@ -192,6 +193,19 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Add, list or remove watch expressions.
+    ///
+    /// Watches are project state, exactly as breakpoints are: they are
+    /// remembered in `.lazydap/state.toml` and outlive the session, the daemon
+    /// and the machine. What one *evaluates to* is not remembered — ask for
+    /// that with `lazydap eval`, or watch the TUI's watches pane, which
+    /// re-evaluates all of them every time the program stops.
+    #[command(name = "watch", visible_alias = "w")]
+    Watch {
+        #[command(subcommand)]
+        command: WatchCommand,
+    },
+
     /// Show the call stack of a paused program.
     Stack {
         /// Which thread. Defaults to the one that stopped last.
@@ -325,6 +339,51 @@ pub enum LaunchesCommand {
         /// Stop at the program's entry point, whatever the configuration says.
         #[arg(long)]
         stop_on_entry: bool,
+    },
+}
+
+/// `lazydap watch`'s three modes.
+///
+/// Real subcommands rather than the flag-driven shape `break` uses. `break`'s
+/// flags exist because setting one carries a location and four modifiers, so
+/// the add case dominates and reads better without a verb. A watch is an
+/// expression and nothing else, and `watch add x` / `watch remove x` is what
+/// somebody types when guessing.
+#[derive(Debug, Subcommand)]
+pub enum WatchCommand {
+    /// Watch an expression at every stop.
+    Add {
+        /// Handed to the adapter untouched. Quote it if it has spaces.
+        expression: String,
+
+        /// Show this instead of the expression, when the expression is long.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Report what would change, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Show every watch in the project.
+    List,
+
+    /// Stop watching. Name the expression, or select by id.
+    Remove {
+        /// The expression, matched whole.
+        expression: Option<String>,
+
+        /// Select by id. Repeatable, and what `--format ids` output feeds.
+        #[arg(long = "id", value_name = "ID")]
+        ids: Vec<u32>,
+
+        /// Remove every watch in the project.
+        #[arg(long)]
+        all: bool,
+
+        /// Report what would change, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

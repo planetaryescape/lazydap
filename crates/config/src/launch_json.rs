@@ -147,6 +147,33 @@ struct VsCodeConfig {
     /// cppdbg's spelling for `stopOnEntry`.
     #[serde(default)]
     stop_at_entry: bool,
+    /// debugpy's interpreter pin. A string, or a list whose head is the
+    /// interpreter and whose tail is arguments for it.
+    python: Option<Interpreter>,
+    /// The older spelling of the same thing, still in plenty of committed
+    /// files. `python` wins when a configuration carries both.
+    python_path: Option<String>,
+}
+
+/// `python` as debugpy's schema allows it to be written.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Interpreter {
+    Path(String),
+    /// `["python3", "-X", "faulthandler"]` — the interpreter, then flags for
+    /// it. lazydap takes the head and drops the tail: it runs the interpreter
+    /// as `<python> -m debugpy.adapter`, and there is nowhere to put extra
+    /// interpreter flags without changing what that command means.
+    Argv(Vec<String>),
+}
+
+impl Interpreter {
+    fn path(self) -> Option<String> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Argv(argv) => argv.into_iter().next(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +218,10 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
 
     let adapter = match config.adapter_type.as_str() {
         "lldb" => Some(AdapterKind::Codelldb),
+        // `python` is the older VS Code Python extension's spelling and
+        // `debugpy` the current one. Files in the wild carry both, and they
+        // name the same adapter (M18).
+        "debugpy" | "python" => Some(AdapterKind::Debugpy),
         // Microsoft's C/C++ extension describes the same thing — a native
         // program, its arguments, a working directory — so codelldb can run
         // it. Its `MIMode`, `miDebuggerPath` and `setupCommands` are not read,
@@ -208,6 +239,18 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
     };
 
     let mut unresolved = Vec::new();
+
+    // The interpreter the configuration insists on, if it names one. This is
+    // how a virtualenv is spelled — `"python": "${workspaceFolder}/.venv/bin/python"`
+    // — so it is expanded and made absolute like any other path here. Dropping
+    // it would run the program under whichever interpreter `PATH` offers,
+    // which is exactly the one without the project's dependencies.
+    let adapter_command = config
+        .python
+        .and_then(Interpreter::path)
+        .or(config.python_path)
+        .map(|python| absolute(&expand(&python, root, &mut unresolved), root));
+
     let program = config
         .program
         .map(|program| absolute(&expand(&program, root, &mut unresolved), root));
@@ -271,6 +314,7 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         // Either spelling means the same thing, and a configuration that says
         // both means it once.
         stop_on_entry: config.stop_on_entry || config.stop_at_entry,
+        adapter_command,
         source: LaunchConfigSource::VsCodeLaunchJson,
         unresolved,
         blocked,
@@ -892,17 +936,106 @@ mod tests {
     fn a_configuration_for_another_debugger_is_listed_with_its_own_type() {
         let imported = import_str(
             r#"{"configurations": [
-                {"type": "python", "request": "launch", "name": "API", "program": "app.py"}
+                {"type": "go", "request": "launch", "name": "API", "program": "main.go"}
             ]}"#,
         );
 
         let config = &imported.configs[0];
         assert_eq!(config.adapter, None);
-        assert_eq!(config.adapter_type, "python");
+        assert_eq!(config.adapter_type, "go");
         assert!(
             config.not_runnable().is_some(),
             "listing it is useful; pretending lazydap can run it is not",
         );
+    }
+
+    /// A virtualenv pin, which is the normal way a Python project says which
+    /// interpreter it means. Discarding it runs the program under whichever
+    /// interpreter `PATH` offers — the one without the project's dependencies
+    /// — and reports the import error that follows as the program's own.
+    #[test]
+    fn a_configuration_that_pins_its_interpreter_keeps_it() {
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "debugpy", "request": "launch", "name": "API",
+                "program": "${workspaceFolder}/app.py",
+                "python": "${workspaceFolder}/.venv/bin/python"
+            }]}"#,
+        );
+
+        assert_eq!(
+            imported.configs[0].adapter_command,
+            Some(PathBuf::from("/p/.venv/bin/python")),
+            "the pin is expanded and made absolute like any other path here",
+        );
+    }
+
+    #[test]
+    fn the_older_python_path_spelling_is_read_too() {
+        // Deprecated by the extension, still in plenty of committed files.
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "python", "request": "launch", "name": "API",
+                "program": "app.py", "pythonPath": "/usr/local/bin/python3.12"
+            }]}"#,
+        );
+
+        assert_eq!(
+            imported.configs[0].adapter_command,
+            Some(PathBuf::from("/usr/local/bin/python3.12")),
+        );
+    }
+
+    #[test]
+    fn an_interpreter_written_as_a_list_gives_up_its_head() {
+        // debugpy's schema allows `["python3", "-X", "faulthandler"]`. lazydap
+        // runs the interpreter as `<python> -m debugpy.adapter`, so there is
+        // nowhere to put the flags without changing what that command means.
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "debugpy", "request": "launch", "name": "API",
+                "program": "app.py", "python": ["/usr/bin/python3", "-X", "faulthandler"]
+            }]}"#,
+        );
+
+        assert_eq!(
+            imported.configs[0].adapter_command,
+            Some(PathBuf::from("/usr/bin/python3")),
+        );
+    }
+
+    #[test]
+    fn a_configuration_naming_no_interpreter_leaves_it_to_discovery() {
+        let imported = import_str(
+            r#"{"configurations": [{
+                "type": "debugpy", "request": "launch", "name": "API", "program": "app.py"
+            }]}"#,
+        );
+
+        assert_eq!(imported.configs[0].adapter_command, None);
+    }
+
+    /// Both spellings the Python extension has used, and both runnable since
+    /// M18. Until then these were imported, listed, and refused.
+    #[test]
+    fn a_python_configuration_is_runnable_under_debugpy() {
+        for adapter_type in ["python", "debugpy"] {
+            let imported = import_str(&format!(
+                r#"{{"configurations": [
+                    {{"type": "{adapter_type}", "request": "launch",
+                     "name": "API", "program": "${{workspaceFolder}}/app.py"}}
+                ]}}"#,
+            ));
+
+            let config = &imported.configs[0];
+            assert_eq!(config.adapter, Some(AdapterKind::Debugpy));
+            assert_eq!(config.adapter_type, adapter_type);
+            assert_eq!(
+                config.not_runnable(),
+                None,
+                "a `{adapter_type}` configuration is runnable now",
+            );
+        }
     }
 
     #[test]

@@ -34,7 +34,10 @@
 
 mod file;
 
-use lazydap_core::{Breakpoint, BreakpointId, BreakpointSelector, LaunchConfig, NewBreakpoint};
+use lazydap_core::{
+    Breakpoint, BreakpointId, BreakpointSelector, LaunchConfig, NewBreakpoint, NewWatch, Watch,
+    WatchId, WatchSelector,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,6 +81,33 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// What a watch removal did: the ones that went, and the ids that matched
+/// nothing.
+///
+/// One value rather than two calls, because the two have to be decided under
+/// the same lock — see [`ProjectStore::remove_watches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    pub watches: Vec<Watch>,
+    pub not_found: Vec<WatchId>,
+}
+
+/// Which of the ids a selector named matched nothing.
+///
+/// Only meaningful for an id selector: every other kind describes a set, and a
+/// set that turns out to be empty is an answer rather than a mistake.
+fn unmatched(selector: &WatchSelector, picked: &[Watch]) -> Vec<WatchId> {
+    let WatchSelector::Ids(asked) = selector else {
+        return Vec::new();
+    };
+    let found: Vec<WatchId> = picked.iter().map(|watch| watch.id).collect();
+    asked
+        .iter()
+        .filter(|id| !found.contains(id))
+        .copied()
+        .collect()
+}
+
 /// One project's persisted state, cached in memory.
 pub struct ProjectStore {
     root: PathBuf,
@@ -92,10 +122,17 @@ pub struct ProjectStore {
 struct State {
     breakpoints: Vec<Breakpoint>,
     next_id: u32,
-    /// Sections of the file this build does not model — watches, launch
-    /// configs, anything a newer lazydap wrote. Held so they can be written
-    /// back untouched; dropping them would mean adding one breakpoint deletes
-    /// a colleague's configuration.
+    /// The project's watch expressions (M16).
+    ///
+    /// Only the expressions. What they evaluate to belongs to a stop, not to
+    /// the project, and writing it here would mean a file that says `pos` was
+    /// `4` long after the program that made it true has exited.
+    watches: Vec<Watch>,
+    next_watch_id: u32,
+    /// Sections of the file this build does not model — launch configs,
+    /// adapter settings, anything a newer lazydap wrote. Held so they can be
+    /// written back untouched; dropping them would mean adding one breakpoint
+    /// deletes a colleague's configuration.
     unknown: toml::Table,
     /// What the file looked like when we last read or wrote it, so an edit
     /// made behind our back is noticed rather than silently overwritten.
@@ -112,12 +149,13 @@ impl ProjectStore {
         let root = root.into();
         let path = root.join(STATE_DIR).join(STATE_FILE);
         let (document, seen_mtime) = file::read(&path)?;
-        let (breakpoints, next_id, unknown) = document.into_memory(&root);
+        let contents = document.into_memory(&root);
 
         tracing::debug!(
             target: "daemon.store",
             path = %path.display(),
-            breakpoints = breakpoints.len(),
+            breakpoints = contents.breakpoints.len(),
+            watches = contents.watches.len(),
             "loaded project state",
         );
 
@@ -125,9 +163,11 @@ impl ProjectStore {
             root,
             path,
             state: Mutex::new(State {
-                breakpoints,
-                next_id,
-                unknown,
+                breakpoints: contents.breakpoints,
+                next_id: contents.next_breakpoint_id,
+                watches: contents.watches,
+                next_watch_id: contents.next_watch_id,
+                unknown: contents.unknown,
                 seen_mtime,
             }),
             dirty: AtomicBool::new(false),
@@ -270,6 +310,97 @@ impl ProjectStore {
         toggled
     }
 
+    // --- Watches (M16) ------------------------------------------------------
+    //
+    // The same discipline as the breakpoints above, in the same file, behind
+    // the same debounce: an expression somebody wants shown at every stop is
+    // project state exactly as a breakpoint is, and both are lost the same way
+    // if this file is written carelessly.
+
+    pub fn watches(&self) -> Vec<Watch> {
+        lock(&self.state).watches.clone()
+    }
+
+    /// Which watches a selector picks out, and which of the ids it named
+    /// matched nothing.
+    ///
+    /// The one place watch selection is decided, so `--dry-run` and the real
+    /// removal cannot drift apart (non-negotiable #4). Both call this — the
+    /// preview directly, the removal through [`Self::remove_watches`], which
+    /// runs it inside the lock it mutates under.
+    pub fn select_watches(&self, selector: &WatchSelector) -> (Vec<Watch>, Vec<WatchId>) {
+        let state = lock(&self.state);
+        let picked = selector.pick(&state.watches);
+        let not_found = unmatched(selector, &picked);
+        (picked, not_found)
+    }
+
+    /// Add a watch, or return the existing one with that expression.
+    ///
+    /// Deduped on the expression for the reason a breakpoint is deduped on its
+    /// location: asking twice is something a script does by accident, and two
+    /// identical rows in the pane are two things to remove for one thing the
+    /// user can see. The label is *not* part of the key — relabelling is an
+    /// edit of the same watch, not a second one.
+    pub fn add_watch(&self, new: NewWatch) -> Watch {
+        let mut state = lock(&self.state);
+
+        if let Some(existing) = state
+            .watches
+            .iter()
+            .find(|watch| watch.expression == new.expression)
+        {
+            return existing.clone();
+        }
+
+        let id = WatchId(state.next_watch_id);
+        state.next_watch_id += 1;
+        let watch = Watch {
+            id,
+            expression: new.expression,
+            label: new.label,
+        };
+        state.watches.push(watch.clone());
+        drop(state);
+
+        self.touch();
+        watch
+    }
+
+    /// Remove every watch the selector picks. Returns what went.
+    /// Remove every watch the selector picks, and say what it did *not* find.
+    ///
+    /// Both under one lock, and that is the point. Selecting in one lock and
+    /// mutating in another lets two clients removing the same id both see it
+    /// there: the winner removes it, and the loser removes nothing while
+    /// reporting an empty `not_found` — success, for work it did not do. A
+    /// caller that piped ids in would be told every one of them was removed by
+    /// whichever call happened to lose.
+    pub fn remove_watches(&self, selector: &WatchSelector) -> Removed {
+        let mut state = lock(&self.state);
+        let doomed = selector.pick(&state.watches);
+        // Derived from what this call is actually about to remove, not from a
+        // snapshot somebody else may already have changed.
+        let not_found = unmatched(selector, &doomed);
+
+        if doomed.is_empty() {
+            return Removed {
+                watches: doomed,
+                not_found,
+            };
+        }
+
+        let removing: Vec<WatchId> = doomed.iter().map(|watch| watch.id).collect();
+        state.watches.retain(|watch| !removing.contains(&watch.id));
+        drop(state);
+
+        self.touch();
+        Removed {
+            watches: doomed,
+            not_found,
+        }
+    }
+
     /// Write now, whatever the debounce window says. Called on daemon
     /// shutdown, and by tests that would otherwise have to sleep.
     pub fn flush_now(&self) -> Result<()> {
@@ -281,10 +412,14 @@ impl ProjectStore {
         self.adopt_external_edits(&mut state)?;
 
         let document = file::Document::from_memory(
-            &state.breakpoints,
-            state.next_id,
+            &file::Contents {
+                breakpoints: state.breakpoints.clone(),
+                next_breakpoint_id: state.next_id,
+                watches: state.watches.clone(),
+                next_watch_id: state.next_watch_id,
+                unknown: state.unknown.clone(),
+            },
             &self.root,
-            state.unknown.clone(),
         );
         let mtime = file::write(&self.path, &document)?;
 
@@ -299,6 +434,7 @@ impl ProjectStore {
             target: "daemon.store",
             path = %self.path.display(),
             breakpoints = state.breakpoints.len(),
+            watches = state.watches.len(),
             "wrote project state",
         );
         Ok(())
@@ -331,7 +467,8 @@ impl ProjectStore {
         self.changed.notify_one();
     }
 
-    /// Fold in breakpoints somebody added by editing the file themselves.
+    /// Fold in breakpoints and watches somebody added by editing the file
+    /// themselves.
     ///
     /// The file is documented as hand-editable (D006), so an edit that lands
     /// between our load and our write must not be silently reverted. Entries
@@ -345,32 +482,48 @@ impl ProjectStore {
             return Ok(());
         }
 
-        let (on_disk, disk_next_id, unknown) = document.into_memory(&self.root);
+        let contents = document.into_memory(&self.root);
         // The file is the authority on the parts we do not model: a newer
-        // lazydap may have written watches since we loaded.
-        state.unknown = unknown;
+        // lazydap may have written launch configs since we loaded.
+        state.unknown = contents.unknown;
+
         let known: Vec<BreakpointId> = state
             .breakpoints
             .iter()
             .map(|breakpoint| breakpoint.id)
             .collect();
-
         let mut adopted = 0;
-        for breakpoint in on_disk {
+        for breakpoint in contents.breakpoints {
             if !known.contains(&breakpoint.id) {
                 state.next_id = state.next_id.max(breakpoint.id.0 + 1);
                 state.breakpoints.push(breakpoint);
                 adopted += 1;
             }
         }
-        state.next_id = state.next_id.max(disk_next_id);
+        state.next_id = state.next_id.max(contents.next_breakpoint_id);
 
-        if adopted > 0 {
+        // Watches, by exactly the same rule. Typing an expression into the file
+        // is the other half of `lazydap watch add` being documented as
+        // hand-editable, and one that vanished on the next write would make the
+        // file look like a cache rather than the record it is.
+        let known: Vec<WatchId> = state.watches.iter().map(|watch| watch.id).collect();
+        let mut adopted_watches = 0;
+        for watch in contents.watches {
+            if !known.contains(&watch.id) {
+                state.next_watch_id = state.next_watch_id.max(watch.id.0 + 1);
+                state.watches.push(watch);
+                adopted_watches += 1;
+            }
+        }
+        state.next_watch_id = state.next_watch_id.max(contents.next_watch_id);
+
+        if adopted > 0 || adopted_watches > 0 {
             tracing::info!(
                 target: "daemon.store",
                 path = %self.path.display(),
                 adopted,
-                "adopted breakpoints added by editing the state file",
+                adopted_watches,
+                "adopted entries added by editing the state file",
             );
         }
         Ok(())
@@ -665,14 +818,15 @@ mod tests {
 
     #[test]
     fn state_this_build_does_not_model_survives_a_breakpoint_being_added() {
-        // Watches and launch configs are in the file format but not yet
-        // written by anything. A colleague on a newer build has them, and
-        // adding one breakpoint must not delete them.
+        // A colleague on a newer build has sections this one has never heard
+        // of, and adding one breakpoint must not delete them. This used to be
+        // written with `[[watches]]`, which stopped being a fair test the
+        // moment M16 gave them a typed field.
         let project = TempProject::new("preserve");
         std::fs::create_dir_all(project.root.join(STATE_DIR)).expect("create .lazydap");
         std::fs::write(
             project.state_file(),
-            "version = 1\n\n[[watches]]\nid = \"w1\"\nexpression = \"tokens[pos]\"\n",
+            "version = 1\n\n[[data_breakpoints]]\nid = \"d1\"\naddress = \"0x7ffd\"\n",
         )
         .expect("write");
 
@@ -681,9 +835,180 @@ mod tests {
         store.flush_now().expect("flush");
 
         let written = std::fs::read_to_string(project.state_file()).expect("read");
-        assert!(written.contains("watches"), "got: {written}");
-        assert!(written.contains("tokens[pos]"), "got: {written}");
+        assert!(written.contains("data_breakpoints"), "got: {written}");
+        assert!(written.contains("0x7ffd"), "got: {written}");
         assert!(written.contains("[[breakpoints]]"), "got: {written}");
+    }
+
+    // --- Watches (M16) ------------------------------------------------------
+
+    fn new_watch(expression: &str) -> NewWatch {
+        NewWatch {
+            expression: expression.to_string(),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn a_watch_survives_a_reload() {
+        let project = TempProject::new("watch-reload");
+        let store = project.store();
+        store.add_watch(new_watch("tokens[pos]"));
+        store.flush_now().expect("flush");
+
+        let watches = project.store().watches();
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].expression, "tokens[pos]");
+    }
+
+    #[test]
+    fn adding_the_same_expression_twice_returns_the_watch_that_is_already_there() {
+        let project = TempProject::new("watch-dupe");
+        let store = project.store();
+        let first = store.add_watch(new_watch("counter"));
+        let second = store.add_watch(new_watch("counter"));
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(store.watches().len(), 1, "one row for one expression");
+    }
+
+    #[test]
+    fn watch_ids_keep_climbing_after_a_removal_so_a_stale_id_is_never_reused() {
+        // A script holding id 1 must not silently start addressing somebody
+        // else's expression.
+        let project = TempProject::new("watch-ids");
+        let store = project.store();
+        let first = store.add_watch(new_watch("a"));
+        store.remove_watches(&WatchSelector::Ids(vec![first.id]));
+        let second = store.add_watch(new_watch("b"));
+
+        assert_ne!(first.id, second.id, "an id is never handed out twice");
+    }
+
+    #[test]
+    fn removing_a_watch_returns_what_went() {
+        let project = TempProject::new("watch-remove");
+        let store = project.store();
+        store.add_watch(new_watch("a"));
+        let doomed = store.add_watch(new_watch("b"));
+
+        let removed = store.remove_watches(&WatchSelector::Ids(vec![doomed.id]));
+        assert_eq!(removed.watches, vec![doomed]);
+        assert!(removed.not_found.is_empty());
+        assert_eq!(store.watches().len(), 1);
+    }
+
+    #[test]
+    fn a_removal_reports_what_it_removed_rather_than_what_it_once_saw() {
+        // Two clients racing on the same id. Selecting in one lock and
+        // mutating in another let both see it there: the winner removed it,
+        // and the loser removed nothing while reporting an empty `not_found` —
+        // success, for work it did not do.
+        let project = TempProject::new("watch-race");
+        let store = project.store();
+        let doomed = store.add_watch(new_watch("a"));
+        let selector = WatchSelector::Ids(vec![doomed.id]);
+
+        let winner = store.remove_watches(&selector);
+        assert_eq!(winner.watches, vec![doomed.clone()]);
+        assert!(winner.not_found.is_empty());
+
+        let loser = store.remove_watches(&selector);
+        assert!(loser.watches.is_empty(), "it removed nothing");
+        assert_eq!(
+            loser.not_found,
+            vec![doomed.id],
+            "and says so, rather than reporting a removal it did not make",
+        );
+    }
+
+    #[test]
+    fn a_dry_run_watch_selection_is_the_same_selection_the_removal_makes() {
+        // Non-negotiable #4: the preview and the mutation share one `pick`, so
+        // they cannot disagree about what is about to go.
+        let project = TempProject::new("watch-dry");
+        let store = project.store();
+        store.add_watch(new_watch("a"));
+        store.add_watch(new_watch("b"));
+
+        let selector = WatchSelector::Expression("b".to_string());
+        let (previewed, previewed_missing) = store.select_watches(&selector);
+        assert_eq!(store.watches().len(), 2, "a preview changes nothing");
+
+        let removed = store.remove_watches(&selector);
+        assert_eq!(previewed, removed.watches);
+        assert_eq!(previewed_missing, removed.not_found);
+    }
+
+    #[test]
+    fn a_watch_added_by_hand_is_adopted_rather_than_overwritten() {
+        // The other half of the file being hand-editable (D006): an expression
+        // typed in while the daemon was running must survive the next write.
+        let project = TempProject::new("watch-adopt");
+        let store = project.store();
+        store.add_watch(new_watch("ours"));
+        store.flush_now().expect("flush");
+
+        let existing = std::fs::read_to_string(project.state_file()).expect("read");
+        std::fs::write(
+            project.state_file(),
+            format!("{existing}\n[[watches]]\nid = 40\nexpression = \"theirs\"\n"),
+        )
+        .expect("hand-edit");
+
+        store.add_watch(new_watch("later"));
+        store.flush_now().expect("flush");
+
+        let expressions: Vec<String> = project
+            .store()
+            .watches()
+            .into_iter()
+            .map(|watch| watch.expression)
+            .collect();
+        assert!(expressions.contains(&"ours".to_string()), "{expressions:?}");
+        assert!(
+            expressions.contains(&"theirs".to_string()),
+            "the hand-written one was adopted, not reverted: {expressions:?}",
+        );
+        assert!(
+            expressions.contains(&"later".to_string()),
+            "{expressions:?}"
+        );
+    }
+
+    #[test]
+    fn an_adopted_watch_id_pushes_the_counter_past_it_so_the_next_add_is_unique() {
+        let project = TempProject::new("watch-adopt-ids");
+        std::fs::create_dir_all(project.root.join(STATE_DIR)).expect("create .lazydap");
+        std::fs::write(
+            project.state_file(),
+            "version = 1\n\n[[watches]]\nid = 41\nexpression = \"theirs\"\n",
+        )
+        .expect("write");
+
+        let added = project.store().add_watch(new_watch("ours"));
+        assert_eq!(added.id, WatchId(42), "ids continue past what is there");
+    }
+
+    #[test]
+    fn watches_and_breakpoints_share_one_file_without_disturbing_each_other() {
+        // They are two lists in one document with two independent counters.
+        // Getting that wrong shows up as a watch taking a breakpoint's id.
+        let project = TempProject::new("watch-both");
+        let store = project.store();
+        store.add(new_breakpoint(&project.root.join("main.c"), 19));
+        let watch = store.add_watch(new_watch("counter"));
+        store.flush_now().expect("flush");
+
+        assert_eq!(
+            watch.id,
+            WatchId(1),
+            "the watch counter starts at 1 regardless of the breakpoints",
+        );
+
+        let reloaded = project.store();
+        assert_eq!(reloaded.breakpoints().len(), 1);
+        assert_eq!(reloaded.watches().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]

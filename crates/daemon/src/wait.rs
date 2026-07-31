@@ -274,7 +274,13 @@ impl Wait {
                 }
             }
             Event::ThreadChanged { update, .. } => self.blob.thread_updates.push(update.clone()),
-            Event::SessionStarted { .. } | Event::Continued { .. } => {}
+            // `WatchUpdated` belongs to the project rather than to this run, so
+            // it is not part of what a `--wait` saw. It cannot actually reach
+            // here — the caller filters on `session_id`, which is `None` for
+            // one — and is listed so that adding an event variant stays a
+            // decision made here rather than absorbed by a catch-all.
+            Event::SessionStarted { .. } | Event::Continued { .. } | Event::WatchUpdated { .. } => {
+            }
         }
     }
 

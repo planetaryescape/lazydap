@@ -109,6 +109,14 @@ pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
             return Err(error.into());
         }
     };
+    // After the terminal is ours, and undone before it is given back.
+    //
+    // Without it a paste is delivered as the keystrokes it looks like, so
+    // pasting `counter\nc` into the add-watch prompt submitted `counter` on the
+    // newline and then fed `c` to the global bindings — which resumed the
+    // debuggee. Enabling it turns the whole paste into one event that can be
+    // routed to whatever is being typed into.
+    let bracketed = enable_bracketed_paste();
     let mut state = AppState::default();
 
     let mut tick = tokio::time::interval(TICK);
@@ -163,7 +171,12 @@ pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
         .run(cmd);
     };
 
-    // Unconditional: a loop that failed still borrowed the terminal.
+    // Unconditional: a loop that failed still borrowed the terminal. Paste mode
+    // goes back first — leaving it on would have the user's shell receiving
+    // `\x1b[200~` wrappers around everything they paste after quitting.
+    if bracketed {
+        disable_bracketed_paste();
+    }
     ratatui::restore();
     tracing::debug!(target: "tui.lifecycle", "left the TUI");
     result
@@ -257,6 +270,31 @@ fn spawn_reconnect(
     });
 }
 
+/// Ask the terminal to wrap pasted text so it can be told from typing.
+///
+/// Returns whether it took. Not every terminal supports it, and one that does
+/// not is not a reason to refuse to start — it only means a paste arrives as
+/// keystrokes, which is what happened everywhere before this.
+fn enable_bracketed_paste() -> bool {
+    use ratatui::crossterm::event::EnableBracketedPaste;
+    match ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(
+                target: "tui.input",
+                %error,
+                "this terminal will not bracket pastes; they arrive as keystrokes",
+            );
+            false
+        }
+    }
+}
+
+fn disable_bracketed_paste() {
+    use ratatui::crossterm::event::DisableBracketedPaste;
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+}
+
 /// Turn keystrokes into messages.
 ///
 /// `spawn_blocking` because `event::poll` blocks a whole thread, and blocking
@@ -283,6 +321,7 @@ fn spawn_input_pump(tx: UnboundedSender<Msg>) {
 
             let msg = match ready {
                 Ok(Some(Event::Key(key))) => Msg::Key(key),
+                Ok(Some(Event::Paste(text))) => Msg::Paste(text),
                 Ok(Some(Event::Resize(..))) => Msg::Resize,
                 // Nothing to read, or a mouse or focus event nothing acts on.
                 Ok(_) => continue,

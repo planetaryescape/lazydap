@@ -131,7 +131,7 @@ fn spawn_detached(instance: &Instance) -> Result<()> {
 /// an older lazydap keeps its old permissions until the explicit tighten
 /// below. Debug logs carry the paths of programs being debugged and whatever
 /// they printed.
-fn open_log(path: &Path) -> Result<File> {
+pub(crate) fn open_log(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
         .append(true)

@@ -20,6 +20,16 @@ pub enum Msg {
     /// which is what lets a *re*-connection (M19) re-run exactly the same
     /// opening moves as the first one instead of a second copy of them.
     Connected,
+    /// Text pasted into the terminal, delivered whole rather than as the
+    /// keystrokes it resembles.
+    ///
+    /// The distinction is a safety property, not a convenience. Without
+    /// bracketed paste, pasting `counter\nc` into the add-watch prompt is
+    /// indistinguishable from typing it: the newline submits, and the `c` that
+    /// follows reaches the global bindings and resumes the debuggee. As one
+    /// message it can be routed to whatever is being typed into, or dropped
+    /// when nothing is.
+    Paste(String),
     /// The terminal changed size. Carries no size: the next draw asks the
     /// frame for its own area, so a stored copy could only ever disagree with
     /// it. The message exists to make that draw happen now.

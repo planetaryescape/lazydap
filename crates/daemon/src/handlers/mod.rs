@@ -6,11 +6,12 @@
 //!
 //! Split by topic: [`session`] owns the adapter's lifecycle and everything
 //! that moves the program, [`inspect`] reads a stopped one, [`breakpoints`]
-//! owns project state that outlives any session.
+//! and [`watches`] own the project state that outlives any session.
 
 mod breakpoints;
 mod inspect;
 mod session;
+mod watches;
 
 use crate::state::{DaemonState, Session};
 use lazydap_core::{SessionId, SessionState};
@@ -140,6 +141,15 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             breakpoints::toggle(state, selector, dry_run).await
         }
 
+        // --- Watches ---
+        //
+        // None of these are `async`: a watch is never handed to an adapter, so
+        // there is nothing to await. What one evaluates to is an ordinary
+        // `Request::Eval`, made by whoever wants to know, at a stop.
+        Request::WatchList => watches::list(state),
+        Request::WatchAdd { watch, dry_run } => watches::add(state, watch, dry_run),
+        Request::WatchRemove { selector, dry_run } => watches::remove(state, selector, dry_run),
+
         // Answered by `server::serve_client`, which is the only thing that
         // has the connection to attach the event stream to. Reaching here
         // means somebody called `dispatch` directly.
@@ -168,20 +178,28 @@ fn doctor(state: &Arc<DaemonState>, check_adapters: bool, check_state: bool) -> 
     let mut checks = Vec::new();
 
     if check_adapters {
-        checks.push(
-            match crate::adapter::discover(lazydap_core::AdapterKind::Codelldb) {
+        // Every adapter lazydap ships, whether or not this machine has it.
+        // Reporting only the ones that are installed would make a missing one
+        // indistinguishable from one lazydap cannot drive at all, which is the
+        // question `doctor` exists to answer.
+        for kind in [
+            lazydap_core::AdapterKind::Codelldb,
+            lazydap_core::AdapterKind::Debugpy,
+        ] {
+            let name = format!("adapter.{kind}");
+            checks.push(match crate::adapter::discover(kind) {
                 Ok(path) => DoctorCheck {
-                    name: "adapter.codelldb".to_string(),
+                    name,
                     ok: true,
                     detail: path.display().to_string(),
                 },
                 Err(error) => DoctorCheck {
-                    name: "adapter.codelldb".to_string(),
+                    name,
                     ok: false,
                     detail: error.to_string(),
                 },
-            },
-        );
+            });
+        }
     }
 
     if check_state {

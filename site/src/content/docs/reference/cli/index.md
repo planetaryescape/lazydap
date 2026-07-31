@@ -28,6 +28,7 @@ lazydap [OPTIONS] [COMMAND]
 | [`lazydap step-out`](/reference/cli/step-out/) | Run until the current function returns |
 | [`lazydap pause`](/reference/cli/pause/) | Interrupt a running program |
 | [`lazydap break`](/reference/cli/break/) <br/>`b` | Set, list, remove or toggle breakpoints |
+| [`lazydap watch`](/reference/cli/watch/) <br/>`w` | Add, list or remove watch expressions |
 | [`lazydap stack`](/reference/cli/stack/) | Show the call stack of a paused program |
 | [`lazydap scopes`](/reference/cli/scopes/) | Show the variable scopes of a frame |
 | [`lazydap variables`](/reference/cli/variables/) | Expand a scope or a structured variable |

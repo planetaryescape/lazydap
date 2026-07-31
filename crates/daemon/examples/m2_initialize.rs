@@ -4,7 +4,7 @@ use lazydap_dap::{Capabilities, DapTransport, InitializeArgs};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut transport = DapTransport::spawn("codelldb").await?;
+    let mut transport = DapTransport::spawn_tcp("codelldb").await?;
     let initialize_args: InitializeArgs = InitializeArgs {
         client_id: Some(String::from("lazydap")),
         client_name: Some(String::from("lazydap")),

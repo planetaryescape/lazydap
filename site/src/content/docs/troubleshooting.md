@@ -12,7 +12,7 @@ $ lazydap doctor --format json
   "checks": [
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (not created yet)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 12102, protocol v4", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 12102, protocol v5", "name": "daemon", "ok": true }
   ],
   "ok": true
 }

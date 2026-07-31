@@ -32,7 +32,7 @@ Usage: lazydap launch [OPTIONS] <PROGRAM> [-- <ARGS>...]
 | `--stop-on-entry` | no | `false` | Stop at the program's entry point instead of running to the first breakpoint |
 | `--cwd <CWD>` | no | - | Working directory for the debuggee. Defaults to the current one |
 | `--env <KEY=VALUE>` | no | - | Environment for the debuggee, as KEY=VALUE. Repeatable |
-| `--adapter <ADAPTER>` | no | `codelldb` | Which debug adapter to use |
+| `--adapter <ADAPTER>` | no | - | Which debug adapter to use. Defaults to the one the program's file extension implies — debugpy for `.py`, codelldb otherwise |
 | `<ARGS>` | no | - | Arguments for the debuggee, after a `--` separator. They are kept separate so a debuggee flag can never be mistaken for a lazydap one |
 
 ### `lazydap launches`
@@ -204,6 +204,57 @@ Usage: lazydap break [OPTIONS] [FILE:LINE]
 | `--hit-condition <HIT_CONDITION>` | no | - | Only break once the hit count matches, e.g. `>= 10` |
 | `--log <MESSAGE>` | no | - | Log this message instead of pausing. Braces interpolate: `--log "x = {x}"` |
 | `--disabled` | no | `false` | Record it, but leave it switched off |
+| `--dry-run` | no | `false` | Report what would change, and change nothing |
+
+### `lazydap watch`
+
+*Also spelled:* `w`
+
+Add, list or remove watch expressions.
+
+Watches are project state, exactly as breakpoints are: they are remembered in `.lazydap/state.toml` and outlive the session, the daemon and the machine. What one *evaluates to* is not remembered — ask for that with `lazydap eval`, or watch the TUI's watches pane, which re-evaluates all of them every time the program stops.
+
+```
+Usage: lazydap watch [OPTIONS] <COMMAND>
+```
+
+
+#### `lazydap watch add`
+
+Watch an expression at every stop
+
+```
+Usage: lazydap watch add [OPTIONS] <EXPRESSION>
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `<EXPRESSION>` | yes | - | Handed to the adapter untouched. Quote it if it has spaces |
+| `--label <LABEL>` | no | - | Show this instead of the expression, when the expression is long |
+| `--dry-run` | no | `false` | Report what would change, and change nothing |
+
+#### `lazydap watch list`
+
+Show every watch in the project
+
+```
+Usage: lazydap watch list [OPTIONS]
+```
+
+
+#### `lazydap watch remove`
+
+Stop watching. Name the expression, or select by id
+
+```
+Usage: lazydap watch remove [OPTIONS] [EXPRESSION]
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `<EXPRESSION>` | no | - | The expression, matched whole |
+| `--id <ID>` | no | - | Select by id. Repeatable, and what `--format ids` output feeds |
+| `--all` | no | `false` | Remove every watch in the project |
 | `--dry-run` | no | `false` | Report what would change, and change nothing |
 
 ### `lazydap stack`

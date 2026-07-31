@@ -321,6 +321,8 @@ v0.1 ships one adapter (D013). A trait with a single implementor does not abstra
 
 **Trigger to revisit:** M18, when debugpy gives us a second implementor and therefore a real basis for the interface. At that point this module becomes the trait plus `adapter-codelldb`, and `crates/adapter-*` appears in the boundary script.
 
+**Resolved at M18 — see D052.** The trait was written and the interface it landed on is narrower than this entry expected: the launch, and nothing after it. The second half of the trigger did not happen and should not — the adapters stayed *modules* inside `crates/daemon/src/adapter/` rather than becoming `crates/adapter-*`, because separate crates would buy nothing the module boundary and its `grep` do not already buy, and would spread `lazydap_dap` across more manifests to do it.
+
 **Alternatives considered:** the trait in `lazydap-core` now (core would have to name adapter concepts it otherwise knows nothing about, and the trait would be written blind); no seam at all (DAP types spread through the daemon, which is the anti-pattern that paid for this rule).
 
 ---
@@ -665,7 +667,7 @@ None outstanding. One question is parked for M15: whether to publish crates to c
 
 ## Decisions to revisit at v0.1 → v0.2 boundary
 
-- D013 (codelldb-only) → debugpy + js-debug + delve.
+- D013 (codelldb-only) → **debugpy landed at M18**; js-debug + delve still open.
 - D007 (single-session enforcement) → multi-session lift.
 - D023 (AI external) → re-evaluate. May want to ship a thin `lazydap-mcp` server crate as an officially-maintained client.
 
@@ -682,3 +684,209 @@ workflow has no publish job.
 
 **Revisit when:** someone asks to depend on `lazydap-protocol` or `lazydap-dap` as a
 library. That request is the signal the seams have become APIs.
+
+
+---
+
+## D052 — the `DebugAdapter` trait lives in the daemon's adapter module, not in `lazydap-core`
+
+**Status:** decided (2026-07-31, M18). **Completes D029.**
+
+**Why:** D029 deferred the trait until a second adapter existed, on the grounds that a trait with one implementor hides where the seam is rather than marking it. debugpy is that second adapter, so the trait is now written — and the question D029 left open is *where*.
+
+Not in `lazydap-core`. Every method on it speaks DAP: the `adapterID` for `initialize`, the adapter's `launch` arguments, the `reason` string on a `stopped` event. `lazydap-core` is depended on by every other crate, so putting the trait there would carry the DAP vocabulary into all of them — undoing the single thing this boundary exists to do (`ARCHITECTURE.md`, anti-pattern 4), and doing it in the name of the abstraction that was supposed to enforce it.
+
+So it lives in `crates/daemon/src/adapter/`, and the module boundary keeps doing the enforcing: `lazydap_dap` is imported nowhere else in the daemon, checked by `scripts/check_architecture_boundaries.sh`. Non-negotiable #5 — "the daemon depends on the `DebugAdapter` trait, not raw DAP messages" — is now literally true of `handlers::session`, which calls `adapter::launch` and never names an adapter.
+
+**Shape:** object-safe and synchronous. Starting an adapter is described as a `Spawn` value (`Tcp { command }` or `Stdio { program, args }`) rather than performed by the trait, so no method is `async` and nothing has to box a future — which is what lets `for_kind` return a `&'static dyn DebugAdapter` with no allocation and no `async-trait` dependency. It also makes the difference between the two adapters assertable in a unit test instead of only observable by running a process.
+
+**What is *not* in the trait:** everything after the launch. Stepping, stacks, scopes, variables, evaluation and breakpoints are specified precisely enough that both adapters answer them identically, and all of it stays in the one `AdapterHandle`. The trait is four required methods and two defaulted ones; if it grows, that is evidence of a real divergence, not of a missing abstraction.
+
+---
+
+## D053 — DAP transports are stdio as well as TCP, and reverse requests are refused rather than fatal
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** codelldb listens on a TCP port and announces it on stderr; debugpy speaks DAP over its own stdin and stdout and is not a binary at all (`python3 -m debugpy.adapter`). The framing is identical either way — `Content-Length` headers and a JSON body — so `DapReader`/`DapWriter` now hold boxed `AsyncRead`/`AsyncWrite` instead of TCP halves, and `DapTransport` offers `spawn_tcp` and `spawn_stdio`. Boxed rather than generic so that no type holding a transport grows a parameter it does nothing with; the cost is one virtual call per read of a stream already crossing a process boundary.
+
+**Reverse requests.** A message with `type: "request"` arriving *from* the adapter used to fall through `read_incoming`'s match into `TransportError::Dap`, which the pump reads as the adapter dying — so a question would have killed the session. There are two in the wild, `runInTerminal` and `startDebugging`, and lazydap advertises neither. Every launch it builds is also configured not to provoke them: codelldb gets `terminal: "console"`, debugpy gets `console: "internalConsole"` and `subProcess: false`.
+
+An adapter that asks anyway is now answered with `success: false` (`DapWriter::refuse`) in both the handshake and the pump. Silence is the worse failure: the adapter waits for a reply that never comes, the debuggee never starts, and the session dies at a timeout naming the wrong thing. A refusal it can read leaves it free to fall back or to fail in its own words.
+
+---
+
+## D054 — lazydap launches Python with `justMyCode: false`
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** debugpy defaults `justMyCode` to `true`, which hides library and standard-library frames from the stack and steps over them. That default is written for a human debugging their own application in an editor. lazydap's first-class caller is an agent asked why a program failed, and that failure is as likely to be in a dependency as in the project — a stack that silently omits where the program actually is makes it unfindable, and nothing in the output says frames were removed.
+
+**The cost, stated plainly:** the stack at a stop-on-entry pause includes debugpy's own `runpy` frames, because that is genuinely where the interpreter is. That is noise; a stack that lies is worse.
+
+**Related, and deliberately not decided here:** lazydap sends no `setExceptionBreakpoints` filters, so an uncaught Python exception is *not* a pause — the program exits non-zero with its traceback on stderr, exactly as it would unattended. codelldb's segfault case does pause, because a signal is something the debugger sees whether or not anybody asked. Making Python match would mean choosing exception filters for every caller, which is a bigger decision than M18 gets to make on its own. `crates/daemon/tests/wait_debugpy.rs` asserts the current behaviour so that changing it has to be deliberate.
+
+---
+
+## D055 — `continue` on a program that is already running is not sent to the adapter
+
+**Status:** decided (2026-07-31, M18).
+
+**Why:** found by running the agent loop against debugpy, not by reading code. `lazydap launch` without `--stop-on-entry` returns while the program runs; the natural next command is `continue --wait` to reach the first breakpoint, and it is what `launches run` does for any `launch.json` configuration that does not set `stopOnEntry`. codelldb acknowledges such a `continue` and nothing happens. debugpy does not answer it at all — there is no paused thread to resume — so the acknowledgement timeout fires, and `AdapterHandle::execute` correctly reads an unacknowledged execution request as a wedged adapter and kills the session (D021, D022).
+
+**What changes:** when the session is already `Running`, `continue` is not sent. What the caller wants is the next stable state, which `--wait` is already subscribed for. On codelldb the observable outcome is unchanged, minus one request that could only ever have been a no-op.
+
+**The decision and the state transition are one locked operation** (`Session::claim_run`), because sampling the state and then writing it leaves two windows for the pump to record a stop in between, and each corrupts a different thing. A stop landing *before* the sample made an already-running program look paused, so the `continue` went out and resumed the program past the very stop the caller was about to be told about. A stop landing *after* it was overwritten by the unconditional `Running` that followed, leaving `--wait` returning a paused blob while the session claimed to be running — and every later `stack`, `scopes` and `eval` refused, because those need a stable state. Same shape as the compare-and-set `restore_state` already uses, and for the same reason. The claim is taken *before* the subscription rather than after: a stop arriving in between is not lost, because `Wait::begin` reads the undelivered backlog as well as subscribing.
+
+**Residual, stated rather than hidden:** a stop that lands before the handler runs at all is indistinguishable from a session that was simply paused when the caller typed `continue` — which is the ordinary, correct case. Such a `continue` resumes, and the wait may report the stop it did not cause. Telling those apart means deciding whether `--wait` should ever report a stop from before its own request, which is a wider question than D055.
+
+**Not changed:** `step` on a running program. It has no equivalent reading — "step" cannot mean "wait for whatever happens next" — and giving it one would be inventing behaviour rather than removing a redundant message. It remains a way to reach an adapter timeout, on both adapters.
+---
+
+## D056 — watches are project state with session-scoped values; protocol goes to v5
+
+**Status:** decided (2026-07-31, with M16).
+
+**Why the split.** A watch is two things with two different lifetimes, and keeping them
+apart is the whole design. The **expression** is the project's: it lives in
+`.lazydap/state.toml` beside the breakpoints, it exists before any session and it outlives
+the daemon and the machine. The **value** belongs to one stop — the moment the program
+moves, it describes somewhere the program has been. Persisting the second would be
+persisting a lie: a file saying `pos = 4` read back tomorrow claims it still is.
+
+So `Watch` is stored and `WatchValue` never is, and the TUI drops every value on
+`Continued`, `SessionEnded` and `DaemonGone` while keeping every expression. It is the same
+division `Breakpoint` makes against `AdapterBreakpoint` (D043), arrived at from the same
+direction.
+
+**Why the daemon does not evaluate.** `lazydap watch list` returns expressions, not values.
+The daemon stores; whoever wants a number asks for one with `Request::Eval`, which is what
+the TUI does at every stop and what `lazydap eval` already exposes. A `watch list` that
+evaluated would need a paused session to answer at all, which would make the one command
+that reads project state fail exactly when there is no session — the state it is for.
+
+**Why the protocol bumps.** `Request` is an externally-tagged `serde` enum with no
+fallback, so a variant an older daemon does not know does not fail *softly*: the whole
+`IpcMessage` fails to deserialise, and the daemon never reaches the `version` field it
+would have refused on. Verified against the real codec — the frame
+`{"version":4,"id":7,"payload":{"Request":"WatchList"}}` produces `unknown variant
+'WatchList', expected one of 'Ping', ...`, and `serve_client` answers `BadRequest` on id
+`0` and closes. The client filters replies by request id, so it discards that frame and
+reports "the daemon closed the connection before answering" with exit 3. The bump turns
+that into the `VersionMismatch` `ensure_daemon_running` already clears by restarting the
+daemon — the same reasoning as D032, D043 and D050, and the reason a "purely additive"
+variant is not additive here. `Shutdown` stays frozen and version-exempt regardless.
+
+**`Event::WatchUpdated` is project scope only.** `BreakpointUpdated` needs an
+`Option<SessionId>` because an adapter can hold an opinion about a breakpoint. Nothing
+installs a watch — there is no DAP request for one — so no session can have an opinion, and
+the event carries a `WatchId` and nothing else. What it means is D043's lesson applied
+before the bug rather than after it: "the list is not what you last read; read it again".
+An add and a removal arrive identically, and only the list tells them apart.
+
+**Consequences:** `WatchReport` has no `applied_to_session`, because there is nothing for a
+session to have been told. `lazydap watch` uses real subcommands rather than `break`'s
+flags: `break`'s add case carries a location and four modifiers and reads better without a
+verb, whereas a watch is an expression and nothing else.
+
+---
+
+## D057 — the REPL evaluates in `watch` context, and `/` reaches the adapter
+
+**Status:** decided (2026-07-31, with M17).
+
+**Why:** M17's own task file calls the REPL "the natural UX for raw adapter commands", which
+is true and is not the same as making that the default. D034 already established what
+`repl` context means to codelldb: the string goes to LLDB's *command* interpreter, so `x`
+on a program with an `int x = 5` runs `memory read` and fails on a missing address
+(quirk 7). A REPL pane whose most obvious possible input fails is not a REPL.
+
+So the pane sends `EvalContext::Watch` by default — the same context `lazydap eval` sends,
+for the same reason, so the pane and the subcommand cannot disagree about what typing an
+expression means. Adapter commands keep their place behind a `/` prefix: `/bt` is LLDB's
+`bt`. One character, and unambiguous, because no expression begins with a division.
+
+**Which frame.** The one the stack pane has selected, falling back to `None` — "the top
+frame", which the daemon resolves by fetching it fresh — whenever the stack on screen
+belongs to a stop the program has left. That keeps the REPL, the scopes pane and the
+watches pane all talking about the same function, which is also why selecting a caller
+frame re-evaluates the watches against it.
+
+**History is per-session.** It lives in the pane and dies with the process. The phase-E
+sketch left this open; persisting it is a config option for after v0.1, and a debugger that
+wrote every expression you tried into a file in your repository is a surprise nobody asked
+for.
+
+**Consequences:** while the cursor is in the REPL, `q` is a `q` and `c` is a `c` — the pane
+claims every key that could be part of an expression. The keys that move the *program* are
+all function keys, none of which can appear in an expression, so those still work while
+typing. `Esc` clears a half-typed line and then leaves the pane, because `q` cannot be the
+way out and a user who tabbed in should not have to already know about `Tab`.
+
+---
+
+## D058 — an input context swallows every chord, and a paste is never a command
+
+**Status:** decided (2026-07-31, review round after M16/M17).
+
+**Why:** two ways the TUI could be made to run a debug command by somebody who was only
+typing, both found by review of the panes M16 and M17 added.
+
+**Modifiers were not part of a binding.** The reducer matched on `KeyCode::Char('c')` and
+nothing else, so every character binding fired on its control form too: `Ctrl-C` — the most
+reflexive key on a terminal, and what a person presses to mean "stop" — sent a `Continue`
+and resumed the debuggee. A binding is now a *plain* key: no control, no alt, no super.
+`Shift` is deliberately still allowed, because `G` arrives with it.
+
+**Chords inside a text field are consumed there, not passed on.** The first version let
+`Ctrl-D` and `Ctrl-U` fall through from the REPL to scroll the source pane, which meant an
+allowlist decided which chords were safe to leak — and the allowlist is exactly what let
+`Ctrl-C` through. An input context now claims every `Char`, chorded or not. `Ctrl-C` clears
+the line, in both the REPL and the add-watch prompt, because that is the meaning a shell
+gives it and nothing in lazydap interrupts a debuggee from the keyboard. Any other chord is
+consumed and ignored: a key that does nothing in a text field is better than one that
+reaches past it.
+
+**A paste is not the keystrokes it resembles.** Without bracketed paste the terminal
+delivers pasted text as ordinary key events, so pasting `counter\nc` into the add-watch
+prompt submitted `counter` on the newline and then handed the `c` to the global bindings,
+which continued the program. Bracketed paste is now enabled for the life of the TUI and
+disabled on the way out — leaving it on would have the user's shell receiving `\x1b[200~`
+around everything they paste afterwards. A terminal that refuses it is not a reason to fail
+to start; it only means pastes arrive as keystrokes, as they always did.
+
+**Newlines in a paste are stripped, not obeyed.** Both places a paste can land hold a
+single expression, so a multi-line paste is either an accident or a wrapped line. Joining
+it onto one line is recoverable and visible before `<CR>`; submitting the first line and
+evaluating the remainder is neither. `<CR>` stays the only thing that submits. A paste
+arriving when nothing is taking text is dropped, because there is nothing sensible for it
+to mean and guessing is how this class of bug starts.
+
+---
+
+## D059 — a read of a paused program is fenced against it resuming underneath
+
+**Status:** decided (2026-07-31, review round after M16/M17).
+
+**Why:** `paused_session` is a check, not a hold. Nothing in the daemon owns a session's
+state for the length of a request, and the inspection handlers that need a frame do two
+awaits: resolve the frame, then ask the adapter the real question. Another client calling
+`continue` in the gap — a second terminal, or the TUI's own F5 — leaves the second request
+arriving at a *running* program. What comes back is either values from wherever it has got
+to, or nothing at all until the adapter's own timeout fires ten seconds later. Neither reads
+as "you asked about a program that is no longer stopped", which is what happened.
+
+Each session now counts the writes to its state. A handler samples that counter beside its
+pause check and re-verifies it immediately before the request it actually wanted to make;
+a mismatch is `SessionNotPaused`. This is D040's discipline — number the thing, drop what
+has been overtaken — applied daemon-side rather than in the TUI's reducer.
+
+**Why a counter rather than re-reading the state.** A program that resumed and stopped again
+is *paused*, so re-reading would say yes. It is a different stop: every frame id resolved a
+moment earlier addresses nothing in it, and answering would be the right shape of reply
+about the wrong moment. Counting writes catches that; comparing states does not.
+
+**Consequences:** applied to `eval` and `scopes`, the two handlers that resolve a frame
+before asking their real question. `stack_trace` and `variables` take one step and have no
+gap of their own. M16's watches made this reachable in ordinary use rather than only under
+contention: a stop fires one evaluation per expression, and they queue behind each other.

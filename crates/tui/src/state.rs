@@ -9,10 +9,13 @@
 //! [`SessionId`] — a TUI-shaped copy of any of them would be one more thing to
 //! keep in step with the daemon, and the daemon is the source of truth.
 
+use crate::panes::input::TextInput;
+use crate::panes::repl::ReplView;
 use crate::panes::scopes::ScopesView;
 use crate::panes::source::SourceView;
 use crate::panes::stack::StackView;
-use lazydap_core::{BreakpointStatus, PauseReason, SessionId, SessionState};
+use crate::panes::watches::WatchesView;
+use lazydap_core::{BreakpointStatus, PauseReason, SessionId, SessionState, WatchId};
 use lazydap_protocol::SessionSummary;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -32,6 +35,17 @@ pub struct AppState {
     pub(crate) stack: StackView,
     /// The selected frame's scopes and their variables (M13).
     pub(crate) scopes: ScopesView,
+    /// The project's watch expressions, and what each came to at this stop
+    /// (M16). The expressions outlive the session; the values do not.
+    pub(crate) watches: WatchesView,
+    /// Ad-hoc expressions and their answers (M17).
+    pub(crate) repl: ReplView,
+    /// A prompt that has taken the keyboard, if one is open.
+    ///
+    /// While it is `Some`, every printable key belongs to it — which is the
+    /// whole point. Without that, typing an expression containing `q` would
+    /// quit the TUI.
+    pub(crate) modal: Option<Modal>,
     /// The project's breakpoints, as far as the TUI has been told (M14).
     ///
     /// The daemon's copy is the real one; this is what the gutter draws from.
@@ -51,6 +65,10 @@ pub struct AppState {
     /// In the state rather than in the loop because it *is* state: whether the
     /// next `g` means "go to the top" depends on what came before it.
     pub(crate) awaiting_g: bool,
+    /// The `d` of `dd`, which removes the selected watch (M16). Separate from
+    /// [`Self::awaiting_g`] so that `gd` and `dg` are both nothing rather than
+    /// one arming the other.
+    pub(crate) awaiting_d: bool,
     /// The daemon's session, as far as the TUI has been told.
     pub(crate) session: Option<SessionSnapshot>,
     /// Where the program is stopped, straight from the daemon.
@@ -90,6 +108,33 @@ pub struct AppState {
     /// carry out, so a failure with an id in here is answered by asking for
     /// the whole list again rather than by hoping.
     pub(crate) pending_breakpoints: BTreeSet<u64>,
+    /// Which watch each in-flight evaluation is for, and which round it
+    /// belongs to.
+    ///
+    /// [`lazydap_protocol::Response::Evaluated`] is a bare value with nothing
+    /// in it saying what was asked — not the expression, not the frame. The id
+    /// is the only thing that can tell one watch's answer from another's, or
+    /// from a REPL submission's, since all three come back as the same variant.
+    pub(crate) pending_watches: BTreeMap<u64, PendingWatch>,
+    /// Which REPL entry each in-flight evaluation belongs to, by the entry's
+    /// own id rather than its position: the scrollback is trimmed from the
+    /// front, so a position is not a stable name for an entry.
+    pub(crate) pending_repl: BTreeMap<u64, u64>,
+    /// The `WatchList` currently in flight, if there is one.
+    ///
+    /// At most one, ever. A local mutation is answered *and* announced — the
+    /// daemon tells every subscriber, including the client that asked — so
+    /// removing three watches used to produce four full refreshes, each one
+    /// re-evaluating every remaining expression, all queued to the single
+    /// adapter ahead of whatever `continue` the user pressed next.
+    pub(crate) pending_watch_list: Option<u64>,
+    /// Whether something asked for the list while one was already in flight.
+    ///
+    /// Consumed when that one lands, which collapses any number of overlapping
+    /// announcements into exactly one more request — and still cannot miss a
+    /// change, because the flag is only cleared by a fetch that started after
+    /// the change was seen.
+    pub(crate) watch_list_dirty: bool,
     /// Whether the daemon is reachable, and how the attempts to get it back
     /// are going (M19).
     pub(crate) connection: Connection,
@@ -131,6 +176,8 @@ pub(crate) enum Focus {
     Source,
     Stack,
     Scopes,
+    Watches,
+    Repl,
 }
 
 impl Focus {
@@ -138,17 +185,52 @@ impl Focus {
         match self {
             Self::Source => Self::Stack,
             Self::Stack => Self::Scopes,
-            Self::Scopes => Self::Source,
+            Self::Scopes => Self::Watches,
+            Self::Watches => Self::Repl,
+            Self::Repl => Self::Source,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Source => Self::Scopes,
+            Self::Source => Self::Repl,
             Self::Stack => Self::Source,
             Self::Scopes => Self::Stack,
+            Self::Watches => Self::Scopes,
+            Self::Repl => Self::Watches,
         }
     }
+
+    /// Whether this pane takes typed text, and therefore whether an ordinary
+    /// key means a character rather than a command.
+    pub(crate) fn is_typing(self) -> bool {
+        self == Self::Repl
+    }
+}
+
+/// A prompt that has taken the keyboard.
+///
+/// One variant so far. It is an enum rather than a bare `Option<TextInput>`
+/// because the next one — a confirmation before removing every watch, say — has
+/// to be told apart from this one when `<CR>` is pressed, and the shape that
+/// makes that a match arm is worth having before there are two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Modal {
+    /// Typing the expression for a new watch (M16).
+    AddWatch(TextInput),
+}
+
+/// A watch evaluation the TUI is waiting on, and the round it belongs to.
+///
+/// The round is what the id alone cannot give. Selecting a caller and then its
+/// callee puts two batches in flight for the same watches, and the first
+/// batch's answers describe a frame the pane has stopped showing — the right
+/// expression against the wrong frame, which is exactly the class of mistake
+/// D040 was written about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingWatch {
+    pub(crate) generation: u64,
+    pub(crate) watch: WatchId,
 }
 
 /// How the TUI is getting on with the daemon.

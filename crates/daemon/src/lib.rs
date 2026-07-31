@@ -39,7 +39,12 @@ pub async fn run_cli(args: Vec<String>) -> ExitCode {
     };
 
     let format = resolve_format(cli.format);
-    init_tracing(cli.command.as_ref().is_some_and(Command::is_daemon));
+    // The TUI installs its own, pointed at the instance log file rather than at
+    // the terminal it is about to take over — so nothing may claim the global
+    // subscriber before it does. See `commands::tui::send_logs_to_the_file`.
+    if !owns_the_terminal(cli.command.as_ref()) {
+        init_tracing(cli.command.as_ref().is_some_and(Command::is_daemon));
+    }
 
     match run(cli, format).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -74,7 +79,7 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
 
     let instance = Instance::resolve(cli.instance.as_deref())?;
     check_config(&instance, &command, format)?;
-    use commands::{breakpoints, diagnostics, inspect, launches, session};
+    use commands::{breakpoints, diagnostics, inspect, launches, session, watch};
 
     match command {
         Command::Version | Command::Completions { .. } => unreachable!("handled above"),
@@ -97,6 +102,10 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                     cwd,
                     env: session::parse_env(&env)?,
                     adapter,
+                    // `lazydap launch` names a program, not an adapter binary;
+                    // pinning one is the config file's job (D026) or a launch
+                    // configuration's.
+                    adapter_command: None,
                     stop_on_entry,
                 },
                 format,
@@ -109,6 +118,20 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                 name,
                 stop_on_entry,
             } => launches::run(&instance, &name, stop_on_entry, format).await,
+        },
+        Command::Watch { command } => match command {
+            cli::WatchCommand::Add {
+                expression,
+                label,
+                dry_run,
+            } => watch::add(&instance, expression, label, dry_run, format).await,
+            cli::WatchCommand::List => watch::list(&instance, format).await,
+            cli::WatchCommand::Remove {
+                expression,
+                ids,
+                all,
+                dry_run,
+            } => watch::remove(&instance, expression, ids, all, dry_run, format).await,
         },
         Command::Status => session::status(&instance, format).await,
         Command::Disconnect {
@@ -344,6 +367,18 @@ fn wants_machine_output(args: &[String]) -> bool {
 /// The daemon logs at `info` to stderr, which the client that spawned it
 /// points at a log file. Subcommands are quiet by default: their stdout is
 /// somebody's JSON pipeline, and their stderr is where errors go.
+/// Whether this invocation is going to take the terminal over.
+///
+/// Bare `lazydap` on a tty is the TUI just as much as `lazydap tui` is, and it
+/// is the same terminal either way — so both have to keep their logs off it.
+fn owns_the_terminal(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Tui) => true,
+        None => is_interactive(),
+        Some(_) => false,
+    }
+}
+
 fn init_tracing(is_daemon: bool) {
     use std::io::IsTerminal;
     use tracing_subscriber::EnvFilter;
@@ -395,6 +430,28 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("parse")
+    }
+
+    #[test]
+    fn only_the_tui_keeps_its_logs_off_the_terminal() {
+        // Every other command prints and exits, so stderr is where its warnings
+        // belong. The TUI takes the terminal over, and a `warn` written to it
+        // lands across the panes — which an out-of-scope watch would do on
+        // every single step.
+        assert!(owns_the_terminal(
+            parse(&["lazydap", "tui"]).command.as_ref()
+        ));
+
+        for args in [
+            &["lazydap", "status"][..],
+            &["lazydap", "watch", "list"][..],
+            &["lazydap", "daemon"][..],
+        ] {
+            assert!(
+                !owns_the_terminal(parse(args).command.as_ref()),
+                "{args:?} prints and exits; its logs belong on stderr",
+            );
+        }
     }
 
     #[test]
