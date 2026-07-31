@@ -6,7 +6,7 @@ The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 
 The **lazydap protocol** is versioned separately from the binary. It is at **v4**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
 
-## [0.1.0] — 2026-07-30
+## [0.1.0] — 2026-07-31
 
 The first release. A debugger you drive from the shell, one command at a time, with JSON as the contract. Rough edges are listed under [Known limitations](#known-limitations) rather than left for you to find.
 

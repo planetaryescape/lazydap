@@ -668,3 +668,17 @@ None outstanding. One question is parked for M15: whether to publish crates to c
 - D013 (codelldb-only) → debugpy + js-debug + delve.
 - D007 (single-session enforcement) → multi-session lift.
 - D023 (AI external) → re-evaluate. May want to ship a thin `lazydap-mcp` server crate as an officially-maintained client.
+
+---
+
+## D051 — lazydap does not publish to crates.io
+
+**Status:** decided (2026-07-31, user).
+
+**Why:** The crates are organizational seams, not library APIs — the same stance mxr
+records. Users install from GitHub release binaries (the `product-release.yml` artifacts)
+or `cargo install --git`. `publish = false` stays on all seven crates and the release
+workflow has no publish job.
+
+**Revisit when:** someone asks to depend on `lazydap-protocol` or `lazydap-dap` as a
+library. That request is the signal the seams have become APIs.
