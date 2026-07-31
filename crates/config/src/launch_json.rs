@@ -147,6 +147,10 @@ struct VsCodeConfig {
     /// cppdbg's spelling for `stopOnEntry`.
     #[serde(default)]
     stop_at_entry: bool,
+    /// delve's launch mode: `debug` (compile source or a package), `exec` (run
+    /// a prebuilt binary), `test` (compile and run tests), `auto`. Meaningless
+    /// to the other adapters, read only for `type: go`.
+    mode: Option<String>,
     /// debugpy's interpreter pin. A string, or a list whose head is the
     /// interpreter and whose tail is arguments for it.
     python: Option<Interpreter>,
@@ -222,6 +226,12 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         // `debugpy` the current one. Files in the wild carry both, and they
         // name the same adapter (M18).
         "debugpy" | "python" => Some(AdapterKind::Debugpy),
+        // What the VS Code Go extension writes. It has one `type` for every
+        // mode — `debug`, `exec`, `test` — and says which in a `mode` field
+        // (M22). `debug`/`exec`/`auto` run under delve; `test` is deferred and
+        // an `exec` naming a `.go` source is a contradiction — both are turned
+        // into a `blocked` reason below rather than run into an adapter error.
+        "go" => Some(AdapterKind::Delve),
         // Microsoft's C/C++ extension describes the same thing — a native
         // program, its arguments, a working directory — so codelldb can run
         // it. Its `MIMode`, `miDebuggerPath` and `setupCommands` are not read,
@@ -234,6 +244,15 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
                  its MIMode, miDebuggerPath or setupCommands",
             ));
             Some(AdapterKind::Codelldb)
+        }
+        _ => None,
+    };
+
+    // Read before `config.program` and `config.mode` are consumed below. Only
+    // meaningful for delve; `None` for every other adapter.
+    let mode_block = match adapter {
+        Some(AdapterKind::Delve) => {
+            delve_mode_block(config.mode.as_deref(), config.program.as_deref())
         }
         _ => None,
     };
@@ -317,8 +336,46 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         adapter_command,
         source: LaunchConfigSource::VsCodeLaunchJson,
         unresolved,
-        blocked,
+        // A bad `args` string and a bad delve mode are both reasons not to run;
+        // either one is enough, so the first found is reported.
+        blocked: blocked.or(mode_block),
     })
+}
+
+/// Whether a `type: go` configuration names a delve mode lazydap will not run.
+///
+/// `test` is deferred (M22): delve can compile-and-test, but lazydap has no way
+/// to tell it "this is a test" — a `.go` file is an ordinary program to
+/// `debug` — so a `test` config is listed and refused rather than silently run
+/// as the wrong thing. `exec` names a prebuilt binary, so an `exec` pointing at
+/// a `.go` *source* is a contradiction delve would reject; caught here so the
+/// reason names the file rather than surfacing as an adapter crash. `debug`,
+/// `auto`, and an absent mode are all runnable, and the adapter infers `debug`
+/// vs `exec` from the program's shape (`delve.rs`).
+fn delve_mode_block(
+    mode: Option<&str>,
+    program: Option<&str>,
+) -> Option<lazydap_core::NotRunnable> {
+    use lazydap_core::NotRunnable::DelveMode;
+    match mode {
+        Some("test") => Some(DelveMode {
+            problem: "it uses delve's `test` mode, which lazydap does not run yet".to_string(),
+        }),
+        Some("exec") if program.is_some_and(is_go_source) => Some(DelveMode {
+            problem: "it uses delve's `exec` mode, which runs a prebuilt binary, but names a \
+                      `.go` source"
+                .to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a program path is a `.go` source file rather than a built binary.
+fn is_go_source(program: &str) -> bool {
+    Path::new(program)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        == Some("go")
 }
 
 /// Split one shell-style argument string into arguments.
@@ -934,18 +991,102 @@ mod tests {
 
     #[test]
     fn a_configuration_for_another_debugger_is_listed_with_its_own_type() {
+        // `coreclr`, because this test needs a debugger lazydap does not ship
+        // and `go` stopped being one at M22.
         let imported = import_str(
             r#"{"configurations": [
-                {"type": "go", "request": "launch", "name": "API", "program": "main.go"}
+                {"type": "coreclr", "request": "launch", "name": "API", "program": "App.dll"}
             ]}"#,
         );
 
         let config = &imported.configs[0];
         assert_eq!(config.adapter, None);
-        assert_eq!(config.adapter_type, "go");
+        assert_eq!(config.adapter_type, "coreclr");
         assert!(
             config.not_runnable().is_some(),
             "listing it is useful; pretending lazydap can run it is not",
+        );
+    }
+
+    #[test]
+    fn a_go_configuration_runs_under_delve() {
+        // What the VS Code Go extension writes. A `debug` config naming a
+        // source file is runnable; the adapter infers compile-vs-run from the
+        // program's shape (`delve.rs`).
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "go", "request": "launch", "name": "API", "mode": "debug", "program": "main.go"}
+            ]}"#,
+        );
+
+        let config = &imported.configs[0];
+        assert_eq!(config.adapter, Some(AdapterKind::Delve));
+        assert_eq!(config.not_runnable(), None);
+    }
+
+    #[test]
+    fn a_go_debug_config_naming_a_package_directory_is_runnable() {
+        // The standard shape: `debug` mode pointed at a package, not a single
+        // file. It must list as runnable — the fix to the adapter's mode
+        // inference is what makes the launch itself work.
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "go", "request": "launch", "name": "server", "mode": "debug", "program": "${workspaceFolder}/cmd/server"}
+            ]}"#,
+        );
+        assert_eq!(imported.configs[0].not_runnable(), None);
+    }
+
+    #[test]
+    fn a_go_exec_config_naming_a_built_binary_is_runnable() {
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "go", "request": "launch", "name": "run", "mode": "exec", "program": "${workspaceFolder}/bin/server"}
+            ]}"#,
+        );
+        assert_eq!(imported.configs[0].adapter, Some(AdapterKind::Delve));
+        assert_eq!(imported.configs[0].not_runnable(), None);
+    }
+
+    #[test]
+    fn a_go_test_config_is_listed_but_not_runnable() {
+        // `test` mode is deferred (M22): delve can build-and-test, but lazydap
+        // has no way to say "this is a test". Falsely marking it runnable and
+        // then running it as an ordinary program is the bug this prevents.
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "go", "request": "launch", "name": "unit", "mode": "test", "program": "${workspaceFolder}/pkg"}
+            ]}"#,
+        );
+
+        let config = &imported.configs[0];
+        // Still listed, and still names delve — a person wants to see it.
+        assert_eq!(config.adapter, Some(AdapterKind::Delve));
+        assert_eq!(config.adapter_type, "go");
+        let reason = config.not_runnable().expect("test mode is not runnable");
+        assert!(
+            reason.to_string().contains("test"),
+            "the reason must name the mode: {reason}",
+        );
+    }
+
+    #[test]
+    fn a_go_exec_config_pointing_at_a_go_source_is_not_runnable() {
+        // `exec` runs a prebuilt binary; a `.go` source is not one. Caught at
+        // import so the reason names the file rather than surfacing as an
+        // adapter crash at launch.
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "go", "request": "launch", "name": "oops", "mode": "exec", "program": "main.go"}
+            ]}"#,
+        );
+
+        let reason = imported.configs[0]
+            .not_runnable()
+            .expect("exec on a .go source is a contradiction");
+        assert!(
+            reason.to_string().contains("exec"),
+            "the reason must name the mode: {reason}",
         );
     }
 

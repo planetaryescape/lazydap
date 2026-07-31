@@ -132,15 +132,26 @@ pub enum NotRunnable {
     UnresolvedVariables { variables: Vec<String> },
     /// The configuration's arguments could not be read as a list.
     BadArguments { problem: String },
+    /// A delve launch mode lazydap will not run as written: `test` (deferred to
+    /// a later milestone), or `exec` naming a `.go` source rather than a built
+    /// binary. Listed with the reason rather than run into an adapter error.
+    DelveMode { problem: String },
 }
 
 impl std::fmt::Display for NotRunnable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedAdapter { adapter_type } => write!(
-                f,
-                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb and debugpy only",
-            ),
+            Self::UnsupportedAdapter { adapter_type } => {
+                let shipped = crate::AdapterKind::ALL
+                    .iter()
+                    .map(crate::AdapterKind::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "it needs a `{adapter_type}` adapter, and lazydap ships {shipped} only",
+                )
+            }
             Self::AttachNotSupported => {
                 f.write_str("it attaches to a running process, which lazydap cannot do yet")
             }
@@ -153,6 +164,10 @@ impl std::fmt::Display for NotRunnable {
             Self::BadArguments { problem } => {
                 write!(f, "its arguments could not be read: {problem}")
             }
+            // The `problem` is already a full sentence, built where the mode is
+            // known — there are two unrelated causes and one phrasing here
+            // could not fit both.
+            Self::DelveMode { problem } => f.write_str(problem),
         }
     }
 }

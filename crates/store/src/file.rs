@@ -521,17 +521,18 @@ mod tests {
 
     #[test]
     fn a_launch_config_this_build_cannot_run_is_still_read() {
-        // `delve` rather than `debugpy`, which this build gained at M18. The
-        // point of the test is the adapter nobody here can drive, and it needs
-        // a name that is still one.
+        // `coreclr` rather than `debugpy` (gained at M18) or `delve` (M22).
+        // The point of the test is the adapter nobody here can drive, so it
+        // needs a name that is still one — and this test has now been rewritten
+        // twice for that reason, which is the shape of the milestone working.
         let document: Document = toml::from_str(
-            "[[launch_configs]]\nname = \"api\"\nadapter = \"delve\"\nprogram = \"main.go\"\n",
+            "[[launch_configs]]\nname = \"api\"\nadapter = \"coreclr\"\nprogram = \"App.dll\"\n",
         )
         .expect("parse");
 
         let (configs, _) = launch_configs(&document.unknown, Path::new("/p"));
         assert_eq!(configs[0].adapter, None);
-        assert_eq!(configs[0].adapter_type, "delve");
+        assert_eq!(configs[0].adapter_type, "coreclr");
         assert!(configs[0].not_runnable().is_some());
     }
 

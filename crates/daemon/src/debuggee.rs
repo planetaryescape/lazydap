@@ -29,6 +29,15 @@
 //! That is fragile, and it is allowed to be: this is best-effort cleanup. A
 //! parse that fails leaves things exactly as they were before this module
 //! existed, and says so in the log rather than failing a session.
+//!
+//! # Which program is "the" program
+//!
+//! [`Debuggee::program`] is what the *adapter* says it started, not what
+//! lazydap asked for, whenever the adapter says (D061). Usually those are one
+//! file. Under delve's `mode: "debug"` they are not: it compiles the `.go`
+//! source and runs the resulting binary, so a debuggee identified by the source
+//! path matches nothing in `ps` and [`Debuggee::reap`] declines to kill it —
+//! which was a real leak, found by M22's suite killing an adapter mid-run.
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command;

@@ -45,8 +45,9 @@ pub enum Command {
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
 
-        /// Which debug adapter to use. Defaults to the one the program's file
-        /// extension implies — debugpy for `.py`, codelldb otherwise.
+        /// Which debug adapter to use: codelldb, debugpy or delve. Defaults to
+        /// the one the program's file extension implies — debugpy for `.py`,
+        /// delve for `.go`, codelldb otherwise.
         #[arg(long)]
         adapter: Option<AdapterKind>,
 

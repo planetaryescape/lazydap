@@ -91,8 +91,8 @@ pub async fn launch(
     // must not do this: the process was somebody else's before we looked at
     // it, and killing it because our adapter crashed would destroy something
     // we never started (D045).
-    if let Some(pid) = launched.debuggee_pid {
-        session.set_debuggee(pid);
+    if let Some(started) = launched.debuggee {
+        session.set_debuggee(started);
     }
 
     session.seed_events(
@@ -195,6 +195,11 @@ pub async fn disconnect(
         );
     }
     session.adapter().kill().await;
+    // Belt-and-braces after killing the adapter: delve deletes its own compiled
+    // binary when it handles the `disconnect` above, so this is normally a
+    // no-op — but an adapter that ignored the disconnect and had to be killed
+    // never got there, and this catches that (delve quirk 5).
+    session.clean_compiled_artifact();
     // `end_once` sets the state, and only if this is the first ending: a
     // session whose debuggee had already exited keeps `exited` and its exit
     // code, rather than being relabelled `terminated` on the way out.

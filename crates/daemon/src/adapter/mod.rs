@@ -24,6 +24,7 @@
 // convenient `use` at a time.
 mod codelldb;
 mod debugpy;
+mod delve;
 mod handshake;
 mod pump;
 mod translate;
@@ -35,8 +36,8 @@ use lazydap_core::{
 use lazydap_dap::{
     ContinueArgs, ContinueResponse, DapRequest, DapResponse, DapWriter, DisconnectArgs,
     EvaluateArgs, EvaluateResponse, PauseArgs, ScopesArgs, ScopesResponse, SetBreakpointsArgs,
-    SetBreakpointsResponse, Source, StackTraceArgs, StackTraceResponse, StepArgs, ThreadsResponse,
-    TransportError, VariablesArgs, VariablesResponse,
+    SetBreakpointsResponse, Source, StackTraceArgs, StackTraceResponse, StepArgs, TcpSpawn,
+    ThreadsResponse, TransportError, VariablesArgs, VariablesResponse,
 };
 use lazydap_protocol::{ErrorCode, IpcError, LaunchRequest};
 use serde::Serialize;
@@ -48,7 +49,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 
-pub use handshake::{Launched, launch};
+/// delve's temp-binary predicate, for the teardown cleanup in [`crate::state`].
+/// The `delve` module stays private; only this one path check leaves it.
+pub(crate) use delve::is_compiled_artifact;
+pub use handshake::{Launched, StartedProcess, launch};
 pub use pump::spawn_pump;
 
 /// What one debug adapter does differently from another.
@@ -116,20 +120,23 @@ pub trait DebugAdapter: Send + Sync {
 /// than guessed at from the command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spawn {
-    /// Start it and connect to the TCP port it announces on stderr.
-    Tcp { command: PathBuf },
+    /// Start it and connect to the TCP port it announces as it comes up.
+    /// Which stream, and under what words, is part of the recipe: codelldb and
+    /// delve share nothing about their own startup.
+    Tcp(TcpSpawn),
     /// Start it and speak DAP over its own stdin and stdout.
     Stdio { program: PathBuf, args: Vec<String> },
 }
 
 /// The implementation for one adapter kind.
 ///
-/// `&'static` rather than boxed: neither adapter carries any state — what they
-/// are is which methods they implement — so there is nothing to allocate.
+/// `&'static` rather than boxed: no adapter carries any state — what they are
+/// is which methods they implement — so there is nothing to allocate.
 pub fn for_kind(kind: AdapterKind) -> &'static dyn DebugAdapter {
     match kind {
         AdapterKind::Codelldb => &codelldb::CodeLldb,
         AdapterKind::Debugpy => &debugpy::Debugpy,
+        AdapterKind::Delve => &delve::Delve,
     }
 }
 
@@ -801,6 +808,7 @@ fn discover_in(
     let binaries: &[&str] = match kind {
         AdapterKind::Codelldb => &["codelldb"],
         AdapterKind::Debugpy => &["python3", "python"],
+        AdapterKind::Delve => &["dlv"],
     };
 
     // Tier one. A pinned path that is wrong is an error rather than a reason
@@ -857,50 +865,79 @@ fn discover_in(
 
 /// Whether `command` can actually act as this adapter.
 ///
-/// Only debugpy needs asking. codelldb is the adapter: if the binary is there,
-/// it is the thing. debugpy is a *module*, so an interpreter on `PATH` proves
-/// nothing — the failure without this check is a launch that gets far enough
-/// to spawn a process, which then dies with a Python traceback about a missing
-/// module, reported as a crashed adapter.
+/// codelldb needs no asking: it *is* the adapter, so a binary at that path is
+/// the thing. The other two are each one step removed from what discovery
+/// finds, and each has a failure that is unrecognisable without a probe:
 ///
-/// Costs one interpreter start-up per launch, which is a few tens of
-/// milliseconds against a launch already measured in seconds, and buys the
-/// difference between an honest `AdapterNotFound` and a mystery.
+/// - debugpy is a *module*, so an interpreter on `PATH` proves nothing. Without
+///   this the launch gets far enough to spawn a process, which dies with a
+///   Python traceback about a missing module, reported as a crashed adapter.
+/// - `dlv` is a binary, but DAP is a *subcommand* of it, added in 1.6. An
+///   older one — or something else called `dlv` — starts, prints a usage
+///   error, and never announces a port, which surfaces as a launch that timed
+///   out for no stated reason.
+///
+/// Costs one process start-up per launch, tens of milliseconds against a launch
+/// already measured in seconds, and buys the difference between an honest
+/// `AdapterNotFound` and a mystery.
 fn usable(kind: AdapterKind, command: &Path) -> Result<()> {
-    if kind != AdapterKind::Debugpy {
-        return Ok(());
+    match kind {
+        AdapterKind::Codelldb => Ok(()),
+        AdapterKind::Debugpy => {
+            // Answered rather than merely exiting zero. A pinned command that
+            // is not an interpreter at all — `/bin/echo` is the honest
+            // accident, a shell wrapper the interesting one — succeeds at
+            // almost any argument list, so "it did not fail" proves nothing.
+            // Only something that really ran the program prints this back.
+            const PROOF: &str = "lazydap-debugpy-ok";
+            let answered = answers(
+                command,
+                &["-c".into(), format!("import debugpy; print('{PROOF}')")],
+                |stdout| stdout.trim() == PROOF,
+            );
+            answered
+                .then_some(())
+                .ok_or_else(|| AdapterError::Incomplete {
+                    adapter: kind,
+                    path: command.to_path_buf(),
+                    problem: "it cannot import debugpy".to_string(),
+                    hint: format!(
+                        "install it with `{} -m pip install debugpy`",
+                        command.display(),
+                    ),
+                })
+        }
+        AdapterKind::Delve => {
+            // `dlv help dap` rather than `dlv version`: the version is printed
+            // by every delve ever built, and what has to be true here is that
+            // this one has the DAP subcommand at all.
+            let answered = answers(command, &["help".into(), "dap".into()], |stdout| {
+                stdout.contains("dap")
+            });
+            answered.then_some(()).ok_or_else(|| AdapterError::Incomplete {
+                adapter: kind,
+                path: command.to_path_buf(),
+                problem: "it does not have delve's `dap` subcommand".to_string(),
+                hint: "install a current one with `go install github.com/go-delve/delve/cmd/dlv@latest`"
+                    .to_string(),
+            })
+        }
     }
+}
 
-    // Answered rather than merely exiting zero. A pinned command that is not
-    // an interpreter at all — `/bin/echo` is the honest accident, a shell
-    // wrapper the interesting one — succeeds at almost any argument list, so
-    // "it did not fail" proves nothing. Only something that really ran the
-    // program prints exactly this back.
-    const PROOF: &str = "lazydap-debugpy-ok";
-
-    let ran = std::process::Command::new(command)
-        .args(["-c", &format!("import debugpy; print('{PROOF}')")])
+/// Run `command` with `args` and ask whether its output proves what it should.
+///
+/// Deliberately not "did it exit zero": the commands being probed here are
+/// stand-ins for something else, and a wrapper script that exits zero at
+/// anything would pass that test while being unable to do the job.
+fn answers(command: &Path, args: &[String], proof: impl Fn(&str) -> bool) -> bool {
+    std::process::Command::new(command)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output();
-
-    match ran {
-        Ok(output)
-            if output.status.success()
-                && String::from_utf8_lossy(&output.stdout).trim() == PROOF =>
-        {
-            Ok(())
-        }
-        _ => Err(AdapterError::Incomplete {
-            adapter: kind,
-            path: command.to_path_buf(),
-            problem: "it cannot import debugpy".to_string(),
-            hint: format!(
-                "install it with `{} -m pip install debugpy`",
-                command.display(),
-            ),
-        }),
-    }
+        .output()
+        .map(|output| output.status.success() && proof(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or(false)
 }
 
 fn is_executable(path: &Path) -> bool {

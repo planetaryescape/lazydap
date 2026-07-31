@@ -2,7 +2,7 @@
 
 Debug from the shell: one command per step, one JSON answer per command — for your agent, your scripts, and your CI.
 
-lazydap turns a real debugger into shell subcommands that answer in JSON you can build on. Set a breakpoint with `lazydap break hello.c:6`, run to it with `lazydap continue --wait`, read one object that says where the program stopped, why, and everything it printed on the way. A daemon holds the session so each command can be a separate process; an agent drives it with nothing but a Bash tool ([the skill ships in this repo](#for-agents)); CI branches on its exit codes. The schema and the exit codes are contracts — kept stable on purpose and tested against real codelldb and debugpy.
+lazydap turns a real debugger into shell subcommands that answer in JSON you can build on. Set a breakpoint with `lazydap break hello.c:6`, run to it with `lazydap continue --wait`, read one object that says where the program stopped, why, and everything it printed on the way. A daemon holds the session so each command can be a separate process; an agent drives it with nothing but a Bash tool ([the skill ships in this repo](#for-agents)); CI branches on its exit codes. The schema and the exit codes are contracts — kept stable on purpose and tested against real codelldb, debugpy and delve.
 
 It exists for the work where a debugger is not optional: memory you manage by hand, crashes that destroy their own evidence, races you cannot printf around, and the native library underneath your Python.
 
@@ -268,9 +268,9 @@ For agents working *on* this repo rather than with it, [`AGENTS.md`](AGENTS.md) 
 
 Launch, breakpoints (set, list, remove, toggle, conditions, hit counts, log points), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, watches, captured output, launches, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints and watches. A config file for adapter pins and the default timeout, and `.vscode/launch.json` import. A daemon per project with a live event stream clients can subscribe to. A TUI with source, stack, scopes, watches and REPL panes that reconnects on its own.
 
-Scope today: **C, C++ and Rust via codelldb, Python via debugpy**, **one session at a time**, **macOS and Linux**. (The v0.1.0 release is codelldb-only; Python, watches and the REPL landed after that tag and ship with the next one. Build from source for everything on this page.)
+Scope today: **C, C++ and Rust via codelldb, Python via debugpy, Go via delve**, **one session at a time**, **macOS and Linux**. (The v0.1.0 release is codelldb-only; Python, Go, watches and the REPL landed after that tag and ship with the next one. Build from source for everything on this page.)
 
-Not built, in rough order: `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, delve and js-debug, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
+Not built, in rough order: `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, js-debug for Node, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
 
 Windows is not a target. Nothing here phones home ([`PRIVACY.md`](PRIVACY.md)).
 

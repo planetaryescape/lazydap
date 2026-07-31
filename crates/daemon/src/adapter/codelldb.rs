@@ -8,7 +8,7 @@
 
 use super::{DebugAdapter, Spawn};
 use lazydap_core::{AdapterKind, PauseReason};
-use lazydap_dap::LaunchArgs;
+use lazydap_dap::{AdapterStream, LaunchArgs, TcpSpawn};
 use lazydap_protocol::LaunchRequest;
 use std::path::Path;
 
@@ -23,10 +23,19 @@ impl DebugAdapter for CodeLldb {
     /// mode reports the port it chose, and letting it choose is what keeps two
     /// lazydap projects on one machine from fighting over a fixed one
     /// (quirk 3).
+    ///
+    /// `RUST_LOG=debug` is not optional: codelldb logs its `Listening on ...`
+    /// line at debug level, so without it the adapter is silent on stderr and
+    /// the transport's line loop waits forever. See
+    /// `docs/issues/0002-codelldb-version-drift-rust-log.md`.
     fn spawn(&self, command: &Path) -> Spawn {
-        Spawn::Tcp {
-            command: command.to_path_buf(),
-        }
+        Spawn::Tcp(TcpSpawn {
+            program: command.to_path_buf(),
+            args: vec!["--port".into(), "0".into()],
+            env: vec![("RUST_LOG".into(), "debug".into())],
+            port_stream: AdapterStream::Stderr,
+            port_marker: "Listening on ",
+        })
     }
 
     fn adapter_id(&self) -> &'static str {

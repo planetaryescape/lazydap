@@ -62,11 +62,11 @@ pub struct Launched {
     /// The process the adapter started, when it said which.
     ///
     /// Read during the handshake rather than by the pump, because the message
-    /// carrying it arrives *while* the handshake owns the reads. debugpy says
-    /// so in the DAP `process` event; codelldb only says it in console text
-    /// (quirk 9). The pump watches for a late `process` event as well, because
-    /// nothing guarantees it arrives before the launch settles.
-    pub debuggee_pid: Option<u32>,
+    /// carrying it arrives *while* the handshake owns the reads. debugpy and
+    /// delve say so in the DAP `process` event; codelldb only says it in
+    /// console text (quirk 9). The pump watches for a late `process` event as
+    /// well, because nothing guarantees it arrives before the launch settles.
+    pub debuggee: Option<StartedProcess>,
 }
 
 /// The read half plus the map the pump delivers responses into. Opaque on
@@ -99,7 +99,7 @@ pub async fn launch(
     };
 
     let mut transport = match adapter.spawn(&adapter_path) {
-        Spawn::Tcp { command } => DapTransport::spawn_tcp(&command.to_string_lossy()).await?,
+        Spawn::Tcp(spawn) => DapTransport::spawn_tcp(&spawn).await?,
         Spawn::Stdio { program, args } => {
             DapTransport::spawn_stdio(program.as_os_str(), &args).await?
         }
@@ -119,11 +119,16 @@ pub async fn launch(
                 thread_id: outcome.thread_id,
                 breakpoints: outcome.breakpoints,
                 exit_code: outcome.exit_code,
-                debuggee_pid: outcome.debuggee_pid.or_else(|| {
+                // codelldb sends no `process` event, so its pid is scraped out
+                // of console text and comes with no program name — which is
+                // right for codelldb, whose debuggee *is* the program that was
+                // launched (quirk 9).
+                debuggee: outcome.debuggee.or_else(|| {
                     outcome
                         .output
                         .iter()
                         .find_map(|chunk| adapter.debuggee_pid_in(&chunk.output))
+                        .map(|pid| StartedProcess { pid, program: None })
                 }),
                 output: outcome.output,
             })
@@ -147,7 +152,7 @@ struct Outcome {
     breakpoints: Vec<AdapterBreakpoint>,
     exit_code: Option<i32>,
     output: Vec<OutputChunk>,
-    debuggee_pid: Option<u32>,
+    debuggee: Option<StartedProcess>,
 }
 
 async fn handshake(
@@ -193,7 +198,7 @@ async fn handshake(
         breakpoints: Vec::new(),
         exit_code: Option::None,
         output: Vec::new(),
-        debuggee_pid: None,
+        debuggee: None,
     };
 
     loop {
@@ -236,7 +241,7 @@ async fn handshake(
                 // The debuggee's pid, said the way the spec says to say it.
                 // debugpy sends this; codelldb does not (quirk 9), which is
                 // what `debuggee_pid_in` is for.
-                "process" => outcome.debuggee_pid = system_process_id(&event),
+                "process" => outcome.debuggee = started_process(&event),
                 "stopped" => {
                     let body = event.body.unwrap_or_default();
                     let raw = body["reason"].as_str().unwrap_or("unknown");
@@ -398,18 +403,45 @@ fn exit_code_of(event: &DapEvent) -> Option<i32> {
         .map(|code| code as i32)
 }
 
-/// The debuggee's pid from a DAP `process` event.
+/// The process the adapter started, as it described it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedProcess {
+    pub pid: u32,
+    /// What the adapter says it actually ran.
+    ///
+    /// Not always what lazydap asked it to run, and that difference is why
+    /// this is carried at all. delve's `mode: "debug"` *compiles* the `.go`
+    /// file it is given and runs the resulting binary, so the process in the
+    /// table is a path lazydap never named. The reaper identifies a debuggee by
+    /// matching its command line against what was launched (D045), and against
+    /// the `.go` path that match fails — so it declines to kill, and a Go
+    /// debuggee whose adapter died survives. Taking the adapter's word for what
+    /// it ran fixes that for every adapter at once (D061).
+    pub program: Option<PathBuf>,
+}
+
+/// The debuggee from a DAP `process` event.
 ///
 /// Only a *local* process is reported. `isLocalProcess: false` means the
 /// adapter is describing something on another machine, and a pid from another
 /// machine's namespace names an unrelated process on this one — which the
 /// reaper in [`crate::debuggee`] would then be entitled to kill.
-pub(super) fn system_process_id(event: &DapEvent) -> Option<u32> {
+pub(super) fn started_process(event: &DapEvent) -> Option<StartedProcess> {
     let body = event.body.as_ref()?;
     if body["isLocalProcess"] == serde_json::Value::Bool(false) {
         return None;
     }
-    body["systemProcessId"].as_u64().map(|pid| pid as u32)
+    Some(StartedProcess {
+        pid: body["systemProcessId"].as_u64()? as u32,
+        // Only an absolute path is worth having. `name` is documented as
+        // something to show a user, and an adapter that fills it with a bare
+        // program name or a label would have the reaper matching that against
+        // `ps` output and killing whatever agreed.
+        program: body["name"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()),
+    })
 }
 
 fn translate_capabilities(capabilities: &Capabilities) -> AdapterCapabilities {
@@ -446,6 +478,7 @@ async fn with_timeout<F: Future>(command: &str, deadline: Instant, future: F) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn an_output_event_becomes_a_typed_chunk() {
@@ -510,7 +543,46 @@ mod tests {
         )
         .expect("deserialise");
 
-        assert_eq!(system_process_id(&event), Some(93720));
+        let started = started_process(&event).expect("a process");
+        assert_eq!(started.pid, 93720);
+        assert_eq!(started.program.as_deref(), Some(Path::new("/tmp/main.py")));
+    }
+
+    /// The event delve actually sends for `mode: "debug"`, captured from a real
+    /// run. `name` is the binary it compiled — not the `.go` file lazydap
+    /// asked it to run, which is the whole reason the name is read (D061).
+    #[test]
+    fn a_compiled_debuggee_is_identified_by_what_the_adapter_ran() {
+        let event: DapEvent = serde_json::from_str(
+            r#"{"seq":1,"type":"event","event":"process","body":{
+                "name":"/tmp/lazydap-delve-90235-1785499820892284000",
+                "systemProcessId":90248,"isLocalProcess":true,
+                "startMethod":"launch"}}"#,
+        )
+        .expect("deserialise");
+
+        let started = started_process(&event).expect("a process");
+        assert_eq!(
+            started.program.as_deref(),
+            Some(Path::new("/tmp/lazydap-delve-90235-1785499820892284000")),
+            "matching the .go path against this would decline to reap it",
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_path_is_not_used_to_identify_anything() {
+        // `name` is documented as something to show a user. An adapter that
+        // fills it with a label would have the reaper matching that against
+        // `ps` output and killing whatever agreed.
+        let event: DapEvent = serde_json::from_str(
+            r#"{"seq":1,"type":"event","event":"process","body":{
+                "name":"node","systemProcessId":42,"isLocalProcess":true}}"#,
+        )
+        .expect("deserialise");
+
+        let started = started_process(&event).expect("a process");
+        assert_eq!(started.pid, 42);
+        assert_eq!(started.program, None, "falls back to what was launched");
     }
 
     #[test]
@@ -523,6 +595,6 @@ mod tests {
         )
         .expect("deserialise");
 
-        assert_eq!(system_process_id(&event), None);
+        assert_eq!(started_process(&event), None);
     }
 }

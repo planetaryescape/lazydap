@@ -190,8 +190,8 @@ agent reading one screen.
 - **You want a TUI above all.** The TUI is real but deliberately second: it gets features
   after the CLI does, because the CLI is where they are defined.
 - **You are debugging in a browser.** No CDP support, and none planned.
-- **Go or Node today.** codelldb and debugpy cover C, C++, Rust and Python; delve and
-  js-debug are next on the roadmap.
+- **Node today.** codelldb, debugpy and delve cover C, C++, Rust, Python and Go; js-debug
+  is next on the roadmap.
 - **You want it hosted.** There is no lazydap cloud. Nothing here phones home.
 
 ## What would prove this wrong

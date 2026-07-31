@@ -40,7 +40,7 @@ pub enum TransportError {
     #[error("port parse: {0}")]
     PortParse(#[from] std::num::ParseIntError),
 
-    #[error("adapter did not announce a port on stderr ({0})")]
+    #[error("adapter did not announce a port ({0})")]
     NoPortFromAdapter(String),
 
     #[error("response for request_seq {request_seq} while waiting on {expected}")]
@@ -66,47 +66,157 @@ pub enum Incoming {
     ReverseRequest(DapRequest),
 }
 
+/// How to start one TCP adapter and recognise the port it chose.
+///
+/// Every field differs between the two adapters that use this, which is why it
+/// is a value the adapter module supplies rather than anything decided here.
+/// codelldb is `codelldb --port 0` with `RUST_LOG=debug` set, announcing
+/// `Listening on 127.0.0.1:1234` on **stderr**; delve is
+/// `dlv dap --listen=127.0.0.1:0`, announcing
+/// `DAP server listening at: 127.0.0.1:1234` on **stdout**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpSpawn {
+    pub program: std::path::PathBuf,
+    pub args: Vec<String>,
+    /// Environment the adapter needs before it will announce anything at all.
+    /// codelldb logs its port at debug level, so without `RUST_LOG=debug` it
+    /// is silent and the line loop below waits forever.
+    pub env: Vec<(String, String)>,
+    /// Which of the child's streams the announcement arrives on.
+    pub port_stream: AdapterStream,
+    /// The text immediately before the address. What follows is read as either
+    /// `port N` or a `host:port`.
+    pub port_marker: &'static str,
+}
+
+/// Which of a child's two output streams something arrives on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterStream {
+    Stdout,
+    Stderr,
+}
+
 pub struct DapTransport {
     reader: DapReader,
     writer: DapWriter,
 }
 
-impl DapTransport {
-    /// Start an adapter that listens on a TCP port and announces it on stderr,
-    /// then connect to it.
-    ///
-    /// One of the two shapes a DAP adapter comes in, and the one codelldb
-    /// uses. The other is [`spawn_stdio`](Self::spawn_stdio). Which one an
-    /// adapter wants is a property of that adapter, so the choice is made in
-    /// the adapter module rather than here.
-    pub async fn spawn_tcp(adapter_path: &str) -> Result<Self> {
-        // codelldb's "Listening on HOST:PORT" line is logged at debug level — without
-        // RUST_LOG=debug in its env, the adapter is silent on stderr and our line-loop
-        // hangs forever. See docs/issues/0002-codelldb-version-drift-rust-log.md.
-        let mut child = Command::new(adapter_path)
-            .arg("--port")
-            .arg("0")
-            .env("RUST_LOG", "debug")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+/// Longest to wait for a TCP adapter to announce the port it chose.
+///
+/// A separate, earlier deadline than the daemon's launch timeout, which does
+/// not begin until `initialize` is sent — after the port is known. This one
+/// covers the gap before that: process spawned, socket held, port never
+/// printed. Fifteen seconds matches the handshake's per-message timeout; a
+/// slower cold start (a large adapter binary paging in) still fits.
+const SPAWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 
-        let stderr = child.stderr.take().expect("stderr piped");
-        let mut lines = BufReader::new(stderr).lines();
-
-        let mut port: Option<u16> = None;
-        while let Some(line) = lines.next_line().await? {
-            tracing::debug!(target: "dap.adapter.stderr", "{line}");
-            if let Some((_, rest)) = line.split_once("Listening on ") {
-                let port_str = rest
-                    .strip_prefix("port ")
-                    .unwrap_or_else(|| rest.rsplit(':').next().unwrap_or(rest));
-                port = Some(port_str.trim().parse()?);
-                break;
-            }
+/// Read lines until one carries the port marker, returning the port, or `None`
+/// if the stream ends first.
+///
+/// The two spellings the adapters use: codelldb's `Listening on port 1234` and
+/// an address, `127.0.0.1:1234`, which is what codelldb's other builds and
+/// delve both print.
+async fn read_announced_port(
+    lines: &mut tokio::io::Lines<BufReader<Source>>,
+    marker: &str,
+) -> Result<Option<u16>> {
+    while let Some(line) = lines.next_line().await? {
+        tracing::debug!(target: "dap.adapter.announce", "{line}");
+        if let Some((_, rest)) = line.split_once(marker) {
+            let port_str = rest
+                .strip_prefix("port ")
+                .unwrap_or_else(|| rest.rsplit(':').next().unwrap_or(rest));
+            return Ok(Some(port_str.trim().parse()?));
         }
-        let Some(port) = port else {
+    }
+    Ok(None)
+}
+
+/// Read a child stream into the log until it ends.
+///
+/// Every pipe lazydap opens needs one of these. A child whose pipe fills up
+/// blocks writing to it, and an adapter blocked in a log call answers no
+/// requests.
+fn drain(stream: impl AsyncRead + Send + Unpin + 'static) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(target: "dap.adapter.stderr", "{line}");
+        }
+    });
+}
+
+impl DapTransport {
+    /// Start an adapter that listens on a TCP port and announces it as it
+    /// starts, then connect to it.
+    ///
+    /// One of the two shapes a DAP adapter comes in; the other is
+    /// [`spawn_stdio`](Self::spawn_stdio). Which one an adapter wants is a
+    /// property of that adapter, so the choice is made in the adapter module
+    /// rather than here — and so is every part of *how*, which is what
+    /// [`TcpSpawn`] carries. The two TCP adapters lazydap ships agree on
+    /// nothing about their own startup: different flags, different environment,
+    /// and the announcement on a different stream under different words.
+    pub async fn spawn_tcp(spawn: &TcpSpawn) -> Result<Self> {
+        Self::spawn_tcp_within(spawn, SPAWN_DEADLINE).await
+    }
+
+    /// [`spawn_tcp`](Self::spawn_tcp) with the announcement deadline injected,
+    /// so a test can bound it to milliseconds rather than waiting out the real
+    /// fifteen seconds.
+    async fn spawn_tcp_within(spawn: &TcpSpawn, deadline: std::time::Duration) -> Result<Self> {
+        let (stdout, stderr) = match spawn.port_stream {
+            AdapterStream::Stdout => (Stdio::piped(), Stdio::piped()),
+            AdapterStream::Stderr => (Stdio::null(), Stdio::piped()),
+        };
+        let mut command = Command::new(&spawn.program);
+        command
+            .args(&spawn.args)
+            .stdout(stdout)
+            .stderr(stderr)
+            .kill_on_drop(true);
+        for (key, value) in &spawn.env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn()?;
+
+        // The stream the announcement is *not* on still has to be drained: a
+        // child whose pipe fills up blocks writing to it, and an adapter
+        // blocked in a log call answers no requests.
+        let announcing: Source = match spawn.port_stream {
+            AdapterStream::Stdout => {
+                drain(child.stderr.take().expect("stderr piped"));
+                Box::new(child.stdout.take().expect("stdout piped"))
+            }
+            AdapterStream::Stderr => Box::new(child.stderr.take().expect("stderr piped")),
+        };
+        let mut lines = BufReader::new(announcing).lines();
+
+        // Bound the wait for the announcement, not just the reads inside the
+        // handshake that follows it. The launch deadline in the daemon only
+        // starts once `initialize` is sent — which is *after* this returns — so
+        // an adapter that starts, holds the socket, and never prints its port
+        // would otherwise hang the client here with no deadline at all, while
+        // the daemon keeps the session slot reserved (D007) and bricks every
+        // later launch until `shutdown`. On timeout the child is killed and an
+        // honest error is returned; the caller's reservation frees on that
+        // error like any other launch failure.
+        let announced = match tokio::time::timeout(
+            deadline,
+            read_announced_port(&mut lines, spawn.port_marker),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                return Err(TransportError::NoPortFromAdapter(format!(
+                    "adapter did not announce a port within {}s",
+                    deadline.as_secs(),
+                )));
+            }
+        };
+        let Some(port) = announced else {
             // A missing port line usually means the adapter died on startup
             // (e.g. the liblldb path footgun in docs/reference/codelldb-quirks.md).
             // Report its exit status rather than a bare "no port".
@@ -119,7 +229,7 @@ impl DapTransport {
 
         tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "dap.adapter.stderr", "{line}");
+                tracing::debug!(target: "dap.adapter.announce", "{line}");
             }
         });
 
@@ -149,14 +259,7 @@ impl DapTransport {
 
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "dap.adapter.stderr", "{line}");
-            }
-        });
+        drain(child.stderr.take().expect("stderr piped"));
 
         Ok(Self::from_parts(child, Box::new(stdout), Box::new(stdin)))
     }
@@ -461,6 +564,46 @@ mod tests {
             .expect("spawn stand-in adapter process");
 
         DapTransport::from_tcp(child, stream)
+    }
+
+    #[tokio::test]
+    async fn a_tcp_adapter_that_never_announces_a_port_times_out_rather_than_hanging() {
+        // Finding 3: an adapter that spawns, holds its streams open, and never
+        // prints its port would otherwise hang the client forever — the
+        // daemon's launch deadline does not start until after the port is
+        // known. `sleep` is exactly that adapter: alive, silent on stdout. The
+        // deadline is injected short so the test does not wait out the real
+        // fifteen seconds.
+        let spawn = TcpSpawn {
+            program: "sleep".into(),
+            args: vec!["30".to_string()],
+            env: Vec::new(),
+            port_stream: AdapterStream::Stdout,
+            port_marker: "Listening on ",
+        };
+
+        let started = std::time::Instant::now();
+        let result = DapTransport::spawn_tcp_within(&spawn, Duration::from_millis(300)).await;
+
+        match result {
+            Err(TransportError::NoPortFromAdapter(detail)) => {
+                assert!(
+                    detail.contains("within"),
+                    "should name the deadline: {detail}"
+                );
+            }
+            Err(other) => {
+                unreachable!("expected a spawn timeout, got a different error: {other:?}")
+            }
+            // `DapTransport` is not `Debug`, so this arm cannot print it — the
+            // message is what matters, and it must not have connected at all.
+            Ok(_) => unreachable!("a silent adapter must not produce a live transport"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it must give up at the deadline, not hang: {:?}",
+            started.elapsed(),
+        );
     }
 
     #[tokio::test]

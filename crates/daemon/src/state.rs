@@ -152,6 +152,13 @@ impl DaemonState {
                 session_id = %id,
                 "reaping a session whose program has finished",
             );
+            // The finished session never disconnected, so delve's compiled
+            // binary is still on disk (finding 4); the adapter itself goes when
+            // the session's `Drop` fires `kill_on_drop`, but that does not touch
+            // the file.
+            if let Some(Slot::Live(session)) = sessions.get(id) {
+                session.clean_compiled_artifact();
+            }
             sessions.remove(id);
         }
         finished.len()
@@ -436,20 +443,28 @@ impl Session {
     ///
     /// Only the first: codelldb prints its launch line once, and a later one
     /// would mean something we have no model for.
-    pub fn set_debuggee(&self, pid: u32) {
+    ///
+    /// The adapter's own word for *what* it started wins over what was
+    /// launched, when it gives one. Usually they are the same file; under
+    /// delve's `mode: "debug"` they are not, because the `.go` source was
+    /// compiled to a binary somewhere else, and the reaper matching on the
+    /// source path would decline to kill its own debuggee (D061).
+    pub fn set_debuggee(&self, started: crate::adapter::StartedProcess) {
         let mut held = lock(&self.debuggee);
         if held.is_some() {
             return;
         }
+        let program = started.program.unwrap_or_else(|| self.program.clone());
         tracing::debug!(
             target: "daemon.session",
             session_id = %self.id,
-            pid,
+            pid = started.pid,
+            program = %program.display(),
             "the adapter told us the debuggee's pid",
         );
         *held = Some(Debuggee {
-            pid,
-            program: self.program.clone(),
+            pid: started.pid,
+            program,
         });
     }
 
@@ -459,6 +474,40 @@ impl Session {
     pub async fn reap_debuggee(&self) -> Option<String> {
         let debuggee = lock(&self.debuggee).clone()?;
         debuggee.reap().await
+    }
+
+    /// Remove a binary lazydap had delve compile, on teardown (best-effort).
+    ///
+    /// delve deletes it itself on a clean `disconnect`; this covers the case it
+    /// did not get to — an adapter that died mid-session (delve quirk 5, D045's
+    /// sibling for files rather than processes). The debuggee's program is what
+    /// delve said it *ran*, which under `mode: "debug"` is the compiled binary
+    /// (D061); only a path the delve adapter recognises as one of ours is
+    /// touched, so an `exec`-mode debuggee the user built is never deleted. A
+    /// file already gone — the ordinary `disconnect` case — is success.
+    pub fn clean_compiled_artifact(&self) {
+        let Some(debuggee) = lock(&self.debuggee).clone() else {
+            return;
+        };
+        if !crate::adapter::is_compiled_artifact(&debuggee.program) {
+            return;
+        }
+        match std::fs::remove_file(&debuggee.program) {
+            Ok(()) => tracing::debug!(
+                target: "daemon.session",
+                session_id = %self.id,
+                path = %debuggee.program.display(),
+                "removed delve's compiled binary on teardown",
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                target: "daemon.session",
+                session_id = %self.id,
+                path = %debuggee.program.display(),
+                %error,
+                "could not remove delve's compiled binary",
+            ),
+        }
     }
 
     /// Fold in a `breakpoint` event so a later `break --list` reflects it.

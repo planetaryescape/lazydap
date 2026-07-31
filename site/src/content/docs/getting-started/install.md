@@ -145,8 +145,26 @@ lazydap completions bash > ~/.local/share/bash-completion/completions/lazydap
 
 ## What you get
 
-C, C++ and Rust, through codelldb. debugpy for Python, delve for Go and js-debug for
-Node are planned and not built, so a Python program has nothing to run it under today.
+Three adapters, each of which you install yourself — lazydap drives them, it does not
+bundle them. `lazydap doctor --check-adapters` reports which ones this machine has.
+
+| Language | Adapter | How to get it |
+|---|---|---|
+| C, C++, Rust | codelldb | the [CodeLLDB releases page](https://github.com/vadimcn/codelldb/releases), or your package manager |
+| Python | debugpy | `python3 -m pip install debugpy` — lazydap looks for an *interpreter* that can import it |
+| Go | delve | `go install github.com/go-delve/delve/cmd/dlv@latest` |
+
+js-debug, for Node, is not built yet.
+
+:::caution[delve needs `GOPATH/bin` on your `PATH`]
+`go install` puts `dlv` in `$(go env GOPATH)/bin`, which is not on `PATH` by default on
+most machines. If `doctor` says delve is missing on a machine you just installed it on,
+that is almost always why — add the directory and try again.
+
+`mode: "debug"` (what a `.go` file gets) also shells out to `go build`, so it needs a Go
+toolchain, not just `dlv`. An already-compiled binary runs under `mode: "exec"` and needs
+neither.
+:::
 
 ## Next
 

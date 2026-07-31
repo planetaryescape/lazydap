@@ -41,23 +41,34 @@ impl FromStr for SessionId {
 
 /// Which external debug adapter backs a session.
 ///
-/// Two of them since M18: codelldb for compiled languages with debug info (C,
-/// C++, Rust), debugpy for Python. The default is codelldb because that is
-/// what a program lazydap cannot classify is most likely to be — a native
-/// binary has no extension to read.
+/// Three of them since M22: codelldb for compiled languages with debug info (C,
+/// C++, Rust), debugpy for Python, delve for Go. The default is codelldb
+/// because that is what a program lazydap cannot classify is most likely to be
+/// — a native binary has no extension to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterKind {
     #[default]
     Codelldb,
     Debugpy,
+    Delve,
 }
 
 impl AdapterKind {
+    /// Every adapter lazydap ships.
+    ///
+    /// A constant rather than a literal at each use site because the two
+    /// callers that need all of them — `doctor`'s adapter sweep and the CLI's
+    /// help text — are arrays the compiler cannot check for exhaustiveness. An
+    /// adapter missing from `doctor` is invisible rather than broken, which is
+    /// the kind of omission that survives a release.
+    pub const ALL: &'static [Self] = &[Self::Codelldb, Self::Debugpy, Self::Delve];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Codelldb => "codelldb",
             Self::Debugpy => "debugpy",
+            Self::Delve => "delve",
         }
     }
 
@@ -69,9 +80,16 @@ impl AdapterKind {
     /// has not asked to debug yet — and getting it wrong silently, which a
     /// missing extension does not. `None` leaves the choice to the caller's
     /// `--adapter`, or to the default.
+    ///
+    /// `.go` is a *source* file and the others here are too, which is the same
+    /// thing it has always meant: the extension says which toolchain owns the
+    /// program, not that the file is directly executable. A compiled Go binary
+    /// has no extension and so lands on codelldb, which can read its DWARF —
+    /// `--adapter delve` is how a caller says otherwise.
     pub fn for_program(program: &std::path::Path) -> Option<Self> {
         match program.extension()?.to_str()? {
             "py" => Some(Self::Debugpy),
+            "go" => Some(Self::Delve),
             "c" | "cc" | "cpp" | "cxx" | "rs" => Some(Self::Codelldb),
             _ => None,
         }
@@ -94,6 +112,10 @@ impl FromStr for AdapterKind {
             // Python extension says; `debugpy` is the current spelling. Both
             // name the same adapter.
             "debugpy" | "python" => Ok(Self::Debugpy),
+            // `go` is what a `launch.json` written for the VS Code Go
+            // extension says; `dlv` is what the binary is called. Both name
+            // delve.
+            "delve" | "dlv" | "go" => Ok(Self::Delve),
             other => Err(UnknownAdapter(other.to_string())),
         }
     }
@@ -104,11 +126,12 @@ pub struct UnknownAdapter(pub String);
 
 impl fmt::Display for UnknownAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unknown adapter: {} (lazydap ships codelldb and debugpy)",
-            self.0,
-        )
+        let shipped = AdapterKind::ALL
+            .iter()
+            .map(AdapterKind::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "unknown adapter: {} (lazydap ships {shipped})", self.0)
     }
 }
 

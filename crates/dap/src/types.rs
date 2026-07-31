@@ -117,6 +117,49 @@ pub struct PythonLaunchArgs {
     pub sub_process: bool,
 }
 
+/// delve's `launch` arguments.
+///
+/// A third struct, for the reason [`PythonLaunchArgs`] gives: `mode`,
+/// `outputMode` and `output` mean nothing to the other two adapters, and two
+/// of the three are load-bearing in a way a shared optional field would hide.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoLaunchArgs {
+    #[serde(rename = "type")]
+    pub adapter_type: String,
+    pub request: String,
+    /// `"debug"` compiles `program` (a `.go` file or package directory) and
+    /// runs the result; `"exec"` runs an already-compiled binary. delve also
+    /// has `"test"`, which lazydap does not send — see
+    /// `docs/reference/delve-quirks.md`.
+    pub mode: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub stop_on_entry: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// Where the debuggee's stdout and stderr go.
+    ///
+    /// `"remote"` is the only value lazydap can use, and delve's default is not
+    /// it. Left alone, delve writes the debuggee's output to **its own stdout**
+    /// — the adapter process's — where nothing is reading it, and every
+    /// `continue --wait` blob comes back with an empty `captured_output` while
+    /// the program is visibly printing. Verified against delve 1.27.0; see
+    /// `docs/reference/delve-quirks.md`, quirk 2.
+    pub output_mode: String,
+    /// Where `mode: "debug"` puts the binary it compiles.
+    ///
+    /// Sent because delve's default is a `__debug_bin<random>` file in the
+    /// *adapter's* working directory — which is the daemon's, so a user's
+    /// repository. delve deletes it when it handles `disconnect`, but an
+    /// adapter that dies without one leaves it behind (quirk 5). Naming a
+    /// temporary path means the leak lands somewhere the operating system
+    /// sweeps rather than in somebody's `git status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBreakpointsArgs {

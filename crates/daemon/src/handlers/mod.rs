@@ -182,10 +182,11 @@ fn doctor(state: &Arc<DaemonState>, check_adapters: bool, check_state: bool) -> 
         // Reporting only the ones that are installed would make a missing one
         // indistinguishable from one lazydap cannot drive at all, which is the
         // question `doctor` exists to answer.
-        for kind in [
-            lazydap_core::AdapterKind::Codelldb,
-            lazydap_core::AdapterKind::Debugpy,
-        ] {
+        //
+        // Read off `AdapterKind::ALL` rather than listed here: a literal is
+        // the one place the compiler cannot notice a new adapter, and an
+        // adapter missing from `doctor` is invisible rather than broken.
+        for &kind in lazydap_core::AdapterKind::ALL {
             let name = format!("adapter.{kind}");
             checks.push(match crate::adapter::discover(kind) {
                 Ok(path) => DoctorCheck {

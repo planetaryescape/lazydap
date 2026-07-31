@@ -339,6 +339,12 @@ async fn shut_down_sessions(state: &Arc<DaemonState>) {
             let _ = session.adapter().disconnect(true).await;
         }
         session.adapter().kill().await;
+        // A session that had already exited never sent the `disconnect` above,
+        // so delve never ran its own cleanup and its compiled binary is still
+        // on disk (finding 4). The live case is belt-and-braces — delve deleted
+        // it when it handled the disconnect — but this path is the one that
+        // actually leaked: exit cleanly, then `shutdown`.
+        session.clean_compiled_artifact();
         session.end_once(EndReason::Disconnected);
     }
 }
