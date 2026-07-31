@@ -890,3 +890,37 @@ about the wrong moment. Counting writes catches that; comparing states does not.
 before asking their real question. `stack_trace` and `variables` take one step and have no
 gap of their own. M16's watches made this reachable in ordinary use rather than only under
 contention: a stop fires one evaluation per expression, and they queue behind each other.
+
+## D060 — the Homebrew formula ships the release binary, and `install.sh` does not trust `releases/latest`
+
+**Status:** decided (2026-07-31, M21).
+
+**Why a binary formula.** `brew install` could build lazydap from source, and Homebrew would
+happily drive `cargo install` for it. That makes every user install a Rust toolchain and
+spend minutes recompiling something the release workflow already compiled on a native runner
+and checksummed. The formula points at the release tarball for the three targets we build —
+macOS arm64 and x86_64, Linux x86_64 — and Homebrew verifies the same SHA-256 the workflow
+published. Anything outside those three still builds from source, which is the honest answer
+rather than a formula that pretends to cover platforms with no build behind them.
+
+The formula states `version` explicitly instead of letting Homebrew scan it out of the URL.
+`brew audit --strict` calls that redundant and it is, for a release like `0.1.0`. It stops
+being redundant at the first prerelease: `lazydap-0.2.0-rc1-aarch64-apple-darwin.tar.gz` is
+not a filename to hand a version parser and hope. A cosmetic audit warning in a
+single-project tap is a smaller cost than a formula that installs the wrong version once.
+
+**Why `install.sh` resolves "latest" through the release list.** The obvious move is the
+`releases/latest` redirect, which is what mxr's installer does. It is wrong here for two
+independent reasons, and it was wrong on the day this was written: this repository also
+publishes `chapter-*` releases for the learn-by-LLM book, and product releases below 1.0 go
+out as prereleases, which that redirect skips. Asked on 2026-07-31 it answered
+`chapter-08` — a book chapter, not a debugger. The installer reads
+`/repos/{owner}/{repo}/releases` and takes the newest tag beginning `v` instead. It costs an
+API call against an unauthenticated rate limit, and a failure there names the fix: pass a
+version.
+
+**Consequences:** the tap (`planetaryescape/homebrew-lazydap`) is a second repository, so
+the release workflow's `homebrew` job needs a `HOMEBREW_TAP_TOKEN` secret it cannot create
+for itself. Without the secret the job renders the formula, logs that it is skipping the
+push, and succeeds — forks and rehearsals are not broken releases. The rendered formula is
+printed to the job log either way, which is also how the tap gets its first copy.

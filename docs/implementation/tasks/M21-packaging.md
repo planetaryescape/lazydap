@@ -78,3 +78,53 @@ brew install --formula /tmp/lazydap.rb && lazydap version && brew uninstall lazy
 - Created 2026-07-31 after the fresh-install audit; user: "fix the gaps".
 - crates.io stays out (D051). The tap is per-project (`homebrew-lazydap`), matching mxr's
   `homebrew-mxr` rather than a shared tap.
+
+## Completed
+
+**2026-07-31.** Everything in this repository is done and verified against the real v0.1.0
+release assets. The two outward-facing halves are not, and cannot be from here: the
+`planetaryescape/homebrew-lazydap` repository does not exist and `HOMEBREW_TAP_TOKEN` is not
+set. Until both land, `brew install planetaryescape/lazydap/lazydap` fails, which is why the
+README and the site both carry a note saying the tap arrives with the next release.
+
+Shipped:
+
+- `install.sh` — `LAZYDAP_INSTALL_DIR` (default `~/.local/bin`), `LAZYDAP_REPO`,
+  `LAZYDAP_BASE_URL`, optional version argument, no sudo, shellcheck-clean.
+- `packaging/homebrew/lazydap.rb` and `scripts/render_homebrew_formula.sh`.
+- A `homebrew` job in `.github/workflows/product-release.yml`, after `publish`.
+- README, `site/src/content/docs/getting-started/install.md`, AGENTS.md ship-it §6, and the
+  release-notes template in the workflow.
+- D060 in the decision log.
+
+### Deviations from the plan
+
+- **"Resolved via the releases/latest redirect" does not work here** and the plan said to do
+  it because mxr does. That redirect answered `chapter-08` on the day this was written: the
+  repository publishes book-chapter releases from the other workflow, and 0.x product
+  releases are prereleases, which the redirect skips on principle. `install.sh` reads the
+  release list and takes the newest `v*` tag instead. D060.
+- **`LAZYDAP_BASE_URL` was not in the plan.** It exists so the download host can be pointed
+  at a mirror, and so the checksum-before-extract behaviour can be rehearsed end to end
+  against a deliberately corrupted tarball, which is otherwise untestable without publishing
+  a bad release.
+- **The formula's licence field** is `license any_of: ["MIT", "Apache-2.0"]`, not the
+  `"MIT OR Apache-2.0"` string mxr's formula uses. `brew audit` rejects the string form as a
+  non-standard SPDX licence.
+- **`prefix.install "README.md"` is not in the formula** even though the plan said to install
+  the docs. Homebrew copies `README.md` and `CHANGELOG.md` out of the tarball on its own; the
+  two `LICENSE-*` files are the ones it does not recognise, so those are explicit. Verified
+  by listing the installed keg.
+- **The plan's `brew install --formula /tmp/lazydap.rb` no longer works.** Homebrew 6.x
+  refuses formulae outside a tap. Verification used `brew tap-new` to make a throwaway local
+  tap, installed from that, and untapped afterwards.
+
+### Follow-ups discovered
+
+- `brew uninstall` now runs `brew autoremove` on its way out, and during verification it
+  removed two unrelated orphaned formulae from the machine. Release verification should use
+  `HOMEBREW_NO_AUTOREMOVE=1`; AGENTS.md §6 says so.
+- The site install page's sample `doctor` output still says `protocol v2`; the daemon is at
+  v5. Untouched here — out of this milestone's blast radius.
+- No Linux arm64 release build exists, so `install.sh` sends aarch64 Linux to a source
+  build. Worth a target if anyone asks.
