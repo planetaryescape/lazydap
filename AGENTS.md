@@ -251,6 +251,53 @@ If your task is "fix a bug in `lazydap continue --wait`":
 - Update the relevant blueprint or task MD file if your code changes the architecture.
 - Don't add a sixth IPC bucket without explicit approval.
 
+### Release shorthand
+
+If the user says `ship it`, run the full release flow:
+
+1. Finalise `CHANGELOG.md`: the top section gets today's date and no unreleased wording —
+   the release workflow's guard refuses to publish a section matching
+   `unreleased|not (yet )?tagged|until the tag is cut`, on purpose.
+2. Bump the workspace version in the root `Cargo.toml` if the current version's tag already
+   exists. Never overwrite a tag or a GitHub release; releases are immutable — a bad one is
+   followed by a fixed one, not replaced.
+3. Full gates on the exact commit being shipped: `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets`, `cargo test --workspace --all-targets`,
+   `bash scripts/check_architecture_boundaries.sh`, `scripts/build-skill.sh` + clean
+   `git diff -- skill/ lazydap.skill`, and `cd site && npm run build`. Echo the literal
+   test count; an empty gate readout is a failed gate.
+4. Commit, push `main`, wait for CI green on that push before tagging.
+5. `git tag -a v{version}` (annotated; plain `git tag` fails wanting a message) and push the
+   tag. The workflow re-runs gates, builds macOS arm64/x86_64 + Linux x86_64, and publishes
+   a GitHub release with tarballs, SHA-256 sums, and `lazydap.skill` attached. `v0.*`
+   publishes as a prerelease. Rehearse first with `workflow_dispatch` if wanted — it runs
+   gates and builds and deliberately stops before publishing.
+6. Verify every install channel in throwaway locations, never against the real install:
+   - **Release tarball**, following the release notes verbatim into a scratch `HOME`:
+     `shasum -a 256 -c` → `tar -xzf` → `install` → `lazydap version --format json` must
+     report the new version.
+   - **Fresh clone**: `git clone` to a scratch dir, then
+     `cargo install --path crates/daemon --root "$(mktemp -d)"`, run `bin/lazydap version`.
+   - **Git install**: `cargo install --git https://github.com/planetaryescape/lazydap
+     --tag v{version} --locked --root "$(mktemp -d)" lazydap-daemon`, run
+     `bin/lazydap version`.
+   - There is **no Homebrew tap and no install.sh yet** — do not claim them anywhere until
+     they exist (candidate milestone; mxr's release pipeline is the template).
+7. One real debug session against the released tarball's binary: `break`, `launch`,
+   `continue --wait` to a breakpoint, `disconnect`, `shutdown`, zero strays
+   (`pgrep -x codelldb`, `pgrep -x lazydap`, and `pgrep -f` on the fixture path).
+8. Redeploy the docs site if `site/` changed since the last deploy:
+   `cd site && vercel deploy --prod --scope planetaryescape`, then confirm
+   `https://lazydap.sh` serves the new content.
+9. Refresh the user's local install and skill: `cargo install --path crates/daemon --force`
+   and re-extract `lazydap.skill` into `~/.claude/skills/lazydap/` (which is
+   `~/.dotfiles/.agents/skills/lazydap/` — same directory through the symlink chain).
+10. Report: tag, release URL, per-channel verification output, and anything skipped.
+
+Source of truth: [`.github/workflows/product-release.yml`](.github/workflows/product-release.yml)
+and the tag-time checklist in `TODO.md`. The protocol version does not need bumping for a
+release — only for wire-shape changes (see D032/D043/D050/D056 for what counts).
+
 ## What you (the agent) should NOT do
 
 - Don't add features without a milestone or task file describing them.
