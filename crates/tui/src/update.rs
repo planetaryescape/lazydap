@@ -297,7 +297,15 @@ fn enter(state: AppState) -> (AppState, Cmd) {
 /// only thing that submits, which is also what makes "paste, then read it
 /// before pressing enter" possible.
 fn pasted(mut state: AppState, text: &str) -> AppState {
-    let text: String = text.split(['\n', '\r']).collect::<Vec<_>>().join(" ");
+    // Empty pieces dropped, not joined: a CRLF paste — which is what a Windows
+    // clipboard and a good many terminals send — splits into three parts with
+    // nothing in the middle, and keeping it would put a double space into the
+    // middle of somebody's expression.
+    let text: String = text
+        .split(['\n', '\r'])
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     if text.is_empty() {
         return state;
     }
@@ -4543,11 +4551,26 @@ mod tests {
         let (state, cmd) = update(state, Msg::Paste("total * 10\n".to_string()));
 
         assert_eq!(cmd, Cmd::None);
-        assert_eq!(state.repl.input(), "total * 10 ");
+        assert_eq!(
+            state.repl.input(),
+            "total * 10",
+            "the trailing newline goes without leaving a space behind it",
+        );
         assert!(
             state.repl.entries().is_empty(),
             "`<CR>` is still the only thing that submits",
         );
+    }
+
+    #[test]
+    fn a_crlf_paste_does_not_leave_a_double_space_in_the_expression() {
+        // What a Windows clipboard and a good many terminals send.
+        let (state, _) = with_watches();
+        let state = focus_repl(state);
+
+        let (state, _) = update(state, Msg::Paste("total\r\n* 10".to_string()));
+
+        assert_eq!(state.repl.input(), "total * 10");
     }
 
     #[test]
