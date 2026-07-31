@@ -222,6 +222,10 @@ fn map(config: VsCodeConfig, root: &Path, warnings: &mut Vec<String>) -> Option<
         // `debugpy` the current one. Files in the wild carry both, and they
         // name the same adapter (M18).
         "debugpy" | "python" => Some(AdapterKind::Debugpy),
+        // What the VS Code Go extension writes. It has one `type` for every
+        // mode — `debug`, `exec`, `test` — and says which in a `mode` field
+        // lazydap infers from the program instead (M22).
+        "go" => Some(AdapterKind::Delve),
         // Microsoft's C/C++ extension describes the same thing — a native
         // program, its arguments, a working directory — so codelldb can run
         // it. Its `MIMode`, `miDebuggerPath` and `setupCommands` are not read,
@@ -934,6 +938,27 @@ mod tests {
 
     #[test]
     fn a_configuration_for_another_debugger_is_listed_with_its_own_type() {
+        // `coreclr`, because this test needs a debugger lazydap does not ship
+        // and `go` stopped being one at M22.
+        let imported = import_str(
+            r#"{"configurations": [
+                {"type": "coreclr", "request": "launch", "name": "API", "program": "App.dll"}
+            ]}"#,
+        );
+
+        let config = &imported.configs[0];
+        assert_eq!(config.adapter, None);
+        assert_eq!(config.adapter_type, "coreclr");
+        assert!(
+            config.not_runnable().is_some(),
+            "listing it is useful; pretending lazydap can run it is not",
+        );
+    }
+
+    #[test]
+    fn a_go_configuration_runs_under_delve() {
+        // What the VS Code Go extension writes. One `type` for every mode;
+        // which mode is inferred from the program, not read from the file.
         let imported = import_str(
             r#"{"configurations": [
                 {"type": "go", "request": "launch", "name": "API", "program": "main.go"}
@@ -941,12 +966,8 @@ mod tests {
         );
 
         let config = &imported.configs[0];
-        assert_eq!(config.adapter, None);
-        assert_eq!(config.adapter_type, "go");
-        assert!(
-            config.not_runnable().is_some(),
-            "listing it is useful; pretending lazydap can run it is not",
-        );
+        assert_eq!(config.adapter, Some(AdapterKind::Delve));
+        assert_eq!(config.not_runnable(), None);
     }
 
     /// A virtualenv pin, which is the normal way a Python project says which

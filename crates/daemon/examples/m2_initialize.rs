@@ -4,7 +4,17 @@ use lazydap_dap::{Capabilities, DapTransport, InitializeArgs};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut transport = DapTransport::spawn_tcp("codelldb").await?;
+    // Through the adapter module rather than with a hand-written recipe: how
+    // codelldb is started — its flags, its `RUST_LOG`, which stream it
+    // announces its port on — is a fact about codelldb, and a second copy of
+    // it here would be one that can drift.
+    let lazydap_daemon::adapter::Spawn::Tcp(spawn) =
+        lazydap_daemon::adapter::for_kind(lazydap_core::AdapterKind::Codelldb)
+            .spawn(std::path::Path::new("codelldb"))
+    else {
+        unreachable!("codelldb speaks DAP over TCP")
+    };
+    let mut transport = DapTransport::spawn_tcp(&spawn).await?;
     let initialize_args: InitializeArgs = InitializeArgs {
         client_id: Some(String::from("lazydap")),
         client_name: Some(String::from("lazydap")),

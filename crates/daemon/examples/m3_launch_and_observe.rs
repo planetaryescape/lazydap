@@ -33,7 +33,15 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let mut transport = DapTransport::spawn_tcp("codelldb").await?;
+    // See `m2_initialize.rs`: the startup recipe belongs to the adapter
+    // module, and copying it here would be a copy that can drift.
+    let lazydap_daemon::adapter::Spawn::Tcp(spawn) =
+        lazydap_daemon::adapter::for_kind(lazydap_core::AdapterKind::Codelldb)
+            .spawn(std::path::Path::new("codelldb"))
+    else {
+        unreachable!("codelldb speaks DAP over TCP")
+    };
+    let mut transport = DapTransport::spawn_tcp(&spawn).await?;
 
     let caps: Capabilities = transport
         .request("initialize", &InitializeArgs::new("lldb"))

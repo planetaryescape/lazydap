@@ -137,10 +137,17 @@ pub enum NotRunnable {
 impl std::fmt::Display for NotRunnable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedAdapter { adapter_type } => write!(
-                f,
-                "it needs a `{adapter_type}` adapter, and lazydap ships codelldb and debugpy only",
-            ),
+            Self::UnsupportedAdapter { adapter_type } => {
+                let shipped = crate::AdapterKind::ALL
+                    .iter()
+                    .map(crate::AdapterKind::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "it needs a `{adapter_type}` adapter, and lazydap ships {shipped} only",
+                )
+            }
             Self::AttachNotSupported => {
                 f.write_str("it attaches to a running process, which lazydap cannot do yet")
             }

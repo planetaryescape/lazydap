@@ -99,7 +99,7 @@ pub async fn launch(
     };
 
     let mut transport = match adapter.spawn(&adapter_path) {
-        Spawn::Tcp { command } => DapTransport::spawn_tcp(&command.to_string_lossy()).await?,
+        Spawn::Tcp(spawn) => DapTransport::spawn_tcp(&spawn).await?,
         Spawn::Stdio { program, args } => {
             DapTransport::spawn_stdio(program.as_os_str(), &args).await?
         }
