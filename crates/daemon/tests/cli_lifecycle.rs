@@ -36,6 +36,64 @@ impl Sandbox {
         self.run_with_config(None, args)
     }
 
+    /// The project directory commands that touch `.lazydap/state.toml` run in.
+    ///
+    /// It carries a `.lazydap` marker so [`project_root`] stops here rather
+    /// than walking up. Without it a `lazydap watch add` run from the test
+    /// harness resolves the *repository* as its project and writes the
+    /// developer's own state file.
+    ///
+    /// [`project_root`]: lazydap_config::paths::project_root
+    fn project(&self) -> PathBuf {
+        let project = self.root.join("p");
+        std::fs::create_dir_all(project.join(".lazydap")).expect("create the project root");
+        project
+    }
+
+    /// Run inside [`Self::project`], which is what makes project state land in
+    /// the sandbox. The daemon inherits this working directory when the first
+    /// command spawns it, and resolves its store from there.
+    fn run_in_project(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(LAZYDAP);
+        command
+            .current_dir(self.project())
+            .env("LAZYDAP_INSTANCE", &self.instance)
+            .env("LAZYDAP_RUNTIME_DIR", self.root.join("r"))
+            .env("LAZYDAP_DATA_DIR", self.root.join("d"));
+        command.args(args).output().expect("run lazydap")
+    }
+
+    /// [`Self::run_in_project`] plus the JSON parse and the loud failure.
+    fn json_in_project(&self, args: &[&str]) -> serde_json::Value {
+        let output = self.run_in_project(args);
+        assert!(
+            output.status.success(),
+            "`lazydap {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            unreachable!(
+                "`lazydap {}` printed something that is not JSON ({error}): {stdout}",
+                args.join(" "),
+            )
+        })
+    }
+
+    fn stdout(&self, args: &[&str]) -> String {
+        let output = self.run_in_project(args);
+        assert!(
+            output.status.success(),
+            "`lazydap {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     /// The same, with `LAZYDAP_CONFIG_PATH` pointed somewhere — including at a
     /// file that is not valid TOML.
     fn run_with_config(&self, config: Option<&PathBuf>, args: &[&str]) -> Output {
@@ -232,5 +290,124 @@ fn an_unknown_subcommand_is_a_usage_error() {
     let sandbox = Sandbox::new("use");
 
     let output = sandbox.run(&["explode"]);
+    assert_eq!(output.status.code(), Some(2), "usage errors exit 2");
+}
+
+// --- Watches (M16) ----------------------------------------------------------
+//
+// The CLI half of non-negotiable #2: every watch the TUI's pane can set, these
+// commands can set, through the same requests. They also prove the thing the
+// pane depends on — that an expression is project state, recorded without a
+// session and still there after the daemon that recorded it has gone.
+
+#[test]
+fn a_watch_added_without_a_session_is_listed_back_and_can_be_removed() {
+    let sandbox = Sandbox::new("wadd");
+
+    let added = sandbox.json_in_project(&[
+        "--format",
+        "json",
+        "watch",
+        "add",
+        "tokens[pos]",
+        "--label",
+        "token",
+    ]);
+    assert_eq!(added["action"], "added");
+    assert_eq!(added["watches"][0]["expression"], "tokens[pos]");
+    assert_eq!(added["watches"][0]["label"], "token");
+
+    let listed = sandbox.json_in_project(&["--format", "json", "watch", "list"]);
+    assert_eq!(listed["action"], "listed");
+    assert_eq!(
+        listed["watches"].as_array().expect("an array").len(),
+        1,
+        "no session was ever launched, and the watch is still recorded",
+    );
+
+    let removed = sandbox.json_in_project(&["--format", "json", "watch", "remove", "tokens[pos]"]);
+    assert_eq!(removed["action"], "removed");
+    assert_eq!(removed["watches"][0]["expression"], "tokens[pos]");
+
+    let empty = sandbox.json_in_project(&["--format", "json", "watch", "list"]);
+    assert!(
+        empty["watches"].as_array().expect("an array").is_empty(),
+        "got: {empty}",
+    );
+}
+
+#[test]
+fn watch_list_in_the_ids_format_feeds_a_removal_by_id() {
+    // The composability claim `--format ids` exists for:
+    //   lazydap watch list --format ids | xargs -I{} lazydap watch remove --id {}
+    let sandbox = Sandbox::new("wids");
+    for expression in ["a", "b", "c"] {
+        sandbox.run_in_project(&["watch", "add", expression]);
+    }
+
+    let ids: Vec<String> = sandbox
+        .stdout(&["--format", "ids", "watch", "list"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(ids, vec!["1", "2", "3"], "one bare id per line");
+
+    let removed = sandbox.json_in_project(&[
+        "--format", "json", "watch", "remove", "--id", &ids[1], "--id", &ids[2],
+    ]);
+    assert_eq!(removed["watches"].as_array().expect("an array").len(), 2);
+
+    let left = sandbox.json_in_project(&["--format", "json", "watch", "list"]);
+    assert_eq!(left["watches"][0]["expression"], "a");
+}
+
+#[test]
+fn a_dry_run_watch_command_changes_nothing() {
+    // Non-negotiable #4, and the preview picks the same watches the real
+    // removal does because both go through `store.select_watches`.
+    let sandbox = Sandbox::new("wdry");
+    sandbox.run_in_project(&["watch", "add", "counter"]);
+
+    let preview =
+        sandbox.json_in_project(&["--format", "json", "watch", "add", "other", "--dry-run"]);
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(
+        preview["watches"][0]["id"], 0,
+        "a preview does not promise an id it has not allocated",
+    );
+
+    let preview =
+        sandbox.json_in_project(&["--format", "json", "watch", "remove", "counter", "--dry-run"]);
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["watches"][0]["expression"], "counter");
+
+    let still_there = sandbox.json_in_project(&["--format", "json", "watch", "list"]);
+    let watches = still_there["watches"].as_array().expect("an array");
+    assert_eq!(watches.len(), 1, "neither preview changed anything");
+    assert_eq!(watches[0]["expression"], "counter");
+}
+
+#[test]
+fn a_watch_survives_the_daemon_it_was_added_through() {
+    // The expressions are the project's, not the daemon's. This is the CLI
+    // half of the TUI evidence that a watch outlives a disconnect.
+    let sandbox = Sandbox::new("wpersist");
+    sandbox.run_in_project(&["watch", "add", "counter"]);
+    sandbox.run_in_project(&["shutdown"]);
+
+    let listed = sandbox.json_in_project(&["--format", "json", "watch", "list"]);
+    assert_eq!(
+        listed["watches"][0]["expression"], "counter",
+        "a new daemon read it back off disk: {listed}",
+    );
+}
+
+#[test]
+fn removing_a_watch_two_ways_at_once_is_a_usage_error() {
+    // The two readings remove different watches, so it refuses rather than
+    // guessing — and it refuses before starting a daemon.
+    let sandbox = Sandbox::new("wamb");
+
+    let output = sandbox.run_in_project(&["watch", "remove", "x", "--all"]);
     assert_eq!(output.status.code(), Some(2), "usage errors exit 2");
 }
