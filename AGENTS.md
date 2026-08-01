@@ -346,14 +346,21 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
 
-Note the protocol is at **v5** (D056: the watch requests and `Event::WatchUpdated` — a
-`Request` variant an older daemon does not know cannot be decoded at all, so it never
-reaches the version field it would have refused on; v4 was D050, `LaunchRequest` carrying
-the adapter binary the *client* resolved, because the daemon's environment is not the
-caller's; v3 was D043, `BreakpointUpdated` distinguishing an adapter's opinion from a
-change to the project's list). A daemon left running from an older build is
+Note the protocol is at **v7** (D065–D069: `ThreadInfo::name` became optional,
+`Event::Stopped` and the `--wait` blob gained `adapter_thread_id`, `AdapterCapabilities`
+gained `supports_variable_paging`, and a variable gained `evaluate_name` — none of them a
+new request, so a v6 daemon decodes what a v7 client sends and then answers `threads` in a
+shape this build cannot read; v6 was D061, a third `AdapterKind`; v5 was D056, the watch
+requests and `Event::WatchUpdated`; v4 was D050, `LaunchRequest` carrying the adapter binary
+the *client* resolved; v3 was D043, `BreakpointUpdated` distinguishing an adapter's opinion
+from a change to the project's list). A daemon left running from an older build is
 refused with `VersionMismatch`; `lazydap shutdown` clears it and the next command starts a
 current one — and the TUI now does that for itself.
+
+The full per-command JSON is `skill/references/output-schemas.md`, which is **hand-written
+and therefore the thing most likely to have drifted** — check it against
+`crates/protocol/src/types.rs` when it matters. `commands.md` next to it is generated from
+the real `Cli` type and does not drift.
 
 If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
 point at the roadmap. Don't pretend the rest of the CLI is there.

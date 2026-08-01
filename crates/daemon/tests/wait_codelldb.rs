@@ -514,23 +514,36 @@ fn an_expression_codelldb_could_not_evaluate_fails_rather_than_answering() {
     let program = toolchain.build("inspects.c");
 
     sandbox.launch(&program);
-    sandbox.breakpoint("inspects.c", 18);
+    sandbox.breakpoint("inspects.c", 20);
     assert_eq!(sandbox.wait("30")["state"], "paused");
 
     // codelldb answers this with a *successful* `evaluate` whose result is
-    // `<read memory from 0x4 failed (0 of 4 bytes read)>`, so it used to reach
-    // callers as a value with no error and exit 0 (D068).
-    let failed = sandbox.run(&["--format", "json", "eval", "*nowhere"]);
+    // `<error: invalid value object>`, so it used to reach callers as a value
+    // with no error and exit 0 (D068).
+    let failed = sandbox.run(&["--format", "json", "eval", "*(int *)0"]);
     assert!(
         !failed.status.success(),
         "an error the adapter hid in the value is still an error: {}",
         String::from_utf8_lossy(&failed.stdout),
     );
 
-    // And an expression that works still works — the heuristic must not cost
+    // And an expression that works still works — the predicate must not cost
     // anybody a real answer.
     let value = sandbox.json(&["--format", "json", "eval", "sum"]);
     assert_eq!(value["value"], "1999", "got: {value}");
+
+    // The known limit, asserted so it stays visible. codelldb writes
+    // `<read memory from 0x4 failed (0 of 4 bytes read)>` here, which *is* an
+    // error — but " failed" inside angle brackets is also a summary string a
+    // real program can have, and failing those would cost a caller values they
+    // could otherwise read. The narrow prefix is the defensible line (D074).
+    let known_limit = sandbox.json(&["--format", "json", "eval", "*nowhere"]);
+    assert!(
+        known_limit["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("failed")),
+        "got: {known_limit}",
+    );
 }
 
 #[test]
@@ -540,7 +553,7 @@ fn variables_honours_its_window_even_though_codelldb_ignores_it() {
     let program = toolchain.build("inspects.c");
 
     sandbox.launch(&program);
-    sandbox.breakpoint("inspects.c", 18);
+    sandbox.breakpoint("inspects.c", 20);
     assert_eq!(sandbox.wait("30")["state"], "paused");
 
     let scopes = sandbox.json(&["--format", "json", "scopes"]);

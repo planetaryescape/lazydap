@@ -4,7 +4,7 @@ All notable changes to lazydap are recorded here.
 
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The **lazydap protocol** is versioned separately from the binary. It is at **v5**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+The **lazydap protocol** is versioned separately from the binary. It is at **v7**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
 
 ## [Unreleased]
 
@@ -20,7 +20,25 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v5*
 
 **Protocol v4 → v5.** The watch requests and the `WatchUpdated` event. A `Request` variant an older daemon does not know is not a soft failure — it cannot decode the frame at all, so it never reaches the version field it would have refused on. The bump turns "old daemon still running" into the `VersionMismatch` that `lazydap shutdown` clears and auto-spawn replaces.
 
+**Protocol v5 → v7.** v6 added the `delve` adapter — a new `AdapterKind` variant, which an older daemon cannot decode at all. v7 changed four things about what the daemon reports: `threads` may omit a thread's `name`, the `--wait` blob and the `Stopped` event gained `adapter_thread_id`, `capabilities` gained `supports_variable_paging`, and a variable gained `evaluate_name`.
+
+**`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
+
 ### Fixed
+
+**`lazydap pause --wait` reported a crash.** codelldb implements `pause` by signalling the process, and LLDB calls a signal stop an exception — so asking a program to stop came back as `"reason": "exception"`, which reads as a segfault. It is now `"reason": "pause"`, with the adapter's own word kept in `raw_reason`. The same fix covers a `pause` racing a step: both are tracked, so neither answer is lost.
+
+**`lazydap threads` invented a thread name.** Asked while the program was running, codelldb replies with one nameless thread `0` — a placeholder. lazydap filled that in as `"thread 0"`, which reads like a real answer about a real thread. `name` is now absent when the debugger gave none.
+
+**`lazydap step --thread` reported a different thread.** codelldb answers a step aimed at one thread by naming whichever thread it had selected before — the one that did *not* move. That thread was reported, and became the default for the next `lazydap stack`. The blob now names the thread that was asked to step, with the debugger's answer kept in `adapter_thread_id`.
+
+**`output_truncated` meant two different things and admitted to neither.** A run that outran the output cap kept accepting later output that still fit, so `captured_output` was a *splice* — hundreds of lines missing from the middle with the tail glued onto the cut. Separately, a program chatty enough to overrun the session's event buffer between two commands lost the *beginning* of its output and the flag stayed `false`. Both now set it, `dropped_events` says how many events were lost, and what you keep is a genuine prefix or a flagged suffix.
+
+**`lazydap eval` returned errors as values with exit 0.** codelldb answers an expression it could not evaluate with a *successful* response whose result is the error text. Those now fail properly. The check is deliberately narrow — the literal `<error:` prefix — because `<last operation failed>` is a summary string a real program can have, and failing a legitimate value is worse than the bug. An unreadable address still comes back as `<read memory ... failed ...>` with exit 0; that gap is documented rather than papered over.
+
+**Variables carry `evaluate_name`.** The debugger's own answer to "what expression names this row", and the only reliable way to turn a row called `[100]` into something `lazydap eval` accepts.
+
+**A Python frame's `source.name` is no longer blank.** debugpy sends only `path` where codelldb and delve send both, so `frame.source.name` was missing for one language out of three. It is filled from the path lazydap already had.
 
 **The TUI no longer writes its own log lines across its panes.** Every other command logs to stderr, which is right for one that prints and exits and wrong for the one that takes the terminal over. Its logs now go to the instance log file, which `lazydap logs` already reads.
 

@@ -80,7 +80,7 @@ impl Wait {
         // resolves that. An event arriving between them the other way round
         // would simply be lost.
         let events = session.subscribe();
-        let (pending, watermark) = session.undelivered();
+        let (pending, watermark, lost) = session.undelivered();
 
         let mut wait = Self {
             session: Arc::clone(session),
@@ -89,10 +89,27 @@ impl Wait {
             started: Instant::now(),
             blob: StableState::new(WaitOutcome::Timeout),
         };
+        // Events that fell out of the session buffer before this wait could
+        // read them. A debuggee chatty enough to overrun the buffer between two
+        // CLI invocations loses the *beginning* of its own output, and a blob
+        // that reported the survivors as the whole story would be handing back
+        // a suffix while claiming nothing was missing (D072).
+        wait.record_loss(lost);
         for event in pending {
             wait.absorb_backlog(&event);
         }
         wait
+    }
+
+    /// Record that `count` events are missing from this blob, whatever the
+    /// reason. `output_truncated` is what a reader checks, so every cause has
+    /// to reach it.
+    fn record_loss(&mut self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.blob.dropped_events += count;
+        self.blob.output_truncated = true;
     }
 
     /// Block until the program settles, and describe what happened.
@@ -144,7 +161,7 @@ impl Wait {
                 // so rather than presenting a gap as the whole story.
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(target: "daemon.session", missed, "a wait fell behind its events");
-                    self.blob.output_truncated = true;
+                    self.record_loss(missed);
                     continue;
                 }
                 // The session's sender is gone, which only happens once
@@ -473,7 +490,7 @@ mod tests {
 
         // Emitted after the subscription: it is both broadcast and buffered.
         session.emit(output(&session, "raced\n"));
-        let (pending, watermark) = session.undelivered();
+        let (pending, watermark, _) = session.undelivered();
         let mut wait = wait;
         for event in pending {
             wait.absorb_backlog(&event);
@@ -775,6 +792,77 @@ mod tests {
             "what a caller keeps must be a strict prefix of what ran: kept {} bytes",
             captured.len(),
         );
+    }
+
+    #[tokio::test]
+    async fn output_lost_before_the_wait_started_is_reported_as_missing() {
+        // The other half of D070. A debuggee that prints more than the session
+        // buffer holds between two CLI invocations pushes the *beginning* of
+        // its own output out of the buffer before `continue --wait` is called.
+        // The blob then carried a suffix and said `output_truncated: false` —
+        // the same lie as a spliced middle, from the other end (D072).
+        let session = session();
+        for line in 0..1_200 {
+            session.emit(output(&session, &format!("line {line}\n")));
+        }
+
+        let wait = Wait::begin(&session);
+        session.emit(stopped(&session, 1, true));
+        let blob = wait.collect(options(2_000)).await;
+
+        assert!(
+            blob.output_truncated,
+            "the beginning of the run is gone, so the caller is not seeing all of it",
+        );
+        assert!(
+            blob.dropped_events > 0,
+            "and how much is gone has to be sayable: {}",
+            blob.dropped_events,
+        );
+
+        let kept: String = blob
+            .captured_output
+            .iter()
+            .map(|chunk| chunk.output.as_str())
+            .collect();
+        assert!(
+            !kept.contains("line 0\n"),
+            "the premise of the test is that the start was lost",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_lost_nothing_says_so() {
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        session.emit(output(&session, "all of it\n"));
+        session.emit(stopped(&session, 1, true));
+
+        let blob = wait.collect(options(2_000)).await;
+        assert!(!blob.output_truncated);
+        assert_eq!(blob.dropped_events, 0);
+    }
+
+    #[tokio::test]
+    async fn a_loss_already_reported_is_not_reported_again() {
+        // The count resets when a wait commits delivery, or every later blob
+        // in the session repeats a gap that has already been accounted for.
+        let session = session();
+        for line in 0..1_200 {
+            session.emit(output(&session, &format!("line {line}\n")));
+        }
+
+        let first = Wait::begin(&session);
+        session.emit(stopped(&session, 1, true));
+        assert!(first.collect(options(2_000)).await.dropped_events > 0);
+
+        let second = Wait::begin(&session);
+        session.emit(stopped(&session, 1, true));
+        let blob = second.collect(options(2_000)).await;
+
+        assert_eq!(blob.dropped_events, 0, "the gap belonged to the first wait");
+        assert!(!blob.output_truncated);
     }
 
     #[tokio::test]

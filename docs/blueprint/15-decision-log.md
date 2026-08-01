@@ -1194,16 +1194,16 @@ When the adapter declares paging, the arguments are sent as before. When it does
 are not sent at all — and are applied to the answer instead. The full array is already in
 hand, which is what makes this narrowing rather than guessing.
 
-`--filter` is the one part that needs a convention: DAP marks no variable as named or
-indexed, and says instead that indexed children are the ones called `[0]`, `[1]`, and so on.
-That naming is what is read, so codelldb's synthetic `[raw]` counts as named — which is
-right, it is not an element. An adapter that names its elements some other way would be
-filtered wrongly; the alternative was to drop `--filter` against every adapter that does not
-implement it, which is a worse answer to "what does this flag mean".
-
 **Consequences:** `AdapterCapabilities` gains `supports_variable_paging`, so a caller can see
 which of the two happened. A `count` of `0` still means "the rest from `start`", as DAP says,
 rather than an empty answer.
+
+**Amended by D073 (2026-08-02), before shipping.** Two claims above are wrong. DAP gates only
+`start` and `count` behind `supportsVariablePaging` — `filter` carries no capability and is
+always sent, so withholding it suppressed correct adapter-side filtering. And the client-side
+`filter` this entry described classified children by whether a name looked like `[0]`, which
+is codelldb's spelling rather than anything the protocol says; there is no client-side
+`filter` any more. Only `start` and `count` are applied here.
 
 ---
 
@@ -1242,6 +1242,12 @@ looks, and is why it lives behind the adapter trait rather than in the shared ha
 runs for codelldb and nothing else. A value that merely *contains* those words is left alone.
 The TUI's watches pane already had a `WatchValue::Error` arm, so a failed watch now renders
 as an error rather than as a value that reads like one.
+
+**Amended by D074 (2026-08-02), before shipping.** The " failed" half of the predicate went
+in despite being flagged as a risk, and is gone. `<last operation failed>` is a summary
+string a real program can have, so the bracket-plus-" failed" shape is not evidence of
+anything. The check is now the literal `<error:` prefix, which means the second example above
+— `<read memory ... failed ...>` — is a documented gap rather than a caught error.
 
 ---
 
@@ -1304,3 +1310,152 @@ the program printed.
 **Verified:** a live run keeps 998,173 of 1,501,530 bytes, the marker is absent, and the
 retained text is a prefix of the program's own stdout. The deterministic version is
 `what_survives_the_cap_is_a_prefix_of_what_the_program_printed` in `crates/daemon/src/wait.rs`.
+
+**Completed by D072 (2026-08-02).** This entry could not yet promise a prefix. Output is also
+lost *before* a wait starts, when the session's event buffer overruns between two commands,
+and that path reported nothing — so a blob could be a suffix while claiming to be whole.
+`output_truncated` now covers both causes and `dropped_events` says how much is missing.
+
+---
+
+## D071 — an outstanding request has an identity, and `pause` gets its own slot
+
+**Status:** decided (2026-08-02, review of D064/D066).
+
+**Why:** D064 and D066 both read a stop against "the request the program has not answered
+yet", and both were given one slot to read it from. That was wrong twice over, and review
+found it before it shipped.
+
+**A `pause` deliberately does not take the execution permit** (D021) — it exists to
+interrupt a run already under way, and queueing it behind that run would mean the only way
+to stop a runaway program is to wait for it to stop. So a pause is routinely in flight
+*beside* the step it is interrupting, and one slot cannot hold both. `step --thread A --wait`
+racing `pause --wait` overwrote `Step(A)` with `Pause`, and if the step's stop landed first
+the caller got both failures at once:
+
+- D066's correction was skipped, so codelldb's wrong thread B was relayed and poisoned
+  `last_thread_id` — precisely the bug D066 exists to fix;
+- the marker was consumed, so the pause's own `SIGSTOP` arrived with nothing to read it
+  against and came back as a genuine exception — precisely the bug D064 exists to fix.
+
+**A rejected request left its marker installed.** `pause --thread 999` fails, `Pause` stays
+up, the program keeps running, and the next genuine `SIGSTOP` — from anywhere — is renamed
+to a pause nobody asked for.
+
+**Decision:** two slots, and every marker carries an id.
+
+- One slot for the permit-holding execution request (a step), one for the pause that
+  bypasses the permit. That is the whole set: the permit admits one step at a time, and
+  `interrupt` is the only other thing that moves the program.
+- A stop consumes the marker it actually answers, decided *after* the stop has been read
+  rather than before. A stop reported as `pause` takes the pause marker and leaves the step,
+  which is still in flight — the program was stepping when it was stopped. Any other stop
+  ends the run a step started and takes the step marker, leaving the pause still to be
+  answered.
+- Withdrawal names its marker. The error path clears the marker *it* installed, so a request
+  that arrived while this one was being refused is untouched. Clearing "the marker" would
+  have been the same bug one step along.
+- A `continue` clears both: once the program resumes, a step still recorded is finished and
+  a pause that never landed is stale. That is what bounds a marker's lifetime.
+
+**Consequences:** the interleaving is tested directly rather than inferred — both orders of
+a concurrent step and pause, a withdrawal that must not touch a newer marker, and a resume
+that clears both. `Outstanding` is now a pair of slots rather than an enum, which is the
+shape the concurrency actually has.
+
+---
+
+## D072 — `output_truncated` covers loss before the wait as well as during it
+
+**Status:** decided (2026-08-02, review of D070).
+
+**Why:** D070 made a truncated blob a prefix rather than a splice, and stopped there. It
+could not actually promise a prefix, because the other way a blob loses output happens
+before the wait exists.
+
+`EventBuffer` holds a thousand events and drops the oldest when it fills. A debuggee that
+prints more than that between two CLI invocations pushes the *beginning* of its own output
+out of the buffer, and `undelivered()` reported no loss — so `continue --wait` handed back a
+**suffix** with `output_truncated: false`. A blob that silently omits the beginning is the
+same class of lie as one that splices the middle; D070 fixed one end of it and left the
+other.
+
+The count was already there. `EventBuffer` tracks `dropped` for the `output` command's
+`dropped: N`, but a wait needs a different question answered — not "how many has this session
+ever lost" but "is the blob I am about to hand back whole". Advancing `delivered` past a
+dropped event, which is what stops the next wait trying to re-report something that no longer
+exists, is also what made the gap invisible.
+
+**Decision:** the buffer counts separately the events that fell off *before any wait carried
+them*, and `undelivered()` returns that alongside the backlog. `output_truncated` is set by
+either cause, and `StableState` gains `dropped_events` saying how many. The count resets when
+a wait commits delivery, so a gap is reported once rather than by every blob thereafter.
+
+The field's documented meaning is now "you are not seeing all of it", with the two shapes
+spelled out: cap reached means what you keep is a prefix, events lost means it is a suffix.
+A reader cannot act on a distinction it was never told about, so both set the flag and the
+count is what separates them.
+
+**Consequences:** a third cause — a live subscription falling behind, which already set the
+flag — now contributes its count too, so `dropped_events` is the whole answer rather than
+two thirds of it.
+
+---
+
+## D073 — `variables --filter` is the adapter's to honour, and lazydap does not fake it
+
+**Status:** decided (2026-08-02, review of D067).
+
+**Why:** D067 gated `filter`, `start` and `count` together behind `supportsVariablePaging`
+and applied all three client-side when the adapter had not declared it. Both halves were
+wrong.
+
+**DAP gates only `start` and `count`.** `filter` is independently valid and carries no
+capability, so withholding it from an adapter that would have honoured it suppressed correct
+adapter-side filtering for no reason.
+
+**The client-side fallback classified by a convention lazydap invented.** It read a child as
+indexed when its name looked like `[0]` — which is how codelldb happens to spell them, not
+something the protocol says. Against an adapter that spells its elements any other way it
+would return the wrong rows, silently. DAP does provide counts for exactly this question,
+`namedVariables` and `indexedVariables`, but they live on the *parent* variable, and a call
+that has only a `variablesReference` does not have the parent. So the information genuinely
+is not there at that layer.
+
+**Decision:** `filter` is always sent and never emulated. `start` and `count` stay gated and
+are still applied client-side when the adapter has not claimed them — they need no
+interpretation, being a slice of the list the adapter returned.
+
+An adapter that ignores `filter` is an adapter that was asked and declined. That is a fact
+about the adapter, reportable as such, and a better answer than a guess dressed up as
+support — the same principle as D065, where the honest answer to "what is this thread
+called" was absence.
+
+**Consequences:** `--filter` against codelldb returns everything, and the skill and site docs
+say so rather than implying it works everywhere. `narrow` is now a slice and nothing else.
+
+---
+
+## D074 — the evaluation-error predicate is the narrowest defensible shape
+
+**Status:** decided (2026-08-02, review of D068).
+
+**Why:** D068 detected codelldb's error-in-a-successful-value by two tests: the value is
+wrapped in angle brackets, *and* the text inside either opens with `error:` or contains
+" failed". The second half is not evidence. `<last operation failed>` and `<error: sentinel>`
+are summary strings a real program can have — an enum, a status field, a `Display` impl — and
+codelldb returns them unchanged. Treating those as failures turns a working `eval` into an
+error, which is a worse bug than the one being fixed: a false success costs a caller one
+confusing value they can still see, while a false failure costs them a value they cannot get
+at all.
+
+**Decision:** the check is the literal `<error:` prefix and nothing else.
+
+**Consequences:** a known and documented gap. codelldb reports an unreadable address as
+`<read memory from 0x4 failed (0 of 4 bytes read)>`, which genuinely is an error and is still
+reported as a value with exit 0. That trade is deliberate and asserted in the tests — both
+unit and live — so it stays visible rather than being rediscovered as a bug. The skill's
+schema doc tells agents that a value wrapped in angle brackets is worth a second look.
+
+Widening this needs better evidence than a substring: an adapter that fails the request, or a
+marker in the response. Not a longer list of words that sometimes mean failure.

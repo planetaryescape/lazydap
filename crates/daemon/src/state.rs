@@ -333,19 +333,72 @@ pub enum RunClaim {
     AlreadyRunning,
 }
 
-/// An execution request the program has not answered yet.
+/// Identifies one request the program was asked to perform.
 ///
-/// Only the two whose answer cannot be read without them. A `continue` is not
-/// here: its next stop is whatever the program did next, which needs no
-/// context to describe.
+/// The point of the number is *withdrawal*. A request that the adapter rejects
+/// has to take its marker back down, and between the send and the rejection
+/// another request can have replaced it — a `pause` arriving while a step is
+/// being refused. Clearing "the marker" would then erase the newer one and
+/// resurrect exactly the bug the marker exists to prevent, so a withdrawal
+/// names the marker it installed and clears nothing else (D071).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outstanding {
+pub struct MarkerId(u64);
+
+/// A step the program has not answered, and the thread it was aimed at.
+///
+/// codelldb answers a `next` with a `stopped` event naming whichever thread it
+/// had selected before (D066).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutstandingStep {
+    pub id: MarkerId,
+    pub thread_id: i64,
+}
+
+/// The requests in flight, in the two slots they can occupy at the same time.
+///
+/// Two slots rather than one, because a `pause` deliberately does **not** take
+/// the execution permit (D021) — it exists to interrupt a run already under
+/// way, and queueing it behind that run would mean the only way to stop a
+/// runaway program is to wait for it to stop. So a pause can be outstanding
+/// beside the step it is interrupting, and a single slot lost one of them:
+/// `step --thread A --wait` racing `pause --wait` overwrote `Step(A)` with
+/// `Pause`, so the step's stop lost its thread correction *and* consumed the
+/// marker, leaving the pause's own `SIGSTOP` to be reported as a genuine
+/// exception. Both bugs, from one overwrite (D071).
+///
+/// One slot each is enough: the permit admits one step at a time, and
+/// [`AdapterHandle::interrupt`](crate::adapter::AdapterHandle::interrupt) is
+/// the only other thing that moves the program.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Outstanding {
+    pub step: Option<OutstandingStep>,
     /// A `pause`. codelldb implements it with a `SIGSTOP` and so reports it as
     /// an exception, exactly as it reports an entry stop (D064).
-    Pause,
-    /// A step, and the thread it was aimed at. codelldb answers with a
-    /// `stopped` event naming whichever thread it had selected before (D066).
-    Step { thread_id: i64 },
+    pub pause: Option<MarkerId>,
+}
+
+/// Both slots, plus the counter that names what goes in them.
+#[derive(Debug, Default)]
+struct Markers {
+    slots: Outstanding,
+    next_id: u64,
+}
+
+impl Markers {
+    fn issue(&mut self) -> MarkerId {
+        self.next_id += 1;
+        MarkerId(self.next_id)
+    }
+
+    /// Clear whichever slot holds `id`, and nothing else.
+    fn withdraw(&mut self, id: MarkerId) {
+        if self.slots.step.is_some_and(|step| step.id == id) {
+            self.slots.step = None;
+        }
+        if self.slots.pause == Some(id) {
+            self.slots.pause = None;
+        }
+    }
 }
 
 /// One live debug session.
@@ -386,7 +439,7 @@ pub struct Session {
     /// by naming another (D066). Written before the request goes out — an
     /// adapter can emit the `stopped` event before it acknowledges the request
     /// that caused it — and taken by the stop that answers it.
-    outstanding: RwLock<Option<Outstanding>>,
+    outstanding: RwLock<Markers>,
     /// What the adapter currently thinks of the breakpoints we gave it, keyed
     /// by our id, plus the adapter's own id for each — the only way to read a
     /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
@@ -423,7 +476,7 @@ impl Session {
             event_tx,
             adapter,
             last_thread_id: RwLock::new(None),
-            outstanding: RwLock::new(None),
+            outstanding: RwLock::new(Markers::default()),
             breakpoints: Mutex::new(BreakpointMap::default()),
             debuggee: Mutex::new(None),
         }
@@ -449,16 +502,45 @@ impl Session {
         }
     }
 
-    /// Say what the program has just been asked to do. `None` for a `continue`,
-    /// whose next stop can legitimately be about any thread.
-    pub fn set_outstanding(&self, outstanding: Option<Outstanding>) {
-        *write(&self.outstanding) = outstanding;
+    /// Record that a step is in flight, and say which marker it installed.
+    pub fn expect_step(&self, thread_id: i64) -> MarkerId {
+        let mut markers = write(&self.outstanding);
+        let id = markers.issue();
+        markers.slots.step = Some(OutstandingStep { id, thread_id });
+        id
     }
 
-    /// What the program was asked to do, clearing it: one stop answers one
-    /// request, and a marker left behind would colour the next one.
-    pub fn take_outstanding(&self) -> Option<Outstanding> {
-        write(&self.outstanding).take()
+    /// Record that a pause is in flight. Leaves any step slot alone: the two
+    /// are separate requests and both are outstanding until each is answered.
+    pub fn expect_pause(&self) -> MarkerId {
+        let mut markers = write(&self.outstanding);
+        let id = markers.issue();
+        markers.slots.pause = Some(id);
+        id
+    }
+
+    /// Forget both. A `continue` resumes the program, which makes any step
+    /// still recorded finished and any pause that never landed stale.
+    pub fn expect_nothing(&self) {
+        write(&self.outstanding).slots = Outstanding::default();
+    }
+
+    /// Take one marker back down, by name.
+    ///
+    /// Used both by the stop that answers a request and by the error path when
+    /// the adapter rejects one. Naming the marker is what makes the second safe:
+    /// a rejected `pause` must not clear a step that replaced it in the
+    /// meantime (D071).
+    pub fn withdraw(&self, id: MarkerId) {
+        write(&self.outstanding).withdraw(id);
+    }
+
+    /// What the program has been asked to do and has not answered.
+    ///
+    /// A snapshot, not a take: which of these a given stop answers depends on
+    /// what the stop turns out to be, and that is the pump's judgement to make.
+    pub fn outstanding(&self) -> Outstanding {
+        read(&self.outstanding).slots
     }
 
     /// Record what the adapter made of the breakpoints in one source file.
@@ -703,7 +785,7 @@ impl Session {
     /// [`mark_delivered`](Self::mark_delivered) once a blob is actually
     /// returned: a wait whose request is rejected never reports anything, and
     /// marking its backlog delivered would lose those events for good.
-    pub fn undelivered(&self) -> (Vec<Event>, u64) {
+    pub fn undelivered(&self) -> (Vec<Event>, u64, u64) {
         lock(&self.events).undelivered()
     }
 
@@ -780,6 +862,11 @@ struct EventBuffer {
     events: VecDeque<SeqEvent>,
     capacity: usize,
     dropped: u64,
+    /// Events that fell out of the buffer before any wait carried them.
+    /// Distinct from `dropped`, which is the session-lifetime total the
+    /// `output` command reports: this one is reset every time a wait reports
+    /// it, because it answers "is the blob I am about to hand back whole".
+    undelivered_loss: u64,
     next_seq: u64,
     /// The highest sequence number handed to a `--wait`.
     delivered: u64,
@@ -791,6 +878,7 @@ impl EventBuffer {
             events: VecDeque::with_capacity(capacity.min(64)),
             capacity,
             dropped: 0,
+            undelivered_loss: 0,
             next_seq: 1,
             delivered: 0,
         }
@@ -807,6 +895,14 @@ impl EventBuffer {
             // Whatever fell off was never delivered; a wait that reports fewer
             // events than happened must not also claim to have seen them.
             if let Some(lost) = self.events.pop_front() {
+                // Advancing `delivered` past it is what stops the next wait
+                // trying to re-report an event that no longer exists — and it
+                // is also what made the loss invisible, because the gap it
+                // leaves is exactly the thing a wait needs to know about.
+                // Counted here, before it is papered over (D072).
+                if lost.seq > self.delivered {
+                    self.undelivered_loss += 1;
+                }
                 self.delivered = self.delivered.max(lost.seq);
             }
             self.dropped += 1;
@@ -815,7 +911,15 @@ impl EventBuffer {
         sequenced
     }
 
-    fn undelivered(&self) -> (Vec<Event>, u64) {
+    /// The backlog, the watermark, and how much of the backlog is missing.
+    ///
+    /// The third number is the one a `--wait` cannot do without. A debuggee
+    /// that prints more than [`EVENT_BUFFER_CAPACITY`] events before anybody
+    /// calls `continue --wait` pushes the beginning of its own output out of
+    /// the buffer, and the wait then hands back a *suffix* while reporting
+    /// nothing wrong — the same lie as a spliced middle, from the other end
+    /// (D072).
+    fn undelivered(&self) -> (Vec<Event>, u64, u64) {
         let undelivered: Vec<Event> = self
             .events
             .iter()
@@ -826,11 +930,14 @@ impl EventBuffer {
         // The watermark is the newest event that exists, not merely the newest
         // one still in the buffer: anything dropped is gone, and re-reporting
         // it later is impossible either way.
-        (undelivered, self.next_seq - 1)
+        (undelivered, self.next_seq - 1, self.undelivered_loss)
     }
 
+    /// Everything up to `seq` has reached a caller — including the loss, which
+    /// has now been reported and must not be counted again by the next wait.
     fn mark_delivered(&mut self, seq: u64) {
         self.delivered = self.delivered.max(seq);
+        self.undelivered_loss = 0;
     }
 
     fn output(&self, since_ms: Option<u64>) -> (Vec<OutputChunk>, u64) {
@@ -1123,7 +1230,7 @@ mod tests {
         let session = ended_session();
         session.emit(output_event(session.id, "printed while nobody was asking"));
 
-        let (undelivered, watermark) = session.undelivered();
+        let (undelivered, watermark, _) = session.undelivered();
         assert_eq!(undelivered.len(), 1);
         assert_eq!(watermark, 1);
     }
@@ -1133,9 +1240,9 @@ mod tests {
         let session = ended_session();
         session.emit(output_event(session.id, "first"));
 
-        let (first, watermark) = session.undelivered();
+        let (first, watermark, _) = session.undelivered();
         session.mark_delivered(watermark);
-        let (second, _) = session.undelivered();
+        let (second, ..) = session.undelivered();
 
         assert_eq!(first.len(), 1);
         assert!(
@@ -1152,10 +1259,10 @@ mod tests {
         let session = ended_session();
         session.emit(output_event(session.id, "nobody has seen this"));
 
-        let (peeked, _) = session.undelivered();
+        let (peeked, ..) = session.undelivered();
         assert_eq!(peeked.len(), 1, "the failed wait read it");
 
-        let (still_there, _) = session.undelivered();
+        let (still_there, ..) = session.undelivered();
         assert_eq!(
             still_there.len(),
             1,
@@ -1179,7 +1286,7 @@ mod tests {
             session.emit(output_event(session.id, &format!("line {index}")));
         }
 
-        let (undelivered, watermark) = session.undelivered();
+        let (undelivered, watermark, _) = session.undelivered();
         assert_eq!(undelivered.len(), EVENT_BUFFER_CAPACITY);
         assert_eq!(
             watermark,

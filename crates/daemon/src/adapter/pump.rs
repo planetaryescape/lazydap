@@ -10,7 +10,7 @@
 
 use super::handshake::{PumpStart, output_chunk, started_process};
 use super::{Pending, StopContext};
-use crate::state::{Outstanding, Session};
+use crate::state::{Outstanding, OutstandingStep, Session};
 use lazydap_core::{
     AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
     ThreadUpdateKind,
@@ -89,10 +89,11 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
         // something: codelldb reports a `pause` as an exception with a
         // `SIGSTOP` description, exactly as it reports an entry stop, and
         // answers a `next` aimed at one thread by naming another. Both are
-        // read against the request still outstanding, which is taken here
-        // because this stop is what answers it.
+        // read against the requests still outstanding — read, not taken,
+        // because which of them this stop answers is not known until the stop
+        // has been read (D071).
         "stopped" => {
-            let outstanding = session.take_outstanding();
+            let outstanding = session.outstanding();
             let (reason, raw_reason) = super::for_kind(session.adapter_kind).normalise_stop(
                 body["reason"].as_str().unwrap_or("unknown"),
                 body["description"].as_str().unwrap_or_default(),
@@ -100,12 +101,14 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
                     // The handshake owns the entry stop; by the time the pump
                     // is running that one has already been reported.
                     stop_on_entry: false,
-                    pause_requested: outstanding == Some(Outstanding::Pause),
+                    pause_requested: outstanding.pause.is_some(),
                 },
             );
 
             let said = body["threadId"].as_i64();
-            let (thread_id, adapter_thread_id) = stopped_thread_ids(&reason, outstanding, said);
+            let (thread_id, adapter_thread_id) =
+                stopped_thread_ids(&reason, outstanding.step, said);
+            answered(session, &reason, outstanding);
             session.set_state(SessionState::Paused);
             session.set_last_thread_id(thread_id);
             tracing::debug!(
@@ -199,6 +202,31 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
     }
 }
 
+/// Take down the marker this stop answered, and only that one.
+///
+/// A `pause` does not hold the execution permit, so it can be outstanding at
+/// the same time as the step it interrupts, and the two are answered by two
+/// different stops. Consuming both on whichever arrives first is what made a
+/// concurrent `step --wait` and `pause --wait` produce two wrong answers at
+/// once (D071).
+///
+/// - A stop reported as `pause` is the pause's. It says nothing about the step,
+///   which is still in flight: the program was stepping when it was stopped.
+/// - Any other stop ends the run a step started, whether or not it is the
+///   step's own — `stopped_thread_ids` is what checks that separately.
+///
+/// A pause that never produces its own stop is left installed until the next
+/// `continue` clears it, which is where a caller has plainly moved on.
+fn answered(session: &Arc<Session>, reason: &PauseReason, outstanding: Outstanding) {
+    if matches!(reason, PauseReason::Pause) {
+        if let Some(id) = outstanding.pause {
+            session.withdraw(id);
+        }
+    } else if let Some(step) = outstanding.step {
+        session.withdraw(step.id);
+    }
+}
+
 /// Which thread a stop is about, and which one the adapter said.
 ///
 /// codelldb answers `{"threadId": A, "command": "next"}` with
@@ -220,23 +248,23 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
 /// this returns, so reporting A means fetching A's frame.
 fn stopped_thread_ids(
     reason: &PauseReason,
-    outstanding: Option<Outstanding>,
+    step: Option<OutstandingStep>,
     said: Option<i64>,
 ) -> (Option<i64>, Option<i64>) {
-    let Some(Outstanding::Step { thread_id }) = outstanding else {
+    let Some(step) = step else {
         return (said, None);
     };
-    if !matches!(reason, PauseReason::Step) || said == Some(thread_id) {
+    if !matches!(reason, PauseReason::Step) || said == Some(step.thread_id) {
         return (said, None);
     }
 
     tracing::debug!(
         target: "daemon.session",
-        requested = thread_id,
+        requested = step.thread_id,
         said,
         "the adapter named a different thread than the one asked to step (D066)",
     );
-    (Some(thread_id), said)
+    (Some(step.thread_id), said)
 }
 
 /// Which of *our* breakpoints a stop is attributed to.
@@ -311,6 +339,30 @@ async fn finish(session: &Arc<Session>, error: &TransportError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::AdapterHandle;
+    use lazydap_core::{AdapterKind, SessionId};
+    use std::path::PathBuf;
+
+    fn step(thread_id: i64) -> Option<OutstandingStep> {
+        Some(OutstandingStep {
+            id: session().expect_step(thread_id),
+            thread_id,
+        })
+    }
+
+    /// A session with no adapter behind it. Everything here exercises the
+    /// bookkeeping around a stop, which is where the subtle bugs live.
+    fn session() -> Arc<Session> {
+        let (event_tx, _keep_open) = tokio::sync::broadcast::channel(64);
+        Arc::new(Session::new(
+            SessionId::new(),
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            AdapterHandle::detached(),
+            event_tx,
+        ))
+    }
 
     #[test]
     fn a_step_is_reported_against_the_thread_it_was_aimed_at() {
@@ -318,11 +370,8 @@ mod tests {
         // `{"reason":"step","threadId":34353117}`, where 34353117 was the
         // previous step's target and did not move. Relaying it told the agent
         // a thread stepped that had not (D066).
-        let outstanding = Some(Outstanding::Step {
-            thread_id: 34353118,
-        });
         let (thread_id, adapter_thread_id) =
-            stopped_thread_ids(&PauseReason::Step, outstanding, Some(34353117));
+            stopped_thread_ids(&PauseReason::Step, step(34353118), Some(34353117));
 
         assert_eq!(
             thread_id,
@@ -338,9 +387,8 @@ mod tests {
 
     #[test]
     fn an_adapter_that_names_the_thread_we_asked_for_discloses_nothing() {
-        let outstanding = Some(Outstanding::Step { thread_id: 7 });
         assert_eq!(
-            stopped_thread_ids(&PauseReason::Step, outstanding, Some(7)),
+            stopped_thread_ids(&PauseReason::Step, step(7), Some(7)),
             (Some(7), None),
             "there is no discrepancy to report",
         );
@@ -352,19 +400,103 @@ mod tests {
         // the adapter telling us something we did not ask about. Rewriting it
         // to the stepped thread would be the invention this fix exists to
         // stop.
-        let outstanding = Some(Outstanding::Step { thread_id: 7 });
         assert_eq!(
-            stopped_thread_ids(&PauseReason::Breakpoint, outstanding, Some(9)),
+            stopped_thread_ids(&PauseReason::Breakpoint, step(7), Some(9)),
             (Some(9), None),
-        );
-        assert_eq!(
-            stopped_thread_ids(&PauseReason::Step, Some(Outstanding::Pause), Some(9)),
-            (Some(9), None),
-            "nothing was asked to step",
         );
         assert_eq!(
             stopped_thread_ids(&PauseReason::Step, None, Some(9)),
-            (Some(9), None)
+            (Some(9), None),
+            "nothing was asked to step",
         );
+    }
+
+    #[test]
+    fn a_pause_racing_a_step_does_not_cost_the_step_its_thread_correction() {
+        // `pause` takes no execution permit (D021), so it is in flight beside
+        // the step it interrupts. A single marker slot meant the pause
+        // overwrote the step and *both* answers went wrong at once: the step's
+        // stop lost its thread correction, and the pause's own SIGSTOP — with
+        // the marker already consumed — came back as a genuine exception.
+        let session = session();
+        let step_marker = session.expect_step(42);
+        let pause_marker = session.expect_pause();
+        assert_ne!(
+            step_marker, pause_marker,
+            "two requests, two markers, or one of them is lost",
+        );
+
+        // The step's stop lands first. It still sees its own step.
+        let outstanding = session.outstanding();
+        assert_eq!(
+            stopped_thread_ids(&PauseReason::Step, outstanding.step, Some(99)),
+            (Some(42), Some(99)),
+            "the step is still tracked despite the pause behind it",
+        );
+        answered(&session, &PauseReason::Step, outstanding);
+
+        // ...and the pause is still outstanding, so its own stop is still
+        // readable as a pause rather than as a crash.
+        let after = session.outstanding();
+        assert_eq!(after.step, None, "the step has been answered");
+        assert_eq!(
+            after.pause,
+            Some(pause_marker),
+            "the pause has not, and its SIGSTOP is still to come",
+        );
+    }
+
+    #[test]
+    fn a_pause_that_lands_first_leaves_the_step_it_interrupted_outstanding() {
+        // The other order. The pause's stop must not consume the step's marker,
+        // or the step that follows loses its thread correction.
+        let session = session();
+        let step_marker = session.expect_step(42);
+        session.expect_pause();
+
+        let outstanding = session.outstanding();
+        answered(&session, &PauseReason::Pause, outstanding);
+
+        let after = session.outstanding();
+        assert_eq!(after.pause, None, "the pause has been answered");
+        assert_eq!(
+            after.step.map(|step| step.id),
+            Some(step_marker),
+            "the step was interrupted, not answered",
+        );
+    }
+
+    #[test]
+    fn withdrawing_a_rejected_request_cannot_take_a_newer_one_with_it() {
+        // `pause --thread 999` is refused, and its marker has to come back
+        // down or every later SIGSTOP is renamed to a pause nobody asked for.
+        // But a step may have arrived while it was being refused, and clearing
+        // "the marker" would erase that instead (D071).
+        let session = session();
+        let stale = session.expect_pause();
+        let fresh = session.expect_step(7);
+
+        session.withdraw(stale);
+
+        let after = session.outstanding();
+        assert_eq!(after.pause, None, "the refused pause is gone");
+        assert_eq!(
+            after.step.map(|step| step.id),
+            Some(fresh),
+            "and the step that arrived meanwhile is untouched",
+        );
+    }
+
+    #[test]
+    fn resuming_forgets_both_slots() {
+        // A `continue` makes a step still recorded finished and a pause that
+        // never landed stale, which is what bounds a marker's lifetime.
+        let session = session();
+        session.expect_step(7);
+        session.expect_pause();
+
+        session.expect_nothing();
+
+        assert_eq!(session.outstanding(), Outstanding::default());
     }
 }

@@ -125,27 +125,29 @@ impl DebugAdapter for CodeLldb {
 
     /// codelldb reports a failed expression as a *successful* `evaluate` whose
     /// result is the error text, so the DAP envelope says nothing is wrong
-    /// (quirk 11, D068). Two shapes have been seen live:
+    /// (quirk 11, D068). The shape this recognises is the literal one LLDB
+    /// writes for an expression it could not evaluate:
     ///
     /// ```text
     /// <error: invalid value object>
-    /// <read memory from 0x4 failed (0 of 4 bytes read)>
     /// ```
     ///
-    /// Both are wrapped in angle brackets, and so is plenty of legitimate
-    /// output — Python's `<__main__.Foo object at 0x10a>`, LLDB's own
-    /// `<incomplete type>`. The brackets alone are therefore not enough: the
-    /// text inside must also open with `error:` or say something `failed`.
-    /// A value that only *contains* those words is left alone, and this runs
-    /// for codelldb and nothing else.
+    /// **Deliberately narrower than the errors codelldb can produce.** A read
+    /// that failed comes back as `<read memory from 0x4 failed (0 of 4 bytes
+    /// read)>`, and this does not catch it — because " failed" inside angle
+    /// brackets is not proof of anything. `<last operation failed>` and
+    /// `<error: sentinel>` are things a *program* can have as a summary string,
+    /// which codelldb returns unchanged, and treating those as failures turns a
+    /// working `eval` into an error. That trade is the right way round: a false
+    /// success on a rare shape costs a caller one confusing value, while a
+    /// false failure costs them a value they cannot get at all.
+    ///
+    /// The known limit, then: an error whose text does not begin `<error:` is
+    /// still reported as a value. Widening this needs something better than a
+    /// substring — an adapter that fails the request, or a marker in the
+    /// response.
     fn is_eval_error(&self, value: &str) -> bool {
-        let Some(inner) = value
-            .strip_prefix('<')
-            .and_then(|value| value.strip_suffix('>'))
-        else {
-            return false;
-        };
-        inner.starts_with("error:") || inner.contains(" failed")
+        value.starts_with("<error:") && value.ends_with('>')
     }
 
     /// The debuggee's pid, scraped from the line codelldb prints when it starts
@@ -288,22 +290,37 @@ mod tests {
 
     #[test]
     fn an_error_codelldb_hid_inside_a_value_is_recognised_as_one() {
-        // Both captured live: codelldb answers an expression it could not
-        // evaluate with a *successful* `evaluate` whose result is the error
-        // (D068).
+        // Captured live: codelldb answers an expression it could not evaluate
+        // with a *successful* `evaluate` whose result is the error (D068).
         assert!(CodeLldb.is_eval_error("<error: invalid value object>"));
-        assert!(CodeLldb.is_eval_error("<read memory from 0x4 failed (0 of 4 bytes read)>"));
+        assert!(CodeLldb.is_eval_error("<error: use of undeclared identifier 'q'>"));
     }
 
     #[test]
     fn a_value_that_merely_has_angle_brackets_is_still_a_value() {
-        // The brackets alone cannot be the test. Getting this wrong turns a
-        // working `eval` into a failure, which is worse than the bug.
+        // Getting this wrong turns a working `eval` into a failure, which is
+        // worse than the bug it is fixing. Every one of these is something a
+        // real program can have as a summary string, returned unchanged by
+        // codelldb (D074).
         assert!(!CodeLldb.is_eval_error("42"));
         assert!(!CodeLldb.is_eval_error("<__main__.Foo object at 0x10a>"));
         assert!(!CodeLldb.is_eval_error("<incomplete type>"));
+        assert!(!CodeLldb.is_eval_error("<last operation failed>"));
         assert!(!CodeLldb.is_eval_error("\"the last attempt failed\""));
         assert!(!CodeLldb.is_eval_error("<0 of 4 bytes read> failed"));
+        assert!(
+            !CodeLldb.is_eval_error("the <error: x> was logged"),
+            "the prefix has to be the whole value, not somewhere inside it",
+        );
+    }
+
+    #[test]
+    fn a_read_that_failed_is_a_known_limit_rather_than_an_error() {
+        // codelldb writes this for an unreadable pointer, and it is genuinely
+        // an error — but " failed" in angle brackets is a summary string a
+        // program can legitimately have, so this is left as a value on
+        // purpose. Asserted so the trade is visible rather than forgotten.
+        assert!(!CodeLldb.is_eval_error("<read memory from 0x4 failed (0 of 4 bytes read)>"));
     }
 
     #[test]

@@ -360,7 +360,12 @@ pub enum Response {
     },
     /// A stepping request that waited: one blob describing everything that
     /// happened until the program settled.
-    Stepped(StableState),
+    ///
+    /// Boxed because it is much the largest thing `Response` — and so
+    /// `IpcPayload`, and so every frame on the socket — can carry, and every
+    /// other message would otherwise be padded out to its size. `Box`
+    /// serialises transparently, so the wire shape is unchanged.
+    Stepped(Box<StableState>),
 
     Threads(Vec<ThreadInfo>),
     StackTrace {
@@ -419,13 +424,25 @@ pub struct StableState {
     /// The top frame, fetched for convenience whenever the program paused.
     pub frame: Option<StackFrame>,
     pub captured_output: Vec<OutputChunk>,
-    /// The output cap was hit, and everything after it was dropped.
+    /// You are not seeing all of it.
     ///
-    /// What is kept is a *prefix* of what the program printed: once the cap is
-    /// reached the wait stops taking output entirely, rather than skipping the
-    /// chunk that overran it and going on accepting smaller ones behind it
-    /// (D070).
+    /// True for either of the two ways a blob can be incomplete, because a
+    /// reader cannot act on a distinction it was never told about:
+    ///
+    /// - the wait's own output cap was reached, and everything after it was
+    ///   dropped. What is kept is then a *prefix* of what the program printed:
+    ///   the wait stops taking output entirely rather than skipping the chunk
+    ///   that overran the cap and going on accepting smaller ones behind it,
+    ///   which spliced two moments of a program's life together (D070);
+    /// - events were lost before the wait could read them — the session buffer
+    ///   overran between two CLI invocations, or a live subscription fell
+    ///   behind. What is kept is then a *suffix*, and `dropped_events` says how
+    ///   much is missing (D072).
     pub output_truncated: bool,
+    /// How many events were lost before this blob could carry them. `0` when
+    /// nothing was lost that way — including when `output_truncated` is set by
+    /// the output cap, which drops bytes rather than events.
+    pub dropped_events: u64,
     pub breakpoint_updates: Vec<AdapterBreakpoint>,
     pub thread_updates: Vec<ThreadUpdate>,
     pub elapsed_ms: u64,
@@ -448,6 +465,7 @@ impl StableState {
             frame: None,
             captured_output: Vec::new(),
             output_truncated: false,
+            dropped_events: 0,
             breakpoint_updates: Vec::new(),
             thread_updates: Vec::new(),
             elapsed_ms: 0,

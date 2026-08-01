@@ -18,7 +18,7 @@ nothing here is linked into lazydap.
 | `chatty.c` | a lot of `captured_output`, in order |
 | `threads.c` | several threads, for the coalescing window |
 | `floods.c` | more output than a wait will carry, then more after a pause (D070) |
-| `inspects.c` | a stop worth reading: a large array, and an unreadable pointer (D067, D068) |
+| `inspects.c` | a stop worth reading: a large array, and an unreadable pointer (D067, D068, D074) |
 
 The line numbers matter: the tests set breakpoints by line. Each file says
 which of its lines is load-bearing, in a comment on that line.

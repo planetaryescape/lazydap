@@ -571,19 +571,27 @@ impl AdapterHandle {
         Ok(response.scopes.into_iter().map(translate::scope).collect())
     }
 
-    /// One variable's children, narrowed the way the caller asked.
+    /// One variable's children, windowed the way the caller asked.
     ///
-    /// DAP puts `filter`, `start` and `count` behind `supportsVariablePaging`,
-    /// and a client may only send them when the adapter has declared it.
-    /// codelldb does not declare it and ignores all three, so sending them and
-    /// returning whatever came back made three documented flags silent no-ops
-    /// against the primary adapter — `--start 100 --count 5` on a 2000-element
-    /// vector answered with all 2001 entries starting at `[0]`.
+    /// DAP gates `start` and `count` — and only those two — behind
+    /// `supportsVariablePaging`. codelldb does not declare it and ignores both,
+    /// so sending them and returning whatever came back made two documented
+    /// flags silent no-ops against the primary adapter: `--start 100 --count 5`
+    /// on a 2000-element vector answered with all 2001 entries from `[0]`. When
+    /// the adapter has not claimed them they are applied to the answer instead,
+    /// which is narrowing rather than guessing — the whole array is already in
+    /// hand and nothing is invented (D067).
     ///
-    /// So they are applied here instead when the adapter has not claimed them.
-    /// The whole array is already in hand, which is the one thing that makes
-    /// this honest rather than a guess: nothing is invented, the answer is
-    /// merely narrowed to what was asked for (D067).
+    /// `filter` is **not** gated, here or in the specification, and is always
+    /// sent. There is no client-side fallback for it: DAP marks no variable as
+    /// named or indexed, and the counts that would say — `namedVariables` and
+    /// `indexedVariables` — belong to the *parent*, which a call that has only a
+    /// `variablesReference` does not have. An earlier version classified by
+    /// whether a name looked like `[0]`, which is a convention lazydap invented
+    /// reading codelldb's output; against an adapter that names elements any
+    /// other way it silently returns the wrong rows. An adapter that ignores
+    /// `filter` is an adapter that was asked and declined, which is a fact about
+    /// it rather than a gap for lazydap to paper over (D073).
     pub async fn variables(
         &self,
         variables_reference: i64,
@@ -592,22 +600,10 @@ impl AdapterHandle {
         count: Option<u32>,
     ) -> Result<Vec<Variable>> {
         let paging = self.capabilities.supports_variable_paging;
-        // Sent only to an adapter that said it reads them. To one that did not,
-        // they go to `narrow` below instead of onto the wire.
-        let (sent_filter, sent_start, sent_count) = match paging {
-            true => (filter.as_dap().map(str::to_string), start, count),
-            false => (None, None, None),
-        };
-
         let response: VariablesResponse = self
             .call(
                 "variables",
-                &VariablesArgs {
-                    variables_reference,
-                    filter: sent_filter,
-                    start: sent_start,
-                    count: sent_count,
-                },
+                &variables_args(paging, variables_reference, filter, start, count),
             )
             .await?;
 
@@ -618,7 +614,7 @@ impl AdapterHandle {
             .collect();
         match paging {
             true => Ok(variables),
-            false => Ok(narrow(variables, filter, start, count)),
+            false => Ok(narrow(variables, start, count)),
         }
     }
 
@@ -790,37 +786,44 @@ fn rebind_source(requested: &Path, applied: &[AdapterBreakpoint]) -> Option<Path
     same_file.then_some(candidate)
 }
 
-/// Apply `variables`' filter and window ourselves, for an adapter that will
-/// not (D067).
+/// What to put on the wire for a `variables` call.
 ///
-/// `filter` is the one part that cannot be read straight off the wire: DAP
-/// marks no variable as named or indexed, and says instead that indexed
-/// children are the ones called `[0]`, `[1]`, and so on. That naming is what is
-/// read here, so codelldb's synthetic `[raw]` counts as named — which is right,
-/// it is not an element. An adapter that named its elements some other way
-/// would be filtered wrongly, and the only alternative is to drop `--filter`
-/// against every adapter that does not implement it. `--start`/`--count` need
-/// no convention: they index the filtered list.
-fn narrow(
-    variables: Vec<Variable>,
+/// `filter` always, `start` and `count` only to an adapter that declared it
+/// reads them — that split is DAP's, not lazydap's, and getting it wrong in
+/// either direction is a bug: withholding `filter` suppresses filtering the
+/// adapter would have done, and sending `start` to one that has not declared
+/// paging is asking for behaviour the specification does not promise (D073).
+fn variables_args(
+    paging: bool,
+    variables_reference: i64,
     filter: VariableFilter,
     start: Option<u32>,
     count: Option<u32>,
-) -> Vec<Variable> {
-    let indexed = |variable: &Variable| {
-        variable
-            .name
-            .strip_prefix('[')
-            .and_then(|name| name.strip_suffix(']'))
-            .is_some_and(|index| index.chars().all(|c| c.is_ascii_digit()))
-    };
-    let kept = variables.into_iter().filter(|variable| match filter {
-        VariableFilter::All => true,
-        VariableFilter::Indexed => indexed(variable),
-        VariableFilter::Named => !indexed(variable),
-    });
+) -> VariablesArgs {
+    VariablesArgs {
+        variables_reference,
+        filter: filter.as_dap().map(str::to_string),
+        // To an adapter that did not declare it, these go to `narrow` instead
+        // of onto the wire.
+        start: match paging {
+            true => start,
+            false => None,
+        },
+        count: match paging {
+            true => count,
+            false => None,
+        },
+    }
+}
 
-    let windowed = kept.skip(start.unwrap_or(0) as usize);
+/// Apply `variables`' window ourselves, for an adapter that will not (D067).
+///
+/// Only `start` and `count`, which need no interpretation: they index the list
+/// the adapter returned. `filter` is deliberately absent — see
+/// [`AdapterHandle::variables`] for why there is no honest client-side version
+/// of it.
+fn narrow(variables: Vec<Variable>, start: Option<u32>, count: Option<u32>) -> Vec<Variable> {
+    let windowed = variables.into_iter().skip(start.unwrap_or(0) as usize);
     match count {
         // DAP reads a `count` of 0 as "all of them from `start`", not as an
         // empty answer.
@@ -1411,10 +1414,10 @@ mod tests {
 
     #[test]
     fn a_window_an_adapter_ignored_is_applied_here_instead() {
-        // codelldb does not declare `supportsVariablePaging` and ignores all
-        // three arguments, so `--start 100 --count 5` on a 2000-element vector
+        // codelldb does not declare `supportsVariablePaging` and ignores both
+        // arguments, so `--start 100 --count 5` on a 2000-element vector
         // answered with all 2001 entries starting at `[0]` (D067).
-        let narrowed = narrow(elements(2000), VariableFilter::All, Some(100), Some(5));
+        let narrowed = narrow(elements(2000), Some(100), Some(5));
         assert_eq!(
             names(&narrowed),
             ["[100]", "[101]", "[102]", "[103]", "[104]"]
@@ -1422,26 +1425,40 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_reads_dap_s_naming_of_indexed_children() {
-        let indexed = narrow(elements(3), VariableFilter::Indexed, None, None);
-        assert_eq!(names(&indexed), ["[0]", "[1]", "[2]"]);
-
-        let named = narrow(elements(3), VariableFilter::Named, None, None);
-        assert_eq!(
-            names(&named),
-            ["[raw]", "len"],
-            "codelldb's synthetic `[raw]` is not an element",
-        );
-    }
-
-    #[test]
     fn a_window_past_the_end_is_empty_rather_than_everything() {
-        assert!(narrow(elements(3), VariableFilter::All, Some(99), Some(5)).is_empty());
+        assert!(narrow(elements(3), Some(99), Some(5)).is_empty());
     }
 
     #[test]
     fn a_count_of_zero_means_the_rest_the_way_dap_says() {
-        let narrowed = narrow(elements(3), VariableFilter::Indexed, Some(1), Some(0));
-        assert_eq!(names(&narrowed), ["[1]", "[2]"]);
+        let narrowed = narrow(elements(3), Some(1), Some(0));
+        assert_eq!(names(&narrowed), ["[1]", "[2]", "[raw]", "len"]);
+    }
+
+    #[test]
+    fn a_filter_is_sent_to_every_adapter_because_dap_does_not_gate_it() {
+        // Only `start` and `count` sit behind `supportsVariablePaging`.
+        // Gating `filter` with them suppressed filtering codelldb — or any
+        // other adapter — would have done for us (D073).
+        let args = variables_args(false, 1005, VariableFilter::Indexed, Some(10), Some(5));
+        assert_eq!(args.filter.as_deref(), Some("indexed"));
+        assert_eq!(args.start, None, "not promised without the capability");
+        assert_eq!(args.count, None);
+
+        let args = variables_args(true, 1005, VariableFilter::Named, Some(10), Some(5));
+        assert_eq!(args.filter.as_deref(), Some("named"));
+        assert_eq!(args.start, Some(10), "the adapter said it reads these");
+        assert_eq!(args.count, Some(5));
+    }
+
+    #[test]
+    fn the_window_never_reorders_or_reclassifies_what_the_adapter_sent() {
+        // There is no client-side `filter`: the counts that would say which
+        // children are indexed live on the parent, which this layer does not
+        // have, and classifying by whether a name looks like `[0]` was a
+        // convention lazydap invented (D073). The window is a slice and
+        // nothing else.
+        let all = narrow(elements(3), None, None);
+        assert_eq!(names(&all), ["[0]", "[1]", "[2]", "[raw]", "len"]);
     }
 }

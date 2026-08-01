@@ -2,7 +2,7 @@
 
 use super::{Result, find_session, live_session};
 use crate::adapter;
-use crate::state::{DaemonState, Outstanding, RunClaim, Session};
+use crate::state::{DaemonState, MarkerId, RunClaim, Session};
 use crate::wait::{DEFAULT_TIMEOUT, Wait, WaitOptions};
 use lazydap_core::{EndReason, SessionId, SessionState, StepKind};
 use lazydap_protocol::{ErrorCode, Event, IpcError, Response, WaitMode};
@@ -271,10 +271,22 @@ pub async fn execute(
     // run; before the send, so nothing this run causes is missed.
     let waiting = wait.is_waiting().then(|| Wait::begin(&session));
 
-    // Step 4.
+    // Step 4. The marker goes up *before* the send: an adapter can emit the
+    // `stopped` event this request causes before it acknowledges the request
+    // itself, and the pump reads the marker as the stop arrives.
+    let marker = expect(&session, movement, thread_id);
+
     if !matches!(claim, Some(RunClaim::AlreadyRunning))
         && let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await
     {
+        // Take our own marker back down. A rejected `pause --thread 999` that
+        // left `Pause` installed had every later SIGSTOP renamed to a pause
+        // nobody was waiting for. By id, because a request that arrived while
+        // this one was being refused may already have replaced it, and
+        // clearing *that* would be the same bug one step along (D071).
+        if let Some(marker) = marker {
+            session.withdraw(marker);
+        }
         // Put back only the state *we* wrote. By now the pump may have
         // recorded a real ending — an adapter can execute the request, emit
         // `terminated` and die before acknowledging — and stamping `paused`
@@ -308,7 +320,25 @@ pub async fn execute(
         elapsed_ms = blob.elapsed_ms,
         "wait finished",
     );
-    Ok(Response::Stepped(blob))
+    Ok(Response::Stepped(Box::new(blob)))
+}
+
+/// Record what the program has just been asked to do, and name the marker so
+/// the caller can take it back down if the adapter refuses.
+///
+/// A `continue` records nothing and clears both slots: its next stop is
+/// whatever the program did next and needs no context to describe, and once it
+/// resumes, a step still recorded is finished and a pause that never landed is
+/// stale.
+fn expect(session: &Arc<Session>, movement: Movement, thread_id: i64) -> Option<MarkerId> {
+    match movement {
+        Movement::Continue => {
+            session.expect_nothing();
+            None
+        }
+        Movement::Step(_) => Some(session.expect_step(thread_id)),
+        Movement::Pause => Some(session.expect_pause()),
+    }
 }
 
 async fn send(
@@ -317,16 +347,6 @@ async fn send(
     movement: Movement,
     thread_id: i64,
 ) -> adapter::Result<()> {
-    // Before the send, not after: an adapter can emit the `stopped` event this
-    // request causes before it acknowledges the request itself, and the pump
-    // reads the marker as the stop arrives. A `continue` clears it — its next
-    // stop is whatever the program did next, and needs no context to describe.
-    session.set_outstanding(match movement {
-        Movement::Continue => None,
-        Movement::Step(_) => Some(Outstanding::Step { thread_id }),
-        Movement::Pause => Some(Outstanding::Pause),
-    });
-
     match (movement, permit) {
         (Movement::Continue, Some(permit)) => {
             session.adapter().resume(permit, thread_id).await?;
