@@ -1666,6 +1666,7 @@ mod tests {
         Event::Stopped {
             session_id,
             thread_id: Some(1),
+            adapter_thread_id: None,
             reason: PauseReason::Breakpoint,
             raw_reason: None,
             all_threads_stopped: true,
@@ -1709,6 +1710,7 @@ mod tests {
             name: name.to_string(),
             value: value.to_string(),
             type_name: Some("int".to_string()),
+            evaluate_name: None,
             variables_reference: reference,
             named_variables: None,
             indexed_variables: None,

@@ -1,12 +1,14 @@
 //! `--wait`, against a real codelldb and real debuggees.
 //!
 //! The list of cases is `docs/blueprint/10-async-to-sync.md` §"Tests required
-//! for `--wait`". They are here rather than in unit tests because the thing
-//! being checked is what an *adapter* does: a fake that produced these
-//! outcomes would only be checking that the fake matches the assertions
-//! (non-negotiable #7). The event arithmetic — watermarks, coalescing,
-//! output caps — is unit-tested separately and deterministically in
-//! `crates/daemon/src/wait.rs`.
+//! for `--wait`", plus what the daemon reports *at* the stop a wait reached —
+//! a pause's reason, a thread's name, an expression that could not be
+//! evaluated, a window over a large variable. They are here rather than in
+//! unit tests because the thing being checked is what an *adapter* does: a
+//! fake that produced these outcomes would only be checking that the fake
+//! matches the assertions (non-negotiable #7). The event arithmetic —
+//! watermarks, coalescing, output caps — is unit-tested separately and
+//! deterministically in `crates/daemon/src/wait.rs`.
 //!
 //! Every test skips, loudly, when codelldb or a C compiler is missing, so a
 //! machine without them still gets a green `cargo test` rather than a wall of
@@ -441,6 +443,140 @@ fn a_paused_program_can_be_interrupted_after_a_timeout() {
     let blob = sandbox.json(&["--format", "json", "pause", "--wait", "--timeout", "20"]);
     assert_eq!(blob["state"], "paused", "got: {blob}");
     assert!(blob["frame"].is_object(), "a pause has a frame too: {blob}");
+
+    // codelldb implements `pause` with the same `SIGSTOP` it uses for
+    // stop-on-entry, and LLDB calls a signal stop an exception — so a pause the
+    // caller asked for reported `reason: "exception"`, which reads as a crash.
+    // D064: it is named for what was asked, with the adapter's word kept.
+    assert_eq!(blob["reason"], "pause", "got: {blob}");
+    assert_eq!(blob["raw_reason"], "exception", "nothing is hidden: {blob}");
+}
+
+#[test]
+fn a_running_program_s_threads_are_reported_without_inventing_a_name() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("tnm");
+    let program = toolchain.build("spins.c");
+
+    sandbox.launch(&program);
+    // Not `--wait`: the point is to ask while the program is running.
+    sandbox.json(&["--format", "json", "continue"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // codelldb answers a running program's `threads` with one nameless thread
+    // 0 — a placeholder. lazydap used to fill that in as "thread 0", which
+    // reads like an answer (D064).
+    let answer = sandbox.json(&["--format", "json", "threads"]);
+    let threads = answer["threads"].as_array().expect("an array");
+    assert!(
+        threads
+            .iter()
+            .all(|thread| thread["name"] != "thread 0" && thread["name"] != "thread 1"),
+        "a name lazydap made up is worse than no name: {answer}",
+    );
+}
+
+#[test]
+fn output_kept_past_the_cap_is_a_prefix_rather_than_a_splice() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("flood");
+    let program = toolchain.build("floods.c");
+
+    sandbox.launch(&program);
+    sandbox.breakpoint("floods.c", 26);
+    let blob = sandbox.wait("60");
+
+    assert_eq!(blob["state"], "paused", "got: {}", blob["state"]);
+    assert_eq!(blob["output_truncated"], true, "the cap must have been hit");
+
+    // codelldb hands the debuggee a pty, so its newlines arrive as CRLF.
+    let kept = output_texts(&blob).join("").replace("\r\n", "\n");
+    assert!(
+        !kept.contains("MARKER-AFTER-THE-CAP"),
+        "text printed after the cap was reached was spliced onto the cut",
+    );
+
+    let printed = "x".repeat(1000) + "\n";
+    let printed = printed.repeat(1500) + "MARKER-AFTER-THE-CAP\n";
+    assert!(
+        printed.starts_with(&kept),
+        "`output_truncated` means the tail was cut, so what is kept has to be \
+         a prefix of what ran — kept {} of {} bytes",
+        kept.len(),
+        printed.len(),
+    );
+}
+
+#[test]
+fn an_expression_codelldb_could_not_evaluate_fails_rather_than_answering() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("evl");
+    let program = toolchain.build("inspects.c");
+
+    sandbox.launch(&program);
+    sandbox.breakpoint("inspects.c", 18);
+    assert_eq!(sandbox.wait("30")["state"], "paused");
+
+    // codelldb answers this with a *successful* `evaluate` whose result is
+    // `<read memory from 0x4 failed (0 of 4 bytes read)>`, so it used to reach
+    // callers as a value with no error and exit 0 (D068).
+    let failed = sandbox.run(&["--format", "json", "eval", "*nowhere"]);
+    assert!(
+        !failed.status.success(),
+        "an error the adapter hid in the value is still an error: {}",
+        String::from_utf8_lossy(&failed.stdout),
+    );
+
+    // And an expression that works still works — the heuristic must not cost
+    // anybody a real answer.
+    let value = sandbox.json(&["--format", "json", "eval", "sum"]);
+    assert_eq!(value["value"], "1999", "got: {value}");
+}
+
+#[test]
+fn variables_honours_its_window_even_though_codelldb_ignores_it() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("vars");
+    let program = toolchain.build("inspects.c");
+
+    sandbox.launch(&program);
+    sandbox.breakpoint("inspects.c", 18);
+    assert_eq!(sandbox.wait("30")["state"], "paused");
+
+    let scopes = sandbox.json(&["--format", "json", "scopes"]);
+    let locals = scopes["scopes"][0]["variables_reference"].to_string();
+    let answer = sandbox.json(&["--format", "json", "variables", "--reference", &locals]);
+
+    let big = answer["variables"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|variable| variable["name"] == "big")
+        .expect("the big array is a local");
+
+    // codelldb does not declare `supportsVariablePaging` and ignores all three
+    // arguments, so this used to answer with all 2000 entries from `[0]`
+    // (D067).
+    let window = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &big["variables_reference"].to_string(),
+        "--start",
+        "100",
+        "--count",
+        "5",
+    ]);
+    let window = window["variables"].as_array().expect("an array");
+    assert_eq!(window.len(), 5, "got: {window:?}");
+    assert_eq!(window[0]["name"], "[100]", "got: {window:?}");
+    assert_eq!(window[4]["name"], "[104]", "got: {window:?}");
+
+    // And the adapter's own answer to "what expression names this row", which
+    // is the only thing that turns `[100]` into something `eval` accepts
+    // (D069).
+    assert_eq!(window[0]["evaluate_name"], "big[100]", "got: {window:?}");
 }
 
 #[test]

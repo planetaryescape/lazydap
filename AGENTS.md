@@ -171,7 +171,15 @@ The response includes everything that happened during execution:
 - `frame`: top frame source/line/column when paused
 - `captured_output`: array of `{category, output}` from the program's stdout/stderr during the run
 - `breakpoint_updates`: any breakpoints whose state changed during the run
-- `additional_stopped_threads`: in multi-threaded programs
+- `additional_stopped_threads` and `thread_updates`: **empty against codelldb, and against
+  any adapter that reports a multi-threaded stop as one event.** Both are filled from
+  messages codelldb does not send. Four threads stopping simultaneously on four distinct
+  breakpoints produce exactly one `stopped` event with `allThreadsStopped: true` — and
+  `additional_stopped_threads` is filled only from a *second* `Stopped`, so it stays `[]`.
+  `thread_updates` comes from DAP `thread` events, of which codelldb emitted none in a full
+  session. Read `all_threads_stopped` for "did everything stop", and `lazydap threads` for
+  which threads exist. debugpy and delve do send per-thread events, so the fields carry
+  something there.
 
 Don't poll `lazydap status` in a loop. Use `--wait`.
 

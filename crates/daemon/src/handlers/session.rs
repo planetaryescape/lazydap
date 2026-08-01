@@ -2,7 +2,7 @@
 
 use super::{Result, find_session, live_session};
 use crate::adapter;
-use crate::state::{DaemonState, RunClaim, Session};
+use crate::state::{DaemonState, Outstanding, RunClaim, Session};
 use crate::wait::{DEFAULT_TIMEOUT, Wait, WaitOptions};
 use lazydap_core::{EndReason, SessionId, SessionState, StepKind};
 use lazydap_protocol::{ErrorCode, Event, IpcError, Response, WaitMode};
@@ -317,6 +317,16 @@ async fn send(
     movement: Movement,
     thread_id: i64,
 ) -> adapter::Result<()> {
+    // Before the send, not after: an adapter can emit the `stopped` event this
+    // request causes before it acknowledges the request itself, and the pump
+    // reads the marker as the stop arrives. A `continue` clears it — its next
+    // stop is whatever the program did next, and needs no context to describe.
+    session.set_outstanding(match movement {
+        Movement::Continue => None,
+        Movement::Step(_) => Some(Outstanding::Step { thread_id }),
+        Movement::Pause => Some(Outstanding::Pause),
+    });
+
     match (movement, permit) {
         (Movement::Continue, Some(permit)) => {
             session.adapter().resume(permit, thread_id).await?;

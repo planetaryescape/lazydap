@@ -159,6 +159,7 @@ pub(crate) fn is_compiled_artifact(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::StopContext;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -278,7 +279,14 @@ mod tests {
         // Verified against delve 1.27.0: a stop-on-entry launch reports
         // `reason: "entry"` natively, so codelldb's D033 renaming has nothing
         // to do here.
-        let (reason, raw) = Delve.normalise_stop("entry", "", true);
+        let (reason, raw) = Delve.normalise_stop(
+            "entry",
+            "",
+            StopContext {
+                stop_on_entry: true,
+                pause_requested: false,
+            },
+        );
         assert_eq!(reason, lazydap_core::PauseReason::Entry);
         assert_eq!(raw, None);
     }

@@ -11,7 +11,7 @@ use lazydap_core::{
 use lazydap_dap::{
     DapScope, DapSource, DapStackFrame, DapThread, DapVariable, EvaluateResponse, SourceBreakpoint,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The DAP command that performs a step.
 pub fn step_command(kind: StepKind) -> &'static str {
@@ -35,9 +35,19 @@ pub fn stack_frame(frame: DapStackFrame) -> StackFrame {
 }
 
 fn source_ref(source: DapSource) -> SourceRef {
+    let path = source.path.map(PathBuf::from);
     SourceRef {
-        name: source.name,
-        path: source.path.map(PathBuf::from),
+        // debugpy sends a `path` and no `name`; codelldb and delve send both.
+        // The file name is already in the path, so leaving the key off for one
+        // language out of three made `frame.source.name` a field an agent
+        // cannot format against — the fallback `SourceRef::label` already
+        // knows, applied one step earlier (D069).
+        name: source.name.or_else(|| {
+            path.as_deref()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
+        path,
         // DAP spells "not a reference" as `0`. Passing that on would have
         // clients asking the adapter for source number zero.
         source_reference: source.source_reference.filter(|reference| *reference != 0),
@@ -59,6 +69,7 @@ pub fn variable(variable: DapVariable) -> Variable {
         name: variable.name,
         value: variable.value,
         type_name: variable.type_name,
+        evaluate_name: variable.evaluate_name,
         variables_reference: variable.variables_reference,
         named_variables: variable.named_variables,
         indexed_variables: variable.indexed_variables,
@@ -73,14 +84,17 @@ pub fn eval_result(response: EvaluateResponse) -> EvalResult {
     }
 }
 
+/// A thread, named only if the adapter named it.
+///
+/// codelldb answers `threads` on a *running* program with one nameless thread
+/// `0`. That is a placeholder and an obviously useless one — which is the
+/// useful part. Filling it in as `"thread 0"` turned it into something that
+/// reads like a real answer, and lazydap does not invent data an adapter did
+/// not give it (D065).
 pub fn thread_info(thread: DapThread) -> ThreadInfo {
     ThreadInfo {
         id: thread.id,
-        name: if thread.name.is_empty() {
-            format!("thread {}", thread.id)
-        } else {
-            thread.name
-        },
+        name: (!thread.name.is_empty()).then_some(thread.name),
     }
 }
 
@@ -259,11 +273,61 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_the_adapter_did_not_name_gets_a_usable_one() {
+    fn a_thread_the_adapter_did_not_name_stays_unnamed() {
+        // codelldb answers `threads` on a running program with exactly this —
+        // one nameless thread 0. Manufacturing "thread 0" from it made a
+        // placeholder read like an answer (D065).
         let thread = thread_info(
-            serde_json::from_value(serde_json::json!({"id": 26187878})).expect("deserialise"),
+            serde_json::from_value(serde_json::json!({"id": 0, "name": ""})).expect("deserialise"),
         );
-        assert_eq!(thread.name, "thread 26187878");
+        assert_eq!(thread.name, None, "lazydap does not invent a name");
+
+        let named = thread_info(
+            serde_json::from_value(serde_json::json!({"id": 3, "name": "2: tid=34321089"}))
+                .expect("deserialise"),
+        );
+        assert_eq!(named.name.as_deref(), Some("2: tid=34321089"));
+    }
+
+    #[test]
+    fn a_source_the_adapter_named_only_by_path_still_has_a_name() {
+        // debugpy sends `path` and no `name`; codelldb and delve send both.
+        // An agent formatting `frame.source.name` got three languages and a
+        // blank (D069).
+        let frame = stack_frame(
+            serde_json::from_value(serde_json::json!({
+                "id": 2,
+                "name": "<module>",
+                "source": {"path": "/tmp/py-fixtures/chatty.py"},
+                "line": 1,
+            }))
+            .expect("deserialise"),
+        );
+
+        let source = frame.source.expect("a source");
+        assert_eq!(source.name.as_deref(), Some("chatty.py"));
+        assert_eq!(
+            source.path,
+            Some(PathBuf::from("/tmp/py-fixtures/chatty.py"))
+        );
+    }
+
+    #[test]
+    fn the_expression_that_names_a_variable_survives_translation() {
+        // codelldb sends `evaluateName` on every row; without it an agent
+        // holding a row called `[1]` has no expression `lazydap eval` accepts
+        // (D069).
+        let translated = variable(
+            serde_json::from_value(serde_json::json!({
+                "name": "[1]",
+                "value": "7",
+                "type": "unsigned int",
+                "evaluateName": "big[1]",
+                "variablesReference": 0,
+            }))
+            .expect("deserialise"),
+        );
+        assert_eq!(translated.evaluate_name.as_deref(), Some("big[1]"));
     }
 
     #[test]

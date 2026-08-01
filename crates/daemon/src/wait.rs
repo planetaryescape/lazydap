@@ -211,7 +211,18 @@ impl Wait {
     /// Record what an event says, without judging whether it ends anything.
     fn absorb(&mut self, event: &Event) {
         match event {
-            Event::Output { chunk, .. } => {
+            // Once the cap is hit the wait stops taking output, for good.
+            //
+            // Skipping only the chunk that would overrun it and going on
+            // accepting the smaller ones behind it made `captured_output` a
+            // *splice*: two hundred lines vanished from the middle of a run and
+            // text produced most of a second later was concatenated straight
+            // onto a mid-line cut, with nothing marking the join.
+            // `output_truncated` is universally read as "the tail was cut", so
+            // what it flagged was not what it meant. Stopping here makes the
+            // retained output a strict prefix of what the program printed,
+            // which is the only shape that claim is true of (D070).
+            Event::Output { chunk, .. } if !self.blob.output_truncated => {
                 let buffered: usize = self
                     .blob
                     .captured_output
@@ -224,8 +235,10 @@ impl Wait {
                     self.blob.captured_output.push(chunk.clone());
                 }
             }
+            Event::Output { .. } => {}
             Event::Stopped {
                 thread_id,
+                adapter_thread_id,
                 reason,
                 raw_reason,
                 all_threads_stopped,
@@ -238,6 +251,7 @@ impl Wait {
                     self.blob.reason = Some(reason.clone());
                     self.blob.raw_reason = raw_reason.clone();
                     self.blob.thread_id = *thread_id;
+                    self.blob.adapter_thread_id = *adapter_thread_id;
                     self.blob.all_threads_stopped = *all_threads_stopped;
                     self.blob.hit_breakpoint_ids = hit_breakpoint_ids.clone();
                 } else if let Some(thread_id) = thread_id {
@@ -395,6 +409,7 @@ mod tests {
         Event::Stopped {
             session_id: session.id,
             thread_id: Some(thread_id),
+            adapter_thread_id: None,
             reason: PauseReason::Breakpoint,
             raw_reason: None,
             all_threads_stopped: all_threads,
@@ -723,6 +738,43 @@ mod tests {
             .map(|chunk| chunk.output.len())
             .sum();
         assert!(captured <= OUTPUT_CAP_BYTES, "got: {captured}");
+    }
+
+    #[tokio::test]
+    async fn what_survives_the_cap_is_a_prefix_of_what_the_program_printed() {
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        // Big lines until the cap is reached, then a small one that would
+        // still fit under it. Skipping only the overrunning chunk let this
+        // marker through, and `captured_output` became a *splice*: half a
+        // megabyte missing from the middle with the tail glued onto the cut,
+        // under a flag every reader takes to mean "the tail was cut".
+        let line = "x".repeat(100_000);
+        for _ in 0..15 {
+            session.emit(output(&session, &line));
+        }
+        session.emit(output(&session, "MARKER-AFTER-THE-CAP\n"));
+        session.emit(stopped(&session, 1, true));
+
+        let blob = wait.collect(options(2_000)).await;
+        let captured: String = blob
+            .captured_output
+            .iter()
+            .map(|chunk| chunk.output.as_str())
+            .collect();
+
+        assert!(blob.output_truncated);
+        assert!(
+            !captured.contains("MARKER-AFTER-THE-CAP"),
+            "output produced after the cap was reached is not a prefix of anything",
+        );
+        let printed = line.repeat(15) + "MARKER-AFTER-THE-CAP\n";
+        assert!(
+            printed.starts_with(&captured),
+            "what a caller keeps must be a strict prefix of what ran: kept {} bytes",
+            captured.len(),
+        );
     }
 
     #[tokio::test]

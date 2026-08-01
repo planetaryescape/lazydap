@@ -85,6 +85,7 @@ impl DebugAdapter for Debugpy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::StopContext;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -151,7 +152,14 @@ mod tests {
         // `reason: "entry"` natively, so codelldb's D033 renaming — which
         // exists because LLDB calls its own SIGSTOP an exception — has nothing
         // to do here, and nothing is hidden in `raw_reason`.
-        let (reason, raw) = Debugpy.normalise_stop("entry", "", true);
+        let (reason, raw) = Debugpy.normalise_stop(
+            "entry",
+            "",
+            StopContext {
+                stop_on_entry: true,
+                pause_requested: false,
+            },
+        );
         assert_eq!(reason, lazydap_core::PauseReason::Entry);
         assert_eq!(raw, None);
     }

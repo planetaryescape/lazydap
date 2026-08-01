@@ -375,6 +375,8 @@ The normalisation is visible rather than silent: `raw_reason` carries the adapte
 
 **Consequences:** the guard is deliberately narrow. A real exception at the entry point does not carry `SIGSTOP` and passes through; a `SIGSTOP` nobody asked for passes through; every later stop passes through. The normalisation lives in `crates/daemon/src/adapter/codelldb.rs`, not in the pump — by the time the pump is running, the adapter's reasons are its own.
 
+**Amended by D064 (2026-08-01).** That last clause was wrong, and cost a release's worth of `lazydap pause` reporting a crash. An adapter's reasons stop being its own the moment lazydap asks it for something, and `pause` is the second thing codelldb implements with a `SIGSTOP`. `normalise_stop` is now called from the pump as well, against the execution request the program has not answered yet.
+
 ---
 
 ## D034 — `lazydap eval` defaults to the `watch` context, not `repl`
@@ -1049,3 +1051,256 @@ recorded.
 version rather than ours and is tested against a literal v1 frame — so a v5 daemon still
 answers a v6 client's shutdown and restarts as v6. That cross-version path is what makes a
 variant-only bump safe to ship: the stale daemon is replaced, not merely rejected.
+
+---
+
+## D064 — codelldb's `pause` is reported as `pause`, extending D033 to the other SIGSTOP
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** D033 fixed one half of a mistake and left the other half in place. codelldb stops a
+program by sending it `SIGSTOP`, and LLDB classifies a signal stop as an exception — so
+*both* of the ways lazydap asks a program to stop on purpose report `reason: "exception"`.
+D033 renamed the entry stop and nothing else, so a `lazydap pause --wait` answered:
+
+```json
+{"state":"paused","reason":"exception","raw_reason":null,"frame":{"name":"__ulock_wait",...}}
+```
+
+Reproduced twelve times out of twelve. The wire carries
+`{"reason":"exception","description":"signal SIGSTOP","allThreadsStopped":true}`, and lazydap
+dropped the `description` as well — so nothing in the JSON told a pause from a real
+exception. `PauseReason::Pause` existed in `lazydap-core` and was unreachable with the
+primary adapter.
+
+An agent that asks a program to stop and is told it crashed will go and diagnose the crash.
+That is the same expensive wrong answer D033 was written about, and non-negotiable #3
+settles it the same way: `reason` is lazydap's vocabulary.
+
+**Decision:** the session records the execution request the program has not answered yet
+(`state.rs`'s `Outstanding`), and `normalise_stop` reads a `StopContext` rather than a bare
+`stop_on_entry` flag. A SIGSTOP-signature stop is renamed to `pause` when a pause is
+outstanding and to `entry` when a launch asked for one, and the adapter's own word goes in
+`raw_reason` either way. Everything else passes through.
+
+The marker is written *before* the request goes out: an adapter can emit the `stopped` event
+before it acknowledges the request that caused it, and the pump reads the marker as the stop
+arrives.
+
+**Consequences:** `normalise_stop` is now called from the pump as well as the handshake.
+D033's consequence paragraph asserted the opposite — "by the time the pump is running, the
+adapter's reasons are its own" — and a comment in `pump.rs` repeated it. That was the bug:
+an adapter's reasons stop being its own the moment lazydap asked it for something. Both have
+been corrected.
+
+The guard stays as narrow as D033's. A real exception during a pause does not carry
+`SIGSTOP` and passes through; a `SIGSTOP` nobody asked for passes through; a `pause` sent to
+an adapter that reports it properly needs none of this.
+
+---
+
+## D065 — a thread the adapter did not name stays unnamed
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** `lazydap threads` on a *running* program answered, with exit 0:
+
+```json
+{"threads":[{"id":0,"name":"thread 0"}]}
+```
+
+The wire says `{"threads":[{"id":0,"name":""}]}`. codelldb's answer is a placeholder, and an
+obviously useless one — which is the useful part of it. `translate.rs` turned the empty name
+into `format!("thread {}", thread.id)`, which reads like a real answer about a real thread.
+Nothing downstream could tell the two apart, because by then there was nothing to tell apart.
+
+lazydap must not invent data an adapter did not provide. The rule is the one D033 already
+implies and this is the first case where the honest answer is *absence* rather than a
+rename.
+
+**Decision:** `ThreadInfo::name` is `Option<String>`, absent from the JSON when the adapter
+named nothing. The table renderer prints an empty cell — honest, where a fabricated name is
+not.
+
+**Alternatives considered:** rejecting `threads` while the program runs. `handlers/inspect.rs`
+deliberately allows it, and that stays: which threads exist is a fair question at any time,
+and the answer being adapter-dependent is a fact about the adapter, not a reason to refuse.
+Refusing would also have removed the one signal that says "this answer is a placeholder".
+
+**Consequences:** a client formatting `thread.name` unconditionally has to handle the key
+being absent — which is the point, and why this is part of the v7 bump rather than a silent
+change.
+
+---
+
+## D066 — a step is reported against the thread it was aimed at
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** codelldb answers a `next` aimed at one thread by naming another. Captured off the
+wire with a four-worker C program stopped at one breakpoint:
+
+```text
+next(threadId=34353117) -> stopped {"reason":"step","threadId":34353117}   moved: [117]
+next(threadId=34353118) -> stopped {"reason":"step","threadId":34353117}   moved: [118]
+```
+
+The second is the bug: the reported thread is the *previous* step's target, and it did not
+move. Ten times out of ten, the thread the caller asked for moved and the thread lazydap
+reported did not. lazydap relayed the adapter's answer verbatim, so the blob described a
+thread that had not stepped — and worse, that thread became `last_thread_id`, so the next
+bare `lazydap stack` answered about the wrong thread as well.
+
+**Decision:** the session already records what it asked for (D064's `Outstanding`), so a step
+is reported against the thread it targeted, and the adapter's own answer is kept beside it in
+a new `adapter_thread_id` — present only when the two disagree. That is `raw_reason`'s
+discipline applied to the thread rather than to the reason.
+
+No frame is fabricated for the reported thread: the blob's frame is fetched for whichever
+thread the blob names, so reporting the requested thread means fetching *its* frame. A live
+step now answers `thread_id: 34475438, adapter_thread_id: 34475437, frame: work:16`, and the
+frame is the stepped one.
+
+**Alternatives considered:** relaying the adapter's thread and adding a `requested_thread_id`
+beside it. Rejected because the field a caller reads first is `thread_id`, and leaving the
+wrong answer there means the fix only helps somebody who already suspects the problem.
+Leaving `last_thread_id` alone and fixing only the blob — rejected for the same reason: the
+poisoned `last_thread_id` is how the wrong answer spreads to the *next* command.
+
+**Consequences:** the guard is narrow, three conditions deep. It applies only to a stop whose
+reason is `step`, only when a step is outstanding, and only when the two threads differ. A
+breakpoint hit on another thread while this one was stepping is the adapter telling us
+something we did not ask about, and passes through untouched — verified live, where
+`step --thread A` answering `reason: "breakpoint"` on thread B is reported as thread B.
+
+---
+
+## D067 — `variables`' filter and window are applied here when the adapter ignores them
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** `lazydap variables --start 100 --count 5` on a 2000-element array returned all 2001
+entries, starting at `[0]`. So did `--filter`. All three were built into the DAP request and
+sent; codelldb ignored them.
+
+It was right to ignore them. DAP puts `filter`, `start` and `count` behind
+`supportsVariablePaging`, and a client may only send them when the adapter has declared it.
+codelldb does not — confirmed on the wire, its `initialize` answer has no such key. lazydap
+sent them anyway and reported whatever came back, so three documented flags were silent
+no-ops against the primary adapter.
+
+**Decision:** the capability is read from `initialize` and carried on the `AdapterHandle`.
+When the adapter declares paging, the arguments are sent as before. When it does not, they
+are not sent at all — and are applied to the answer instead. The full array is already in
+hand, which is what makes this narrowing rather than guessing.
+
+`--filter` is the one part that needs a convention: DAP marks no variable as named or
+indexed, and says instead that indexed children are the ones called `[0]`, `[1]`, and so on.
+That naming is what is read, so codelldb's synthetic `[raw]` counts as named — which is
+right, it is not an element. An adapter that names its elements some other way would be
+filtered wrongly; the alternative was to drop `--filter` against every adapter that does not
+implement it, which is a worse answer to "what does this flag mean".
+
+**Consequences:** `AdapterCapabilities` gains `supports_variable_paging`, so a caller can see
+which of the two happened. A `count` of `0` still means "the rest from `start`", as DAP says,
+rather than an empty answer.
+
+---
+
+## D068 — an evaluation error hidden inside a value fails the command
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** codelldb answers an expression it could not evaluate with a *successful* `evaluate`
+whose result is the error text:
+
+```text
+$ lazydap eval '*boxed_dyn'   -> {"value":"<error: invalid value object>"}                     exit 0
+$ lazydap eval 'v_empty[0]'   -> {"value":"<read memory from 0x4 failed (0 of 4 bytes read)>"} exit 0
+```
+
+lazydap's success is the DAP envelope's, so both arrived as a `value`, no `error`, exit 0.
+The documented contract says exit 0 means the value is a value; an agent branching on it
+treats "could not read that memory" as a reading. This is the failure mode of the whole
+batch in miniature — not a missing feature, an answer that is confidently wrong.
+
+**Decision:** a per-adapter predicate, `DebugAdapter::is_eval_error`, defaulting to `false`
+and implemented only for codelldb. A matching result fails the command through the existing
+error envelope, so it exits 1 with `DapProtocolError` and the adapter's own text in
+`adapter_message`. Failing properly beat adding a flag: a flag would leave every existing
+caller reading the same wrong `value`, and the exit code is the thing the contract already
+tells agents to branch on.
+
+**Alternatives considered:** treating any `<...>`-wrapped value as an error. Rejected — a
+false positive here turns a working `eval` into a failure, which is worse than the bug.
+Python's `<__main__.Foo object at 0x10a>` and LLDB's `<incomplete type>` are legitimate
+values of exactly that shape. So the brackets are necessary and not sufficient: the text
+inside must also open with `error:` or say something `failed`.
+
+**Consequences:** the heuristic reads a human-readable string, which is as brittle as it
+looks, and is why it lives behind the adapter trait rather than in the shared handle — it
+runs for codelldb and nothing else. A value that merely *contains* those words is left alone.
+The TUI's watches pane already had a `WatchValue::Error` arm, so a failed watch now renders
+as an error rather than as a value that reads like one.
+
+---
+
+## D069 — the answer carries what the adapter already knew
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** three small losses, all the same shape — the adapter answered a question and lazydap
+dropped the answer on the way out.
+
+- **`evaluateName`.** codelldb sends `"evaluateName": "big[100]"` on every variable row.
+  `DapVariable` did not model it, so it was discarded. It is the adapter's own answer to
+  "what expression names this row", and given codelldb's expression limits it is the only
+  reliable route from a `variables` row called `[100]` or `label` to a working `lazydap eval`
+  argument.
+- **`source.name`.** codelldb and delve send it; debugpy sends only `path`. lazydap passed
+  the key through as-is, so an agent formatting `frame.source.name` got two languages and a
+  blank — while lazydap held the path the name is *in*. `SourceRef::label` already knew the
+  fallback; it is now applied one step earlier, where the shape is decided rather than where
+  it is rendered.
+- **`supportsVariableType`.** Never declared in `initialize`. Per DAP, `Variable.type` is only
+  guaranteed to a client that asked for it. Both shipped adapters send it regardless, so
+  nothing was broken — `type_name` simply rested on adapter leniency rather than on the
+  contract.
+
+**Decision:** surface all three. `Variable` gains `evaluate_name`, absent when the adapter
+sends none. `source.name` is filled from the path's file name when the adapter omits it — a
+derivation from data lazydap has, not an invention, which is what separates this from D065.
+`InitializeArgs` declares `supportsVariableType`.
+
+**Consequences:** `supportsVariableType` changes no observed behaviour today, which is the
+argument for doing it now rather than when an adapter that honours it arrives and quietly
+stops sending types.
+
+---
+
+## D070 — truncated `captured_output` is a prefix, not a splice
+
+**Status:** decided (2026-08-01, from the dogfooding campaign).
+
+**Why:** `--wait` caps `captured_output` at a megabyte (D9). The cap skipped any chunk that
+would overrun it, set `output_truncated`, and **went on accepting later chunks that fit**.
+
+Measured against a program printing 1500 kilobyte-lines, then pausing, then printing a
+marker: about 500 lines vanished from the middle, and the marker — produced 800 ms later —
+was concatenated directly onto a mid-line cut, with nothing indicating the join. The blob
+said `output_truncated: true`, which every reader takes to mean "the tail was cut". What it
+actually flagged was a splice, and an agent reasoning about the program's output would be
+reading two moments in its life as one.
+
+**Decision:** once the cap is reached the wait stops accepting output for the rest of the
+run. What is kept is then a strict prefix of what the program printed, which is the only
+shape the flag's ordinary reading is true of.
+
+**Consequences:** slightly less output is retained in exchange for it meaning something.
+The alternative — keeping the splice and marking the join — was rejected: a marker inside
+`captured_output` is a value the program did not print, sitting in the field that says what
+the program printed.
+
+**Verified:** a live run keeps 998,173 of 1,501,530 bytes, the marker is absent, and the
+retained text is a prefix of the program's own stdout. The deterministic version is
+`what_survives_the_cap_is_a_prefix_of_what_the_program_printed` in `crates/daemon/src/wait.rs`.

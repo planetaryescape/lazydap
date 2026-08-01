@@ -195,7 +195,13 @@ pub async fn threads(instance: &Instance, format: OutputFormat) -> Result<()> {
         .map(|thread| {
             Row::new(
                 thread.id.to_string(),
-                vec![thread.id.to_string(), thread.name.clone()],
+                // Blank when the adapter named nothing. A cell reading
+                // "thread 0" would be lazydap's invention, not an answer
+                // (D065).
+                vec![
+                    thread.id.to_string(),
+                    thread.name.clone().unwrap_or_default(),
+                ],
                 thread,
             )
         })

@@ -287,6 +287,7 @@ mod tests {
             IpcMessage::event(Event::Stopped {
                 session_id,
                 thread_id: Some(1),
+                adapter_thread_id: None,
                 reason: PauseReason::Breakpoint,
                 raw_reason: None,
                 all_threads_stopped: true,

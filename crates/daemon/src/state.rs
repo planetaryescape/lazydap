@@ -333,6 +333,21 @@ pub enum RunClaim {
     AlreadyRunning,
 }
 
+/// An execution request the program has not answered yet.
+///
+/// Only the two whose answer cannot be read without them. A `continue` is not
+/// here: its next stop is whatever the program did next, which needs no
+/// context to describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outstanding {
+    /// A `pause`. codelldb implements it with a `SIGSTOP` and so reports it as
+    /// an exception, exactly as it reports an entry stop (D064).
+    Pause,
+    /// A step, and the thread it was aimed at. codelldb answers with a
+    /// `stopped` event naming whichever thread it had selected before (D066).
+    Step { thread_id: i64 },
+}
+
 /// One live debug session.
 pub struct Session {
     pub id: SessionId,
@@ -363,6 +378,15 @@ pub struct Session {
     /// The thread that stopped last, so a caller can say `lazydap continue`
     /// without first asking which thread it means.
     last_thread_id: RwLock<Option<i64>>,
+    /// The execution request the program has not answered yet.
+    ///
+    /// Two stops cannot be read from the stop alone, and both are answered by
+    /// knowing what was asked for: codelldb reports a `pause` exactly as it
+    /// reports an entry stop (D064), and answers a `next` aimed at one thread
+    /// by naming another (D066). Written before the request goes out — an
+    /// adapter can emit the `stopped` event before it acknowledges the request
+    /// that caused it — and taken by the stop that answers it.
+    outstanding: RwLock<Option<Outstanding>>,
     /// What the adapter currently thinks of the breakpoints we gave it, keyed
     /// by our id, plus the adapter's own id for each — the only way to read a
     /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
@@ -399,6 +423,7 @@ impl Session {
             event_tx,
             adapter,
             last_thread_id: RwLock::new(None),
+            outstanding: RwLock::new(None),
             breakpoints: Mutex::new(BreakpointMap::default()),
             debuggee: Mutex::new(None),
         }
@@ -422,6 +447,18 @@ impl Session {
         if let Some(thread_id) = thread_id {
             *write(&self.last_thread_id) = Some(thread_id);
         }
+    }
+
+    /// Say what the program has just been asked to do. `None` for a `continue`,
+    /// whose next stop can legitimately be about any thread.
+    pub fn set_outstanding(&self, outstanding: Option<Outstanding>) {
+        *write(&self.outstanding) = outstanding;
+    }
+
+    /// What the program was asked to do, clearing it: one stop answers one
+    /// request, and a marker left behind would colour the next one.
+    pub fn take_outstanding(&self) -> Option<Outstanding> {
+        write(&self.outstanding).take()
     }
 
     /// Record what the adapter made of the breakpoints in one source file.

@@ -39,7 +39,7 @@ use lazydap_dap::{
     SetBreakpointsResponse, Source, StackTraceArgs, StackTraceResponse, StepArgs, TcpSpawn,
     ThreadsResponse, TransportError, VariablesArgs, VariablesResponse,
 };
-use lazydap_protocol::{ErrorCode, IpcError, LaunchRequest};
+use lazydap_protocol::{AdapterCapabilities, ErrorCode, IpcError, LaunchRequest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -93,14 +93,23 @@ pub trait DebugAdapter: Send + Sync {
     ///
     /// The default is to take the adapter at its word, which is right for any
     /// adapter that follows the specification — debugpy does. codelldb
-    /// overrides it (D033, quirk 6).
+    /// overrides it (D033 and D064, quirk 6).
     fn normalise_stop(
         &self,
         raw: &str,
         _description: &str,
-        _stop_on_entry: bool,
+        _context: StopContext,
     ) -> (PauseReason, Option<String>) {
         (PauseReason::from(raw), None)
+    }
+
+    /// Whether a *successful* `evaluate` is really the adapter reporting a
+    /// failure inside the result string.
+    ///
+    /// The default is `false`: an adapter that fails the request when the
+    /// expression fails needs nothing here. codelldb overrides it (D068).
+    fn is_eval_error(&self, _value: &str) -> bool {
+        false
     }
 
     /// The debuggee's pid, if this adapter only says it in console output.
@@ -111,6 +120,21 @@ pub trait DebugAdapter: Send + Sync {
     fn debuggee_pid_in(&self, _output: &str) -> Option<u32> {
         None
     }
+}
+
+/// What lazydap asked for, for the stops whose meaning depends on it.
+///
+/// An adapter that implements two different requests with the same signal —
+/// codelldb sends the debuggee a `SIGSTOP` both for `--stop-on-entry` and for
+/// `pause` — cannot be read from the stop alone. This is the missing half.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StopContext {
+    /// This launch asked to stop at the entry point, and this is its first
+    /// stop. Only the handshake ever sets it: by the time the pump is running,
+    /// the entry stop has already happened.
+    pub stop_on_entry: bool,
+    /// A `pause` has been sent and nothing has stopped since.
+    pub pause_requested: bool,
 }
 
 /// How to start an adapter and reach it once it is running.
@@ -305,6 +329,12 @@ pub struct AdapterHandle {
     /// exactly the wrong place for the thing that breaks the queue.
     execution: Mutex<()>,
     pending: Pending,
+    /// Which adapter is on the other end, for the two answers that have to be
+    /// read in its own dialect: [`DebugAdapter::is_eval_error`] and
+    /// [`DebugAdapter::normalise_stop`].
+    adapter: &'static dyn DebugAdapter,
+    /// What the adapter said it could do, in its `initialize` answer.
+    capabilities: AdapterCapabilities,
 }
 
 /// Proof that the holder may move the program.
@@ -320,11 +350,18 @@ pub struct ExecutionPermit<'a> {
 }
 
 impl AdapterHandle {
-    pub(crate) fn new(writer: DapWriter, pending: Pending) -> Self {
+    pub(crate) fn new(
+        writer: DapWriter,
+        pending: Pending,
+        adapter: &'static dyn DebugAdapter,
+        capabilities: AdapterCapabilities,
+    ) -> Self {
         Self {
             writer: Mutex::new(Some(writer)),
             execution: Mutex::new(()),
             pending,
+            adapter,
+            capabilities,
         }
     }
 
@@ -339,6 +376,11 @@ impl AdapterHandle {
             writer: Mutex::new(None),
             execution: Mutex::new(()),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            // Arbitrary, and safe to be: every method that consults these
+            // sends a request first, and a detached handle answers `Gone`
+            // before it gets that far.
+            adapter: for_kind(AdapterKind::Codelldb),
+            capabilities: AdapterCapabilities::default(),
         }
     }
 
@@ -529,6 +571,19 @@ impl AdapterHandle {
         Ok(response.scopes.into_iter().map(translate::scope).collect())
     }
 
+    /// One variable's children, narrowed the way the caller asked.
+    ///
+    /// DAP puts `filter`, `start` and `count` behind `supportsVariablePaging`,
+    /// and a client may only send them when the adapter has declared it.
+    /// codelldb does not declare it and ignores all three, so sending them and
+    /// returning whatever came back made three documented flags silent no-ops
+    /// against the primary adapter — `--start 100 --count 5` on a 2000-element
+    /// vector answered with all 2001 entries starting at `[0]`.
+    ///
+    /// So they are applied here instead when the adapter has not claimed them.
+    /// The whole array is already in hand, which is the one thing that makes
+    /// this honest rather than a guess: nothing is invented, the answer is
+    /// merely narrowed to what was asked for (D067).
     pub async fn variables(
         &self,
         variables_reference: i64,
@@ -536,24 +591,46 @@ impl AdapterHandle {
         start: Option<u32>,
         count: Option<u32>,
     ) -> Result<Vec<Variable>> {
+        let paging = self.capabilities.supports_variable_paging;
+        // Sent only to an adapter that said it reads them. To one that did not,
+        // they go to `narrow` below instead of onto the wire.
+        let (sent_filter, sent_start, sent_count) = match paging {
+            true => (filter.as_dap().map(str::to_string), start, count),
+            false => (None, None, None),
+        };
+
         let response: VariablesResponse = self
             .call(
                 "variables",
                 &VariablesArgs {
                     variables_reference,
-                    filter: filter.as_dap().map(str::to_string),
-                    start,
-                    count,
+                    filter: sent_filter,
+                    start: sent_start,
+                    count: sent_count,
                 },
             )
             .await?;
-        Ok(response
+
+        let variables = response
             .variables
             .into_iter()
             .map(translate::variable)
-            .collect())
+            .collect();
+        match paging {
+            true => Ok(variables),
+            false => Ok(narrow(variables, filter, start, count)),
+        }
     }
 
+    /// Evaluate an expression, and fail when the adapter only *said* it
+    /// succeeded.
+    ///
+    /// codelldb answers an expression it could not evaluate with a successful
+    /// `evaluate` whose `result` is the error text — `<error: invalid value
+    /// object>`, `<read memory from 0x4 failed (0 of 4 bytes read)>`. lazydap's
+    /// success is the DAP envelope's, so those reached callers as a `value`
+    /// with no `error` and exit 0: an agent branching on the documented
+    /// contract treats "could not read that memory" as a reading (D068).
     pub async fn evaluate(
         &self,
         expression: &str,
@@ -570,6 +647,13 @@ impl AdapterHandle {
                 },
             )
             .await?;
+
+        if self.adapter.is_eval_error(&response.result) {
+            return Err(AdapterError::Rejected {
+                command: "evaluate".to_string(),
+                message: response.result,
+            });
+        }
         Ok(translate::eval_result(response))
     }
 
@@ -704,6 +788,45 @@ fn rebind_source(requested: &Path, applied: &[AdapterBreakpoint]) -> Option<Path
     let same_file =
         std::fs::canonicalize(&candidate).ok()? == std::fs::canonicalize(requested).ok()?;
     same_file.then_some(candidate)
+}
+
+/// Apply `variables`' filter and window ourselves, for an adapter that will
+/// not (D067).
+///
+/// `filter` is the one part that cannot be read straight off the wire: DAP
+/// marks no variable as named or indexed, and says instead that indexed
+/// children are the ones called `[0]`, `[1]`, and so on. That naming is what is
+/// read here, so codelldb's synthetic `[raw]` counts as named — which is right,
+/// it is not an element. An adapter that named its elements some other way
+/// would be filtered wrongly, and the only alternative is to drop `--filter`
+/// against every adapter that does not implement it. `--start`/`--count` need
+/// no convention: they index the filtered list.
+fn narrow(
+    variables: Vec<Variable>,
+    filter: VariableFilter,
+    start: Option<u32>,
+    count: Option<u32>,
+) -> Vec<Variable> {
+    let indexed = |variable: &Variable| {
+        variable
+            .name
+            .strip_prefix('[')
+            .and_then(|name| name.strip_suffix(']'))
+            .is_some_and(|index| index.chars().all(|c| c.is_ascii_digit()))
+    };
+    let kept = variables.into_iter().filter(|variable| match filter {
+        VariableFilter::All => true,
+        VariableFilter::Indexed => indexed(variable),
+        VariableFilter::Named => !indexed(variable),
+    });
+
+    let windowed = kept.skip(start.unwrap_or(0) as usize);
+    match count {
+        // DAP reads a `count` of 0 as "all of them from `start`", not as an
+        // empty answer.
+        Some(0) | None => windowed.collect(),
+        Some(count) => windowed.take(count as usize).collect(),
+    }
 }
 
 /// Read a response body as the shape DAP says it is.
@@ -1262,5 +1385,63 @@ mod tests {
 
         assert_eq!(ipc.code, ErrorCode::DapProtocolError);
         assert_eq!(ipc.details["adapter_message"], "could not find the program");
+    }
+
+    /// A vector's children the way codelldb sends them: every element, plus
+    /// the synthetic `[raw]` it appends.
+    fn elements(count: u32) -> Vec<Variable> {
+        (0..count)
+            .map(|index| format!("[{index}]"))
+            .chain(["[raw]".to_string(), "len".to_string()])
+            .map(|name| Variable {
+                name,
+                value: "0".to_string(),
+                type_name: None,
+                evaluate_name: None,
+                variables_reference: 0,
+                named_variables: None,
+                indexed_variables: None,
+            })
+            .collect()
+    }
+
+    fn names(variables: &[Variable]) -> Vec<&str> {
+        variables.iter().map(|v| v.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_window_an_adapter_ignored_is_applied_here_instead() {
+        // codelldb does not declare `supportsVariablePaging` and ignores all
+        // three arguments, so `--start 100 --count 5` on a 2000-element vector
+        // answered with all 2001 entries starting at `[0]` (D067).
+        let narrowed = narrow(elements(2000), VariableFilter::All, Some(100), Some(5));
+        assert_eq!(
+            names(&narrowed),
+            ["[100]", "[101]", "[102]", "[103]", "[104]"]
+        );
+    }
+
+    #[test]
+    fn a_filter_reads_dap_s_naming_of_indexed_children() {
+        let indexed = narrow(elements(3), VariableFilter::Indexed, None, None);
+        assert_eq!(names(&indexed), ["[0]", "[1]", "[2]"]);
+
+        let named = narrow(elements(3), VariableFilter::Named, None, None);
+        assert_eq!(
+            names(&named),
+            ["[raw]", "len"],
+            "codelldb's synthetic `[raw]` is not an element",
+        );
+    }
+
+    #[test]
+    fn a_window_past_the_end_is_empty_rather_than_everything() {
+        assert!(narrow(elements(3), VariableFilter::All, Some(99), Some(5)).is_empty());
+    }
+
+    #[test]
+    fn a_count_of_zero_means_the_rest_the_way_dap_says() {
+        let narrowed = narrow(elements(3), VariableFilter::Indexed, Some(1), Some(0));
+        assert_eq!(names(&narrowed), ["[1]", "[2]"]);
     }
 }

@@ -8,9 +8,9 @@
 //! construction, and everything else — request waiters, event fan-out — is
 //! reached through channels.
 
-use super::Pending;
 use super::handshake::{PumpStart, output_chunk, started_process};
-use crate::state::Session;
+use super::{Pending, StopContext};
+use crate::state::{Outstanding, Session};
 use lazydap_core::{
     AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
     ThreadUpdateKind,
@@ -85,9 +85,27 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
                 session.set_debuggee(started);
             }
         }
+        // An adapter's reasons are not its own once lazydap asked for
+        // something: codelldb reports a `pause` as an exception with a
+        // `SIGSTOP` description, exactly as it reports an entry stop, and
+        // answers a `next` aimed at one thread by naming another. Both are
+        // read against the request still outstanding, which is taken here
+        // because this stop is what answers it.
         "stopped" => {
-            let reason = PauseReason::from(body["reason"].as_str().unwrap_or("unknown"));
-            let thread_id = body["threadId"].as_i64();
+            let outstanding = session.take_outstanding();
+            let (reason, raw_reason) = super::for_kind(session.adapter_kind).normalise_stop(
+                body["reason"].as_str().unwrap_or("unknown"),
+                body["description"].as_str().unwrap_or_default(),
+                StopContext {
+                    // The handshake owns the entry stop; by the time the pump
+                    // is running that one has already been reported.
+                    stop_on_entry: false,
+                    pause_requested: outstanding == Some(Outstanding::Pause),
+                },
+            );
+
+            let said = body["threadId"].as_i64();
+            let (thread_id, adapter_thread_id) = stopped_thread_ids(&reason, outstanding, said);
             session.set_state(SessionState::Paused);
             session.set_last_thread_id(thread_id);
             tracing::debug!(
@@ -95,16 +113,15 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
                 session_id = %session_id,
                 reason = %reason,
                 thread_id,
+                adapter_thread_id,
                 "paused",
             );
             session.emit(Event::Stopped {
                 session_id,
                 thread_id,
+                adapter_thread_id,
                 reason,
-                // Only the first stop of a `stop_on_entry` launch is
-                // normalised, and the handshake owns that one — by the time
-                // the pump is running, the adapter's reasons are its own.
-                raw_reason: None,
+                raw_reason,
                 all_threads_stopped: body["allThreadsStopped"].as_bool().unwrap_or(false),
                 hit_breakpoint_ids: hit_breakpoints(session, &body),
             });
@@ -182,6 +199,46 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
     }
 }
 
+/// Which thread a stop is about, and which one the adapter said.
+///
+/// codelldb answers `{"threadId": A, "command": "next"}` with
+/// `{"event": "stopped", "reason": "step", "threadId": B}`, where B is whatever
+/// thread it had selected before — measured ten times out of ten, with A the
+/// thread that actually moved and B one that did not. Relaying B told the agent
+/// a thread stepped that had not, and left B as `last_thread_id`, so the next
+/// bare `lazydap stack` answered about the wrong thread as well.
+///
+/// So a *step* is reported against the thread it was aimed at, and the
+/// adapter's own answer is kept beside it rather than dropped — `raw_reason`'s
+/// discipline, applied to the thread (D066). The guard is narrow on purpose:
+/// only a step, only when a step is outstanding, only when the two disagree. A
+/// stop that is not a step — a breakpoint hit on another thread while stepping
+/// this one — is the adapter telling us something we did not ask about, and
+/// passes through as it always did.
+///
+/// No frame is invented for A: the blob's frame is fetched for whichever thread
+/// this returns, so reporting A means fetching A's frame.
+fn stopped_thread_ids(
+    reason: &PauseReason,
+    outstanding: Option<Outstanding>,
+    said: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    let Some(Outstanding::Step { thread_id }) = outstanding else {
+        return (said, None);
+    };
+    if !matches!(reason, PauseReason::Step) || said == Some(thread_id) {
+        return (said, None);
+    }
+
+    tracing::debug!(
+        target: "daemon.session",
+        requested = thread_id,
+        said,
+        "the adapter named a different thread than the one asked to step (D066)",
+    );
+    (Some(thread_id), said)
+}
+
 /// Which of *our* breakpoints a stop is attributed to.
 ///
 /// The event lists the adapter's ids, which mean nothing to a client. An id we
@@ -247,6 +304,67 @@ async fn finish(session: &Arc<Session>, error: &TransportError) {
             target: "daemon.session",
             session_id = %session.id,
             "adapter closed the socket after the session had already ended",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_step_is_reported_against_the_thread_it_was_aimed_at() {
+        // Verbatim off the wire: `next(threadId=34353118)` answered with
+        // `{"reason":"step","threadId":34353117}`, where 34353117 was the
+        // previous step's target and did not move. Relaying it told the agent
+        // a thread stepped that had not (D066).
+        let outstanding = Some(Outstanding::Step {
+            thread_id: 34353118,
+        });
+        let (thread_id, adapter_thread_id) =
+            stopped_thread_ids(&PauseReason::Step, outstanding, Some(34353117));
+
+        assert_eq!(
+            thread_id,
+            Some(34353118),
+            "the thread that was asked to step"
+        );
+        assert_eq!(
+            adapter_thread_id,
+            Some(34353117),
+            "and the adapter's own answer, kept rather than dropped",
+        );
+    }
+
+    #[test]
+    fn an_adapter_that_names_the_thread_we_asked_for_discloses_nothing() {
+        let outstanding = Some(Outstanding::Step { thread_id: 7 });
+        assert_eq!(
+            stopped_thread_ids(&PauseReason::Step, outstanding, Some(7)),
+            (Some(7), None),
+            "there is no discrepancy to report",
+        );
+    }
+
+    #[test]
+    fn a_stop_that_is_not_the_step_passes_through_untouched() {
+        // A breakpoint hit on another thread while this one was stepping is
+        // the adapter telling us something we did not ask about. Rewriting it
+        // to the stepped thread would be the invention this fix exists to
+        // stop.
+        let outstanding = Some(Outstanding::Step { thread_id: 7 });
+        assert_eq!(
+            stopped_thread_ids(&PauseReason::Breakpoint, outstanding, Some(9)),
+            (Some(9), None),
+        );
+        assert_eq!(
+            stopped_thread_ids(&PauseReason::Step, Some(Outstanding::Pause), Some(9)),
+            (Some(9), None),
+            "nothing was asked to step",
+        );
+        assert_eq!(
+            stopped_thread_ids(&PauseReason::Step, None, Some(9)),
+            (Some(9), None)
         );
     }
 }

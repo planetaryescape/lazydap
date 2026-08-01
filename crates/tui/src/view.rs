@@ -324,6 +324,7 @@ mod tests {
                     name: "x".to_string(),
                     value: "5".to_string(),
                     type_name: Some("int".to_string()),
+                    evaluate_name: None,
                     variables_reference: 0,
                     named_variables: None,
                     indexed_variables: None,
@@ -342,6 +343,7 @@ mod tests {
         Event::Stopped {
             session_id,
             thread_id: Some(1),
+            adapter_thread_id: None,
             reason: PauseReason::Breakpoint,
             raw_reason: None,
             all_threads_stopped: true,
@@ -455,6 +457,7 @@ mod tests {
             Msg::DaemonEvent(Event::Stopped {
                 session_id: SessionId::new(),
                 thread_id: Some(1),
+                adapter_thread_id: None,
                 reason: PauseReason::Entry,
                 raw_reason: None,
                 all_threads_stopped: true,
