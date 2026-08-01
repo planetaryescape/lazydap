@@ -358,17 +358,20 @@ wait_timeout_seconds = 60
 $ lazydap doctor --format json
 {
   "checks": [
-    { "detail": "/Users/you/lazydap-config.toml (read)", "name": "config.file", "ok": true },
-    { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
+    { "detail": "/Users/you/project/lazydap-config.toml (read)", "name": "config.file", "ok": true },
+    { "detail": "/Users/you/.local/opt/codelldb/extension/adapter/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
+    { "detail": "/Users/you/go/bin/dlv", "name": "adapter.delve", "ok": true },
     { "detail": "/Users/you/project/.lazydap/state.toml (1 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance cookbook-pin2, pid 27485, protocol v6", "name": "daemon", "ok": true }
+    { "detail": "instance cookbook-pin2, pid 54121, protocol v6", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
 ```
 
-Each adapter is checked separately, so a broken codelldb pin does not hide a working debugpy.
+`adapter.codelldb` reports the pinned path rather than the one on `PATH`, which is how you know
+the pin took. Each adapter is checked separately, so a broken codelldb pin does not hide a
+working debugpy or delve.
 
 `LAZYDAP_CONFIG_PATH` points at a different file, which is the tidy way to try a pin without
 editing your real config.
@@ -381,8 +384,17 @@ $ lazydap doctor --format json
 {"details":{},"error":"DaemonInternalError","message":"1 check(s) failed"}
 ```
 
+The same run in `table` form says which check failed and why:
+
 ```text
-adapter.codelldb  false  codelldb is pinned to /nope/codelldb in lazydap's config, and that is not an executable
+CHECK             STATUS  DETAIL
+config.file       ok      /Users/you/project/bad-config.toml (read)
+adapter.codelldb  FAILED  codelldb is pinned to /nope/codelldb by lazydap's config, and that is not an executable
+adapter.debugpy   ok      /opt/homebrew/bin/python3
+adapter.delve     ok      /Users/you/go/bin/dlv
+state.file        ok      /Users/you/project/.lazydap/state.toml (1 breakpoints)
+daemon            ok      instance cookbook-pin2, pid 53986, protocol v6
+error: 1 check(s) failed
 ```
 
 The config file is per user, never per project — project state lives in `.lazydap/state.toml`.
