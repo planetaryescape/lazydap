@@ -83,6 +83,7 @@ export default defineConfig({
             { label: 'Recipes', slug: 'guides/recipes' },
             { label: 'Why lazydap', slug: 'guides/why-lazydap' },
             { label: 'Debug with an agent', slug: 'guides/agents' },
+            { label: 'Write one script for four languages', slug: 'guides/adapters' },
             { label: 'The --wait contract', slug: 'guides/wait' },
             { label: 'Breakpoints', slug: 'guides/breakpoints' },
             { label: 'Output formats and piping', slug: 'guides/output-formats' },
