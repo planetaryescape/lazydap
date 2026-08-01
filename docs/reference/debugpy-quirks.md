@@ -9,6 +9,11 @@ Everything below was observed against **debugpy 1.8.21** on **CPython 3.14.6**,
 macOS 15 (arm64), by driving a real adapter and reading the wire. Where a claim
 came from a captured message, the message is quoted.
 
+Entries 13 to 16 were added on 2026-08-01 from the cross-adapter dogfooding
+campaign, against the same versions on Darwin 25.5.0. They are the ones an agent
+writing one code path for several languages trips over; the cross-adapter summary
+lives in the docs-site guide *Write one script for four languages*.
+
 ---
 
 ## 1. It is a module, not a binary
@@ -221,3 +226,139 @@ main    app.py:20
 _run_code  runpy.py:88
 _run_module_as_main  runpy.py:203
 ```
+
+## 13. A breakpoint far past the end of the file is `verified: true`
+
+The one place debugpy is actively misleading rather than merely different. Against a
+**16-line** file, asking for line 99999:
+
+```console
+$ lazydap break /Users/you/pyq.py:99999 --format json
+{ "action": "added",
+  "breakpoints": [ { "enabled": true, "id": 5, "line": 99999,
+                     "source": "/Users/you/pyq.py", "verified": false } ] }
+
+$ lazydap launch /Users/you/pyq.py --format json
+{ "breakpoints": [ { "adapter_line": 16, "enabled": true, "id": 5, "line": 99999,
+                     "source": "/Users/you/pyq.py", "verified": true } ],
+  "state": "running" }
+```
+
+`verified: true`, silently relocated to line 16 — the last line of the file — with **no
+`message` saying so.** `adapter_line` is the only evidence, and only if you compare it against
+the `line` you asked for.
+
+It is not a paper acceptance either. The program really does stop there:
+
+```console
+$ lazydap continue --wait --format json
+{ "frame": { "column": 1, "id": 2, "line": 16, "name": "<module>",
+             "source": { "path": "/Users/you/pyq.py" } },
+  "hit_breakpoint_ids": [],
+  "reason": "breakpoint",
+  "state": "paused" }
+```
+
+So a breakpoint 99,983 lines past the end of a file both verifies and fires, at a line the
+caller never named, with an empty `hit_breakpoint_ids` (quirk 5) giving nothing to reconcile
+against.
+
+The other two adapters refuse the same input. codelldb, on a 7-line C file:
+
+```json
+{ "enabled": true, "id": 10, "line": 99999, "message": "Resolved locations: 0",
+  "source": "/Users/you/cq.c", "verified": false }
+```
+
+and delve, on a 16-line Go file:
+
+```json
+{ "enabled": true, "id": 11, "line": 99999,
+  "message": "could not find statement at /Users/you/goq.go:99999, please use a line with a statement",
+  "source": "/Users/you/goq.go", "verified": false }
+```
+
+`verified` is the field the CLI documentation tells agents to trust, and under debugpy it does
+not distinguish "your line is fine" from "your line is nonsense and I picked one".
+
+**What to do:** compare `adapter_line` against `line` whenever it is present, and treat a
+difference as a relocation to investigate rather than a detail. `verified` alone is not enough
+for Python.
+
+## 14. A breakpoint on a blank line slides *backward*
+
+Given a file whose line 5 is `z = x + y` and whose line 6 is blank, a breakpoint on line 6
+binds to line 5:
+
+```console
+$ lazydap break /Users/you/pyq.py:6 --format json
+{ "breakpoints": [ { "enabled": true, "id": 6, "line": 6, "verified": false } ] }
+
+$ lazydap launch /Users/you/pyq.py --format json
+{ "breakpoints": [ { "adapter_line": 5, "enabled": true, "id": 6, "line": 6,
+                     "source": "/Users/you/pyq.py", "verified": true } ] }
+```
+
+Again with no `message`. The three adapters each pick a different answer to the same question:
+
+| adapter | breakpoint on a line with no statement |
+|---|---|
+| codelldb | slides **forward** to the next line with code |
+| debugpy | slides **backward** to the previous statement |
+| delve | **refuses**, `verified: false`, with a message naming the file and line |
+
+Backward is the surprising one, and it is surprising in a way that matters: a breakpoint
+placed just after a block, intending to catch the program on its way out, instead fires
+*inside* the block — one statement earlier than asked, with different variables in scope.
+
+Combined with quirk 13, the rule for Python is that `line` in a lazydap breakpoint record is
+what you asked for and `adapter_line` is where the program will actually stop. Read the second
+one.
+
+## 15. `frame.column` is always `1`
+
+Every frame, at every stop, in every file:
+
+```console
+$ lazydap stack --format json
+{ "frames": [
+    { "column": 1, "id": 3, "line": 3,   "name": "main",                "source": { "path": "/Users/you/pyq.py" } },
+    { "column": 1, "id": 2, "line": 16,  "name": "<module>",            "source": { "path": "/Users/you/pyq.py" } },
+    { "column": 1, "id": 4, "line": 88,  "name": "_run_code",           "source": { "path": ".../runpy.py" } },
+    { "column": 1, "id": 5, "line": 203, "name": "_run_module_as_main", "source": { "path": ".../runpy.py" } } ],
+  "total": 4 }
+```
+
+Four frames, four different files and lines, one column. DAP's `column` is 1-based, so `1`
+is the smallest legal value: this is the placeholder, not a measurement. Stops from `step` and
+from breakpoints report it identically.
+
+codelldb does give real columns — `column: 5` at a Rust statement indented four spaces — so
+code that reads columns will look correct until it meets Python. Treat `column` as advisory
+everywhere; see the docs-site guide *Write one script for four languages*.
+
+## 16. One `print()` can arrive as two output chunks, and lines end `\n`
+
+`print("before")` produces two `output` events, not one:
+
+```json
+"captured_output": [
+  { "category": "stdout", "output": "before", "timestamp_ms": 1785621783847 },
+  { "category": "stdout", "output": "\n",     "timestamp_ms": 1785621783847 }
+]
+```
+
+The text and its terminating newline are separate chunks with the same millisecond timestamp,
+because `print` writes them with separate `write` calls and debugpy forwards each one. A
+consumer that assumes one chunk is one line will emit a spurious blank line for every `print`,
+or lose the newline entirely.
+
+Note also the line ending: debugpy sends `\n`, where codelldb sends `\r\n` for the same
+program's output —
+
+```json
+{ "category": "stdout", "output": "hello from cq\r\n" }
+```
+
+— so anything comparing captured output against expected text needs to strip `\r`, and anything
+splitting it into lines should concatenate the chunks first and split on the result.

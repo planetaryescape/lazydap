@@ -15,6 +15,12 @@ Delve is the best-behaved of the three. It reports a stop-on-entry stop as
 Most of what follows is about its *launch arguments*, two of which are not
 optional in practice.
 
+Entries 12 to 15 were added on 2026-08-01 from the cross-adapter dogfooding
+campaign. They are about *reading results* rather than launching, and entry 12 is
+the one most likely to break a script written for another language. The
+cross-adapter summary lives in the docs-site guide *Write one script for four
+languages*.
+
 ---
 
 ## 1. The port is announced on stdout, under different words
@@ -220,6 +226,137 @@ actually started.
 
 Found by `wait_delve.rs`'s adapter-kill test leaking two Go debuggees onto the
 development machine, which is the same way D045 itself was found.
+
+## 12. `type_name` is never sent — the type is inside `value`
+
+delve omits DAP's optional `type` field entirely, on every variable and every `evaluate`
+result, and encodes the type into the value string instead:
+
+```console
+$ lazydap eval "p" --format json
+{
+  "value": "main.Pt {X: 1, Y: 2}",
+  "variables_reference": 1001
+}
+
+$ lazydap eval "s" --format json
+{
+  "value": "[]int len: 3, cap: 3, [1,2,3]",
+  "variables_reference": 1002
+}
+```
+
+The locals scope is the same:
+
+```console
+$ lazydap variables --reference 1000 --format json
+{ "variables": [
+    { "name": "p", "value": "main.Pt {X: 1, Y: 2}", "variables_reference": 1003 },
+    { "name": "s", "indexed_variables": 3, "value": "[]int len: 3, cap: 3, [1,2,3]", "variables_reference": 1004 },
+    { "name": "n", "value": "42", "variables_reference": 0 },
+    { "name": "name", "value": "\"hi\"", "variables_reference": 0 } ] }
+```
+
+Because lazydap omits absent optional fields rather than writing `null`, there is **no
+`type_name` key at all** in a Go variable — where codelldb and debugpy both put a string. Code
+doing `v["type_name"]` gets a missing-key error rather than a null, and code doing
+`v.get("type_name").startswith(...)` gets `None`.
+
+It is not a loss of information — `main.Pt` and `[]int` are right there, and arguably more
+useful than codelldb's C-flavoured names (its quirk 18). It is a *shape* difference, and it is
+the single most likely thing to break a script written against Python or C and then pointed at
+Go. `type_name` cannot be a required field in any code path meant to cover four languages.
+
+## 13. `frame.column` is always `0`
+
+```console
+$ lazydap continue --wait --format json
+{ "frame": { "column": 0, "id": 1000, "line": 15, "name": "main.main",
+             "source": { "name": "goq.go", "path": "/Users/you/goq.go" } },
+  "hit_breakpoint_ids": [ 8 ],
+  "reason": "breakpoint",
+  "state": "paused" }
+```
+
+DAP columns are 1-based, so `0` is not merely a placeholder — it is outside the legal range,
+and it is delve's way of saying it has no column to report.
+
+All three adapters differ here, and two of the three are lying:
+
+| adapter | `frame.column` |
+|---|---|
+| codelldb | real (`5` at a statement indented four spaces) |
+| debugpy | always `1` — the smallest legal value (its quirk 15) |
+| delve | always `0` — not a legal value at all |
+
+Anything that renders a caret under a source line, or slices a line at the column, needs to
+treat this as advisory. delve's `0` at least fails loudly if you use it as an index into a
+1-based string; debugpy's `1` quietly points at the first character forever.
+
+## 14. `eval` errors do not say what went wrong
+
+Every failed evaluation gives the same seven words:
+
+```console
+$ lazydap eval "no_such_var" --format json
+{"details":{"adapter_message":"Unable to evaluate expression","command":"evaluate"},
+ "error":"DapProtocolError",
+ "message":"DapProtocolError: the adapter rejected `evaluate`: Unable to evaluate expression"}
+
+$ lazydap eval "1/0" --format json
+{"details":{"adapter_message":"Unable to evaluate expression","command":"evaluate"},
+ "error":"DapProtocolError",
+ "message":"DapProtocolError: the adapter rejected `evaluate`: Unable to evaluate expression"}
+```
+
+An undefined identifier and a division by zero are indistinguishable. The message names
+neither the identifier nor the cause, so there is nothing to act on: an agent cannot tell "you
+typed the name wrong" from "the expression is arithmetically invalid" from "that variable is
+not in scope at this frame".
+
+This is the mirror image of codelldb's quirk 20, which buries a genuinely precise diagnosis
+(`use of undeclared identifier 'no_such_var'`) under an alarming irrelevant banner. Given the
+two, codelldb's is the better failure — the information is there once you skip a line.
+
+What delve *can* do is worth stating alongside, because it is more than codelldb: calls work.
+
+```console
+$ lazydap eval "len(s)" --format json
+{ "value": "3", "variables_reference": 0 }
+```
+
+codelldb rejects `v.len()` outright (its quirk 19). So an expression that fails against Go may
+have failed for a reason as ordinary as a typo — do not conclude the expression form is
+unsupported.
+
+## 15. A breakpoint on a line with no statement is refused, helpfully
+
+Where codelldb slides forward and debugpy slides backward, delve declines and says why. A
+breakpoint on line 2 of a Go file — the blank line after `package main`:
+
+```console
+$ lazydap break /Users/you/goq.go:2 --format json
+{ "breakpoints": [ { "enabled": true, "id": 7, "line": 2,
+                     "source": "/Users/you/goq.go", "verified": false } ] }
+
+$ lazydap launch /Users/you/goq.go --format json
+{ "breakpoints": [
+    { "enabled": true, "id": 7, "line": 2,
+      "message": "could not find statement at /Users/you/goq.go:2, please use a line with a statement",
+      "source": "/Users/you/goq.go", "verified": false },
+    { "enabled": true, "id": 8, "line": 15,
+      "source": "/Users/you/goq.go", "verified": true } ],
+  "state": "running" }
+```
+
+`verified: false` plus a `message` that names the file, the line and the fix. This is the
+behaviour the other two should have: nothing silently moves, and the caller is told in terms
+they can act on.
+
+It does mean a Go breakpoint is more likely to be refused than a C or Python one, and a script
+that ignores `verified` will wait at a breakpoint that was never set. Check `verified` and read
+`message` when it is false — under delve the message is worth reading, which is not true
+everywhere.
 
 ---
 
