@@ -2,7 +2,7 @@
 
 Version-drift, install footguns, and runtime quirks of `codelldb` that affect lazydap. Add to this when you discover new ones; remove rows that get fixed upstream.
 
-This doc is the canonical place for "this codelldb thing surprised us." Cross-link to it from milestone docs, book chapters, and the `crates/adapter-codelldb/` source once it lands.
+This doc is the canonical place for "this codelldb thing surprised us." Cross-link to it from milestone docs, book chapters, and the `crates/daemon/src/adapter/codelldb.rs` source.
 
 ## Quirk index
 
@@ -145,7 +145,7 @@ cat /tmp/e
 
 For lazydap to know which port codelldb is listening on (so it can connect via TCP), it has to read the port number from codelldb's startup output. If codelldb is silent, lazydap can't determine the port.
 
-The codelldb adapter implementation in `crates/adapter-codelldb/` (when M5+ lands) must set `RUST_LOG=debug` for spawned codelldb processes. Document it inline in the adapter code with a reference to this quirk.
+The codelldb adapter implementation in `crates/daemon/src/adapter/codelldb.rs` sets `RUST_LOG=debug` for spawned codelldb processes, with a comment inline pointing back at this quirk.
 
 ### Cross-references
 

@@ -109,6 +109,8 @@ export default defineConfig({
             { label: 'Errors and exit codes', slug: 'reference/errors' },
             { label: 'Protocol', slug: 'reference/protocol' },
             { label: 'codelldb quirks', slug: 'reference/codelldb-quirks' },
+            { label: 'debugpy quirks', slug: 'reference/debugpy-quirks' },
+            { label: 'delve quirks', slug: 'reference/delve-quirks' },
           ],
         },
         {

@@ -281,6 +281,9 @@ Worth stating, because the list above is longer than the list of real problems:
 - [The `--wait` contract](/guides/wait/) — the five states, in full
 - [Breakpoints](/guides/breakpoints/) — `verified`, and what makes one bind
 - [JSON output](/reference/json-output/) — the field-by-field schema
-- [codelldb quirks](/reference/codelldb-quirks/) — the adapter with the most of them
-- The repository's `docs/reference/codelldb-quirks.md`, `debugpy-quirks.md` and
-  `delve-quirks.md` for the forensic write-ups behind every row above
+- [codelldb quirks](/reference/codelldb-quirks/) — 21 entries, the adapter with the most of them
+- [debugpy quirks](/reference/debugpy-quirks/) — 16 entries, mostly differences rather than faults
+- [delve quirks](/reference/delve-quirks/) — 15 entries, mostly about launch arguments
+
+Those three pages carry the forensic write-up behind every row in the table above: the captured
+output, the cause, and what to do instead.

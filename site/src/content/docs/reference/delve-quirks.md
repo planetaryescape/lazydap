@@ -1,4 +1,11 @@
-# delve quirks
+---
+title: "delve quirks"
+description: "15 delve behaviours lazydap had to be told about, found by reading the wire rather than the documentation."
+---
+
+:::note[Generated page]
+From [`docs/reference/delve-quirks.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/reference/delve-quirks.md) in the repository, which is where these are written as they are found. To change this page, change that file, then run `npm run generate` in `site/` and commit the result. CI fails if the two disagree.
+:::
 
 Everything delve does that the DAP specification does not require, and that
 lazydap therefore had to be told about. Every entry here was found by running
@@ -6,8 +13,8 @@ lazydap therefore had to be told about. Every entry here was found by running
 by reading delve's documentation, which is unusually good and still does not say
 most of this.
 
-The companion files are [`codelldb-quirks.md`](codelldb-quirks.md) and
-[`debugpy-quirks.md`](debugpy-quirks.md). Where the three adapters disagree, the
+The companion files are [`codelldb-quirks.md`](/reference/codelldb-quirks/) and
+[`debugpy-quirks.md`](/reference/debugpy-quirks/). Where the three adapters disagree, the
 disagreement is noted here, because that is the part an agent gets wrong.
 
 Delve is the best-behaved of the three. It reports a stop-on-entry stop as
@@ -204,7 +211,7 @@ does:
 {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true, "hitBreakpointIds": [1]}
 ```
 
-debugpy sends none ([`debugpy-quirks.md`](debugpy-quirks.md), entry 5), so an
+debugpy sends none ([`debugpy-quirks.md`](/reference/debugpy-quirks/), entry 5), so an
 agent that branches on *which* breakpoint was hit works under codelldb and delve
 and must fall back to the frame under debugpy.
 
@@ -382,3 +389,10 @@ and make sure `$(go env GOPATH)/bin` is on `PATH` — `go install` puts it there
 and a shell that has never been told about that directory will not find it. This
 is the single most likely reason `lazydap doctor --check-adapters` reports delve
 missing on a machine that has it.
+
+## See also
+
+- [Write one script for four languages](/guides/adapters/) — what differs between the three adapters, side by side
+- [codelldb quirks](/reference/codelldb-quirks/) — the same treatment for codelldb
+- [debugpy quirks](/reference/debugpy-quirks/) — the same treatment for debugpy
+- [Troubleshooting](/troubleshooting/) — the same ground, organised by symptom
