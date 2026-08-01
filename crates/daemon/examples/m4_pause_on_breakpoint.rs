@@ -235,6 +235,7 @@ fn launch_args(program: &Path, cwd: &Path) -> LaunchArgs {
         // "console" keeps the debuggee attached so its stdout arrives as DAP
         // output events.
         terminal: Some("console".into()),
+        source_languages: None,
     }
 }
 

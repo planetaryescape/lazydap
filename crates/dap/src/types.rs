@@ -72,6 +72,12 @@ pub struct LaunchArgs {
     /// events rather than in a separate terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal: Option<String>,
+    /// Languages whose LLDB type-summary formatters codelldb should load. Without
+    /// this, codelldb renders a Rust `&str`/`String`/`Vec` as a raw pointer and
+    /// dumps unbounded rodata past the slice length (found dogfooding lazydap on
+    /// its own Rust binary — `docs/reference/codelldb-quirks.md` quirk 10).
+    #[serde(rename = "sourceLanguages", skip_serializing_if = "Option::is_none")]
+    pub source_languages: Option<Vec<String>>,
 }
 
 /// debugpy's `launch` arguments.
@@ -524,6 +530,7 @@ mod tests {
             stop_on_entry: false,
             env: None,
             terminal: None,
+            source_languages: None,
         })
         .expect("serialise");
         assert!(json.contains(r#""type":"lldb""#), "got: {json}");

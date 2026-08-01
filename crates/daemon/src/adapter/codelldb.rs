@@ -60,6 +60,11 @@ impl DebugAdapter for CodeLldb {
             // "console" keeps the debuggee attached so its stdout arrives as
             // DAP output events.
             terminal: Some("console".into()),
+            // Load the Rust and C/C++ LLDB formatters. Without this codelldb
+            // renders a Rust `&str`/`String`/`Vec` as a raw pointer past its
+            // length (quirk 10). codelldb ignores names for languages it has no
+            // formatters for, so listing all three is safe for any LLDB debuggee.
+            source_languages: Some(vec!["rust".into(), "cpp".into(), "c".into()]),
         };
         serde_json::to_value(args).expect("launch arguments are plain data")
     }
@@ -154,6 +159,19 @@ mod tests {
         assert!(
             !json.contains("env"),
             "an empty environment must be omitted, not sent as null: {json}",
+        );
+    }
+
+    #[test]
+    fn launch_arguments_load_the_rust_and_c_type_formatters() {
+        // Without `sourceLanguages`, codelldb renders a Rust `&str`/`String`/
+        // `Vec` as a raw pointer and dumps rodata past the slice length
+        // (quirk 10, found dogfooding lazydap on its own Rust binary). Rust is
+        // a target language, so this arg is not optional polish.
+        let json = CodeLldb.launch_args(&request()).to_string();
+        assert!(
+            json.contains(r#""sourceLanguages":["rust","cpp","c"]"#),
+            "got: {json}",
         );
     }
 
