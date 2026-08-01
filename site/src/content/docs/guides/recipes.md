@@ -362,7 +362,7 @@ $ lazydap doctor --format json
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
     { "detail": "/Users/you/project/.lazydap/state.toml (1 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance cookbook-pin2, pid 27485, protocol v5", "name": "daemon", "ok": true }
+    { "detail": "instance cookbook-pin2, pid 27485, protocol v6", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
