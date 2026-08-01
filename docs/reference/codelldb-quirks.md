@@ -17,6 +17,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 7 | [`evaluate` with context `repl` runs an LLDB *command*, not an expression](#7-evaluate-with-context-repl-runs-an-lldb-command-not-an-expression) | M6 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 8 | [Breakpoints never bind for a debuggee under `/tmp` on macOS](#8-breakpoints-never-bind-for-a-debuggee-under-tmp-on-macos) | Ship-mode Wave 5 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 9 | [No `process` event, so the debuggee's pid is only in console text](#9-no-process-event-the-debuggees-pid-is-only-in-console-text) | Review round after M19 (2026-07-30) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 10 | [Rust and C++ type summaries need `sourceLanguages`](#10-rust-and-c-type-summaries-need-sourcelanguages-in-the-launch) | Dogfooding lazydap on itself (2026-08-01) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 ---
 
@@ -560,6 +561,49 @@ outcome rather than by the pump.
 - D045 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
 - `crates/daemon/src/debuggee.rs` — the identity check and the kill
 - If codelldb ever gains a `process` event, prefer it and delete the scrape.
+
+---
+
+## 10. Rust and C++ type summaries need `sourceLanguages` in the launch
+
+### Symptom
+
+`eval` (or reading a local through `variables`) on a Rust `&str` returns garbage instead of
+the string. Evaluating a `&str` holding `"0.1.0"`:
+
+```json
+{ "type_name": "&str",
+  "value": "{data_ptr:\"0.1.0lazydapunsafe precondition(s) violated: Layout::from_size_align_unchecked ...\", ...}" }
+```
+
+The value runs far past the five bytes of `"0.1.0"` into whatever read-only data sits next to
+it. `String`, `Vec`, `Option` and the rest of Rust's types render the same raw way, and
+`String`/`Vec` method calls in `eval` fail.
+
+### Root cause
+
+A Rust `&str` is a fat pointer — a data pointer plus a length. codelldb only loads LLDB's
+Rust type-summary formatters (the ones that know to read exactly `len` bytes) when the launch
+request names the language in `sourceLanguages`. Without it, LLDB falls back to a generic
+pointer rendering and reads `data_ptr` as a null-terminated C string; Rust string data is not
+null-terminated, so the read spills into adjacent rodata. The C and C++ formatters are gated
+the same way.
+
+Found dogfooding lazydap on its own Rust binary — the C fixtures use `int` and `double`,
+which render correctly without the formatters, so no earlier test caught it. Rust is a target
+language, so this was a real defect, not cosmetic.
+
+### Fix
+
+lazydap's codelldb launch sends `sourceLanguages: ["rust", "cpp", "c"]`
+(`crates/daemon/src/adapter/codelldb.rs`). codelldb ignores names for languages it has no
+formatters for, so listing all three is safe for any LLDB debuggee. With it, the same `eval`
+returns `"0.1.0"`.
+
+### Cross-references
+
+- `crates/dap/src/types.rs` — `LaunchArgs.source_languages`
+- [codelldb MANUAL, launch settings](https://github.com/vadimcn/codelldb/blob/master/MANUAL.md)
 
 ---
 ## Adding a new quirk
