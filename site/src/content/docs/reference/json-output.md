@@ -17,6 +17,7 @@ object. `launch` does not take `--wait` and has [its own shape](#launch).
 
 ```json
 {
+  "adapter_thread_id": null,
   "additional_stopped_threads": [],
   "all_threads_stopped": true,
   "breakpoint_updates": [
@@ -25,6 +26,7 @@ object. `launch` does not take `--wait` and has [its own shape](#launch).
   "captured_output": [
     { "category": "stdout", "output": "starting\r\n", "timestamp_ms": 1785446339847 }
   ],
+  "dropped_events": 0,
   "elapsed_ms": 95,
   "exit_code": null,
   "frame": {
@@ -46,16 +48,18 @@ object. `launch` does not take `--wait` and has [its own shape](#launch).
 | `state` | string | `paused`, `exited`, `terminated`, `timeout`, `adapter_died`. Always lower-case |
 | `reason` | string or null | Why it paused: `breakpoint`, `step`, `entry`, `exception`, `pause`. Null unless paused |
 | `raw_reason` | string or null | The adapter's own word, when lazydap normalised `reason`. Null when nothing was normalised |
-| `thread_id` | integer or null | The thread that stopped |
+| `thread_id` | integer or null | The thread that stopped — or, after `step --thread`, the thread you asked to step |
+| `adapter_thread_id` | integer or null | Set only when the adapter named a *different* thread than the one asked to step. codelldb does: it answers a step with whichever thread it had selected before. `thread_id` is the one that moved; this is the adapter's own answer, kept rather than dropped |
 | `all_threads_stopped` | boolean | Whether the whole process stopped |
-| `additional_stopped_threads` | array of integer | Other threads that stopped inside the 50 ms coalescing window |
+| `additional_stopped_threads` | array of integer | Other threads that stopped inside the 50 ms coalescing window. Always empty against codelldb, which reports a multi-threaded stop as one event — read `all_threads_stopped` instead |
 | `frame` | object or null | Top frame. Null when the program is gone |
 | `hit_breakpoint_ids` | array of integer | lazydap breakpoint ids, matching `lazydap break --list` |
 | `exit_code` | integer or null | The debuggee's, set on `exited`. Null on `adapter_died`: that ending carries a `detail` string rather than the adapter's process status |
 | `captured_output` | array | Everything the program printed during the wait |
-| `output_truncated` | boolean | True when output was dropped rather than buffered |
+| `output_truncated` | boolean | True when you are not seeing all of it — either the run outran the 1 MB output cap, in which case what you keep is a *prefix*, or events were lost before the wait could read them, in which case it is a *suffix* |
+| `dropped_events` | integer | How many events were lost before this blob could carry them. `0` when nothing was — including when `output_truncated` was set by the output cap, which drops bytes rather than events |
 | `breakpoint_updates` | array | Breakpoints whose state changed during the run |
-| `thread_updates` | array | Threads that started or exited |
+| `thread_updates` | array | Threads that started or exited. Always empty against codelldb, which sends no per-thread events |
 | `elapsed_ms` | integer | How long the wait took |
 
 **Without `--wait`**, those commands return an acknowledgement instead — the request was
@@ -227,7 +231,7 @@ non-zero when the buffer overflowed.
   "daemon_pid": 2452,
   "instance": "lazydap-demo-13cc8efcde46",
   "lazydap_version": "0.1.0",
-  "protocol_version": 6,
+  "protocol_version": 7,
   "session": {
     "adapter": "codelldb",
     "buffered_events": 11,

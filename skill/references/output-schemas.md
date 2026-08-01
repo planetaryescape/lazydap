@@ -17,6 +17,7 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
   "reason": "breakpoint",
   "raw_reason": null,
   "thread_id": 26836542,
+  "adapter_thread_id": null,
   "all_threads_stopped": true,
   "additional_stopped_threads": [],
   "hit_breakpoint_ids": [1],
@@ -32,6 +33,7 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
     { "category": "stdout", "output": "hello\r\n", "timestamp_ms": 1785433977464 }
   ],
   "output_truncated": false,
+  "dropped_events": 0,
   "breakpoint_updates": [],
   "thread_updates": [],
   "elapsed_ms": 95
@@ -43,16 +45,18 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
 | `state` | `paused`, `exited`, `terminated`, `timeout`, `adapter_died`. Always present. Branch on this first. |
 | `reason` | Why it stopped: `breakpoint`, `step`, `entry`, `exception`, `pause`, or whatever the debugger called it. `null` unless `paused`. |
 | `raw_reason` | Present only when lazydap renamed the reason. See "Normalised reasons" below. |
-| `thread_id` | The thread that stopped. `null` unless `paused`. |
+| `thread_id` | The thread that stopped, or — after a `step --thread` — the thread you asked to step. `null` unless `paused`. |
+| `adapter_thread_id` | Present only when the debugger named a *different* thread than the one you asked to step. codelldb does this: it answers a step aimed at one thread by naming whichever it had selected before. `thread_id` is the thread that moved; this is the debugger's own answer, kept so nothing is hidden. |
 | `all_threads_stopped` | Whether the whole program stopped, not just this thread. |
-| `additional_stopped_threads` | Other threads that stopped in the same instant. Usually empty. |
+| `additional_stopped_threads` | Other threads that stopped in the same instant. **Always empty against codelldb**, which reports a multi-threaded stop as a single event. Read `all_threads_stopped` instead. |
 | `hit_breakpoint_ids` | Your breakpoint ids — the same numbers `lazydap break` returned. Empty unless a breakpoint caused the stop. |
 | `exit_code` | The program's status. Present when it finished. `null` otherwise. |
 | `frame` | Where it stopped. `null` when the program is no longer there. |
 | `captured_output` | Everything printed during this call, in order. See below. |
-| `output_truncated` | `true` if the program outran the buffer and some output was dropped. |
+| `output_truncated` | `true` when you are **not** seeing all of it — either the run outran the 1 MB output cap (what you keep is then a *prefix*; nothing after the cap is spliced on), or events were lost before this call could read them (what you keep is then a *suffix*). |
+| `dropped_events` | How many events were lost before this call could carry them. `0` when nothing was lost that way — including when `output_truncated` was set by the output cap, which drops bytes rather than events. |
 | `breakpoint_updates` | Breakpoints the debugger changed its mind about mid-run — verified late, or moved to the nearest line with code. |
-| `thread_updates` | Threads that started or ended during the run. |
+| `thread_updates` | Threads that started or ended during the run. **Always empty against codelldb**, which sends no per-thread events. |
 | `elapsed_ms` | How long the wait took. |
 
 ### `captured_output`
@@ -93,7 +97,8 @@ absent when the two agree. Read `reason`.
   "capabilities": {
     "supports_configuration_done_request": true,
     "supports_function_breakpoints": true,
-    "supports_conditional_breakpoints": true
+    "supports_conditional_breakpoints": true,
+    "supports_variable_paging": false
   },
   "breakpoints": [ { "id": 1, "source": "/abs/path/main.c", "line": 19,
                      "enabled": true, "verified": true } ]
@@ -179,9 +184,12 @@ valid the moment the program moves** — fetch a new stack after every step.
 
 ```json
 { "variables": [
-    { "name": "x", "value": "5", "type_name": "int", "variables_reference": 0 },
+    { "name": "x", "value": "5", "type_name": "int",
+      "evaluate_name": "x", "variables_reference": 0 },
+    { "name": "[100]", "value": "100", "type_name": "int",
+      "evaluate_name": "big[100]", "variables_reference": 0 },
     { "name": "buf", "value": "char [64]", "type_name": "char [64]",
-      "variables_reference": 1012 } ] }
+      "evaluate_name": "buf", "variables_reference": 1012 } ] }
 ```
 
 `value` is always a string — the debugger's own rendering, which is what you
@@ -189,6 +197,16 @@ want for pointers and structs.
 
 `variables_reference` is `0` for a scalar and non-zero for anything with
 children; pass a non-zero one back to `variables` to expand it.
+
+`evaluate_name` is the expression that names this row, in the debugger's own
+words — **use it rather than `name` when building an `eval` argument.** A row
+called `[100]` or `label` means nothing to `eval` on its own; `evaluate_name`
+is what you can actually pass. Absent when the debugger did not supply one.
+
+`--start` and `--count` window the list and are honoured against every adapter,
+including ones that ignore them on the wire. `--filter` is passed straight to
+the debugger, and a debugger that does not implement it returns everything —
+lazydap does not second-guess which children are indexed.
 
 ## `eval`
 
@@ -199,11 +217,22 @@ children; pass a non-zero one back to `variables` to expand it.
 Same fields as a variable, minus the name. A non-zero `variables_reference`
 means the result has children you can expand.
 
+An expression the debugger could not evaluate **fails the command** — exit 1
+with an `error` on stderr — rather than returning the error text as a `value`.
+One known gap: codelldb reports an unreadable address as a value that reads
+`<read memory from 0x4 failed (0 of 4 bytes read)>` and exits 0. A `value`
+wrapped in angle brackets is worth a second look.
+
 ## `threads`
 
 ```json
 { "threads": [ { "id": 26836542, "name": "1: tid=26836542" } ] }
 ```
+
+`name` is **absent** when the debugger did not name the thread — lazydap does
+not invent one. Asking while the program is *running* is allowed but the answer
+is debugger-dependent: codelldb replies with a single nameless thread `0`, which
+is a placeholder rather than a thread. Ask again once it is paused.
 
 ## `output`
 
@@ -223,7 +252,7 @@ Reading it does not consume it.
   "instance": "lazydap-myproject",
   "daemon_pid": 77256,
   "uptime_ms": 776,
-  "protocol_version": 5,
+  "protocol_version": 7,
   "lazydap_version": "0.1.0",
   "session": {
     "session_id": "971baa06-...",

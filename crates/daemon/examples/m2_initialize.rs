@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         adapter_id: Some(String::from("lldb")),
         lines_start_at1: true,
         columns_start_at1: true,
+        supports_variable_type: true,
         path_format: Some(String::from("path")),
         locale: Some(String::from("en-US")),
     };

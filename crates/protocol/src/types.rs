@@ -56,7 +56,17 @@ use std::path::PathBuf;
 /// restarted it. The bump moves the failure back to the handshake, where
 /// `lazydap shutdown` clears it. codelldb and debugpy launches were decodable
 /// by a v5 daemon and are the reason this was easy to miss.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 6;
+///
+/// v7 (D065, D066, D067, D069): four changes to what the daemon reports about
+/// a stop and about a variable. [`ThreadInfo::name`] became optional,
+/// [`Event::Stopped`] and [`StableState`] gained `adapter_thread_id`,
+/// [`AdapterCapabilities`] gained `supports_variable_paging`, and [`Variable`]
+/// gained `evaluate_name`. None of them is a new request, so a v6 daemon
+/// decodes everything a v7 client sends — and then answers `threads` in a shape
+/// this build's `ThreadInfo` cannot read at all, and reports a stepped thread
+/// the way D066 says not to. The bump is what turns a silently wrong answer
+/// back into the `VersionMismatch` `lazydap shutdown` clears.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 7;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,7 +360,12 @@ pub enum Response {
     },
     /// A stepping request that waited: one blob describing everything that
     /// happened until the program settled.
-    Stepped(StableState),
+    ///
+    /// Boxed because it is much the largest thing `Response` — and so
+    /// `IpcPayload`, and so every frame on the socket — can carry, and every
+    /// other message would otherwise be padded out to its size. `Box`
+    /// serialises transparently, so the wire shape is unchanged.
+    Stepped(Box<StableState>),
 
     Threads(Vec<ThreadInfo>),
     StackTrace {
@@ -390,6 +405,15 @@ pub struct StableState {
     /// here so nothing is hidden. See D033.
     pub raw_reason: Option<String>,
     pub thread_id: Option<i64>,
+    /// Which thread the *adapter* named, present only when that is not
+    /// `thread_id`.
+    ///
+    /// codelldb answers a `next` aimed at one thread with a `stopped` event
+    /// naming whichever thread it had selected before. `thread_id` is the
+    /// thread lazydap asked to step — which is the one that moved — and this
+    /// keeps the adapter's answer visible rather than quietly discarded, the
+    /// way `raw_reason` does for D033. See D066.
+    pub adapter_thread_id: Option<i64>,
     pub all_threads_stopped: bool,
     /// Threads that also stopped within the coalescing window (D020).
     pub additional_stopped_threads: Vec<i64>,
@@ -400,8 +424,25 @@ pub struct StableState {
     /// The top frame, fetched for convenience whenever the program paused.
     pub frame: Option<StackFrame>,
     pub captured_output: Vec<OutputChunk>,
-    /// The output cap was hit and some was dropped.
+    /// You are not seeing all of it.
+    ///
+    /// True for either of the two ways a blob can be incomplete, because a
+    /// reader cannot act on a distinction it was never told about:
+    ///
+    /// - the wait's own output cap was reached, and everything after it was
+    ///   dropped. What is kept is then a *prefix* of what the program printed:
+    ///   the wait stops taking output entirely rather than skipping the chunk
+    ///   that overran the cap and going on accepting smaller ones behind it,
+    ///   which spliced two moments of a program's life together (D070);
+    /// - events were lost before the wait could read them — the session buffer
+    ///   overran between two CLI invocations, or a live subscription fell
+    ///   behind. What is kept is then a *suffix*, and `dropped_events` says how
+    ///   much is missing (D072).
     pub output_truncated: bool,
+    /// How many events were lost before this blob could carry them. `0` when
+    /// nothing was lost that way — including when `output_truncated` is set by
+    /// the output cap, which drops bytes rather than events.
+    pub dropped_events: u64,
     pub breakpoint_updates: Vec<AdapterBreakpoint>,
     pub thread_updates: Vec<ThreadUpdate>,
     pub elapsed_ms: u64,
@@ -416,6 +457,7 @@ impl StableState {
             reason: None,
             raw_reason: None,
             thread_id: None,
+            adapter_thread_id: None,
             all_threads_stopped: false,
             additional_stopped_threads: Vec::new(),
             hit_breakpoint_ids: Vec::new(),
@@ -423,6 +465,7 @@ impl StableState {
             frame: None,
             captured_output: Vec::new(),
             output_truncated: false,
+            dropped_events: 0,
             breakpoint_updates: Vec::new(),
             thread_updates: Vec::new(),
             elapsed_ms: 0,
@@ -591,6 +634,10 @@ pub struct AdapterCapabilities {
     pub supports_configuration_done_request: bool,
     pub supports_function_breakpoints: bool,
     pub supports_conditional_breakpoints: bool,
+    /// Whether the adapter honours `variables`' `filter`, `start` and `count`.
+    /// When it does not, lazydap applies them itself (D067) — so the flags mean
+    /// the same thing to a caller either way, and this says which happened.
+    pub supports_variable_paging: bool,
 }
 
 /// Something happened that no client asked about.
@@ -607,6 +654,9 @@ pub enum Event {
     Stopped {
         session_id: SessionId,
         thread_id: Option<i64>,
+        /// The adapter's own answer for which thread stopped, when it names a
+        /// different one from the thread lazydap asked to step (D066).
+        adapter_thread_id: Option<i64>,
         reason: PauseReason,
         /// The adapter's own word for it, when we normalised the reason.
         raw_reason: Option<String>,
@@ -810,6 +860,7 @@ mod tests {
         let event = Event::Stopped {
             session_id,
             thread_id: Some(1),
+            adapter_thread_id: None,
             reason: PauseReason::Entry,
             raw_reason: None,
             all_threads_stopped: true,

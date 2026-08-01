@@ -348,9 +348,14 @@ mod tests {
     fn the_shutdown_frame_wears_the_daemon_s_version_not_ours() {
         // A daemon that version-checks before exempting `Shutdown` rejects
         // anything from a version it does not know — including this.
-        assert_eq!(shutdown_frame(7)["version"], 7);
+        //
+        // The version under test is the previous one rather than a literal:
+        // the literal was 7, and it stopped proving anything the day this
+        // build became v7.
+        let theirs = LAZYDAP_PROTOCOL_VERSION - 1;
+        assert_eq!(shutdown_frame(theirs)["version"], theirs);
         assert_ne!(
-            shutdown_frame(7)["version"],
+            shutdown_frame(theirs)["version"],
             serde_json::json!(LAZYDAP_PROTOCOL_VERSION),
             "sending our own version is how the upgrade path stalled before",
         );

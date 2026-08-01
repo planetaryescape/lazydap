@@ -82,6 +82,14 @@ pub struct Variable {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_name: Option<String>,
+    /// The expression that names this variable, when the adapter says.
+    ///
+    /// A row called `[1]` or `label` is not something `lazydap eval` accepts;
+    /// this is the adapter's own answer to "what would I type to get this
+    /// again", and the reliable route from a `variables` row to an `eval`
+    /// argument (D069).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluate_name: Option<String>,
     /// Non-zero when this variable has children — a struct, an array, a
     /// pointer worth following. Pass it back to `lazydap variables`.
     pub variables_reference: i64,
@@ -104,7 +112,14 @@ pub struct EvalResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadInfo {
     pub id: i64,
-    pub name: String,
+    /// What the adapter calls this thread, when it calls it anything.
+    ///
+    /// Absent rather than invented. codelldb answers `threads` on a *running*
+    /// program with a single nameless thread 0 — a placeholder, and an honest
+    /// one; manufacturing `"thread 0"` from it turned a plainly useless answer
+    /// into a plausible-looking one (D065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A thread starting or ending during a `--wait`.

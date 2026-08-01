@@ -16,8 +16,8 @@
 //! from — reaches this module through [`DebugAdapter`](super::DebugAdapter).
 
 use super::{
-    AdapterError, AdapterHandle, DebugAdapter, Pending, Result, Spawn, discover, for_kind,
-    rebind_source, translate,
+    AdapterError, AdapterHandle, DebugAdapter, Pending, Result, Spawn, StopContext, discover,
+    for_kind, rebind_source, translate,
 };
 use lazydap_core::{
     AdapterBreakpoint, Breakpoint, OutputCategory, OutputChunk, PauseReason, SessionState,
@@ -110,7 +110,12 @@ pub async fn launch(
             let (reader, writer) = transport.split();
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
             Ok(Launched {
-                handle: AdapterHandle::new(writer, Arc::clone(&pending)),
+                handle: AdapterHandle::new(
+                    writer,
+                    Arc::clone(&pending),
+                    adapter,
+                    outcome.capabilities,
+                ),
                 pump: PumpStart { reader, pending },
                 capabilities: outcome.capabilities,
                 state: outcome.state,
@@ -248,8 +253,16 @@ async fn handshake(
                     let description = body["description"].as_str().unwrap_or_default();
 
                     outcome.state = SessionState::Paused;
-                    let (reason, raw_reason) =
-                        adapter.normalise_stop(raw, description, request.stop_on_entry);
+                    let (reason, raw_reason) = adapter.normalise_stop(
+                        raw,
+                        description,
+                        StopContext {
+                            stop_on_entry: request.stop_on_entry,
+                            // There is no session yet, so nobody can have asked
+                            // for a pause.
+                            pause_requested: false,
+                        },
+                    );
                     outcome.reason = Some(reason);
                     outcome.raw_reason = raw_reason;
                     outcome.thread_id = body["threadId"].as_i64();
@@ -449,6 +462,7 @@ fn translate_capabilities(capabilities: &Capabilities) -> AdapterCapabilities {
         supports_configuration_done_request: capabilities.supports_configuration_done_request,
         supports_function_breakpoints: capabilities.supports_function_breakpoints,
         supports_conditional_breakpoints: capabilities.supports_conditional_breakpoints,
+        supports_variable_paging: capabilities.supports_variable_paging,
     }
 }
 

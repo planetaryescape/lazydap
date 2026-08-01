@@ -363,7 +363,7 @@ $ lazydap doctor --format json
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
     { "detail": "/Users/you/go/bin/dlv", "name": "adapter.delve", "ok": true },
     { "detail": "/Users/you/project/.lazydap/state.toml (1 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance cookbook-pin2, pid 54121, protocol v6", "name": "daemon", "ok": true }
+    { "detail": "instance cookbook-pin2, pid 54121, protocol v7", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -393,7 +393,7 @@ adapter.codelldb  FAILED  codelldb is pinned to /nope/codelldb by lazydap's conf
 adapter.debugpy   ok      /opt/homebrew/bin/python3
 adapter.delve     ok      /Users/you/go/bin/dlv
 state.file        ok      /Users/you/project/.lazydap/state.toml (1 breakpoints)
-daemon            ok      instance cookbook-pin2, pid 53986, protocol v6
+daemon            ok      instance cookbook-pin2, pid 53986, protocol v7
 error: 1 check(s) failed
 ```
 

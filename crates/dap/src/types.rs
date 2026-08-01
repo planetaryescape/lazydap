@@ -6,6 +6,10 @@ pub struct Capabilities {
     pub supports_configuration_done_request: bool,
     pub supports_function_breakpoints: bool,
     pub supports_conditional_breakpoints: bool,
+    /// Whether `variables` honours `filter`, `start` and `count`. DAP says a
+    /// client may only send them when the adapter has said this; codelldb has
+    /// not, and ignores all three (D067).
+    pub supports_variable_paging: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -19,6 +23,11 @@ pub struct InitializeArgs {
     pub adapter_id: Option<String>,
     pub lines_start_at1: bool,
     pub columns_start_at1: bool,
+    /// DAP only guarantees `Variable.type` to a client that asked for it. Both
+    /// adapters lazydap ships send it regardless, so this changes nothing
+    /// today — which is the point: `type_name` currently rests on adapter
+    /// leniency rather than on the contract (D069).
+    pub supports_variable_type: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,6 +45,7 @@ impl Default for InitializeArgs {
             adapter_id: None,
             lines_start_at1: true,
             columns_start_at1: true,
+            supports_variable_type: true,
             path_format: Some("path".into()),
             locale: None,
         }
@@ -343,6 +353,11 @@ pub struct DapVariable {
     pub value: String,
     #[serde(rename = "type", default)]
     pub type_name: Option<String>,
+    /// The expression that names this row, in the adapter's own words. A
+    /// `variables` row is often called `[1]` or `label`, which is not something
+    /// `evaluate` accepts; this is (D069).
+    #[serde(default)]
+    pub evaluate_name: Option<String>,
     #[serde(default)]
     pub variables_reference: i64,
     #[serde(default)]
@@ -452,6 +467,7 @@ mod tests {
             adapter_id: Some(String::from("lazydap-adapter")),
             lines_start_at1: true,
             columns_start_at1: true,
+            supports_variable_type: true,
             path_format: Some(String::from("something")),
             locale: Some(String::from("en")),
         })
@@ -479,6 +495,18 @@ mod tests {
         assert!(init_args.contains(r#""locale":"en""#), "got: {init_args}");
         assert!(!init_args.contains("client_id"));
         assert!(!init_args.contains(r#""clientId""#));
+    }
+
+    #[test]
+    fn the_default_initialize_asks_for_variable_types() {
+        // DAP only guarantees `Variable.type` to a client that declared this.
+        // Both adapters lazydap ships send it anyway, so `type_name` rested on
+        // their leniency rather than on the contract (D069).
+        let init_args = serde_json::to_string(&InitializeArgs::new("lldb")).expect("serialise");
+        assert!(
+            init_args.contains(r#""supportsVariableType":true"#),
+            "got: {init_args}",
+        );
     }
 
     #[test]

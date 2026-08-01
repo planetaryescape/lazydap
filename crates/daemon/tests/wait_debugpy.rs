@@ -306,6 +306,27 @@ fn a_python_program_is_launched_under_debugpy_without_being_told_to() {
 }
 
 #[test]
+fn a_python_frame_names_its_source_even_though_debugpy_only_sends_a_path() {
+    let (_python, _turn) = require_python!();
+    let sandbox = Sandbox::new("srcn");
+
+    sandbox.launch(&fixture("exits.py"));
+    let stack = sandbox.json(&["--format", "json", "stack", "--levels", "1"]);
+
+    // codelldb and delve send `source.name`; debugpy sends only `path`. An
+    // agent formatting `frame.source.name` got two languages and a blank, so
+    // the file name is filled in from the path lazydap already has (D069).
+    let source = &stack["frames"][0]["source"];
+    assert_eq!(source["name"], "exits.py", "got: {stack}");
+    assert!(
+        source["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("exits.py")),
+        "got: {stack}",
+    );
+}
+
+#[test]
 fn continuing_to_a_breakpoint_reports_where_and_why_it_stopped() {
     let (_python, _turn) = require_python!();
     let sandbox = Sandbox::new("bp");

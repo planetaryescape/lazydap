@@ -396,6 +396,7 @@ mod tests {
             name: name.to_string(),
             value: value.to_string(),
             type_name: Some(type_name.to_string()),
+            evaluate_name: None,
             variables_reference: reference,
             named_variables: None,
             indexed_variables: None,

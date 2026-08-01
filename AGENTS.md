@@ -171,7 +171,15 @@ The response includes everything that happened during execution:
 - `frame`: top frame source/line/column when paused
 - `captured_output`: array of `{category, output}` from the program's stdout/stderr during the run
 - `breakpoint_updates`: any breakpoints whose state changed during the run
-- `additional_stopped_threads`: in multi-threaded programs
+- `additional_stopped_threads` and `thread_updates`: **empty against codelldb, and against
+  any adapter that reports a multi-threaded stop as one event.** Both are filled from
+  messages codelldb does not send. Four threads stopping simultaneously on four distinct
+  breakpoints produce exactly one `stopped` event with `allThreadsStopped: true` — and
+  `additional_stopped_threads` is filled only from a *second* `Stopped`, so it stays `[]`.
+  `thread_updates` comes from DAP `thread` events, of which codelldb emitted none in a full
+  session. Read `all_threads_stopped` for "did everything stop", and `lazydap threads` for
+  which threads exist. debugpy and delve do send per-thread events, so the fields carry
+  something there.
 
 Don't poll `lazydap status` in a loop. Use `--wait`.
 
@@ -338,14 +346,21 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
 
-Note the protocol is at **v5** (D056: the watch requests and `Event::WatchUpdated` — a
-`Request` variant an older daemon does not know cannot be decoded at all, so it never
-reaches the version field it would have refused on; v4 was D050, `LaunchRequest` carrying
-the adapter binary the *client* resolved, because the daemon's environment is not the
-caller's; v3 was D043, `BreakpointUpdated` distinguishing an adapter's opinion from a
-change to the project's list). A daemon left running from an older build is
+Note the protocol is at **v7** (D065–D069: `ThreadInfo::name` became optional,
+`Event::Stopped` and the `--wait` blob gained `adapter_thread_id`, `AdapterCapabilities`
+gained `supports_variable_paging`, and a variable gained `evaluate_name` — none of them a
+new request, so a v6 daemon decodes what a v7 client sends and then answers `threads` in a
+shape this build cannot read; v6 was D061, a third `AdapterKind`; v5 was D056, the watch
+requests and `Event::WatchUpdated`; v4 was D050, `LaunchRequest` carrying the adapter binary
+the *client* resolved; v3 was D043, `BreakpointUpdated` distinguishing an adapter's opinion
+from a change to the project's list). A daemon left running from an older build is
 refused with `VersionMismatch`; `lazydap shutdown` clears it and the next command starts a
 current one — and the TUI now does that for itself.
+
+The full per-command JSON is `skill/references/output-schemas.md`, which is **hand-written
+and therefore the thing most likely to have drifted** — check it against
+`crates/protocol/src/types.rs` when it matters. `commands.md` next to it is generated from
+the real `Cli` type and does not drift.
 
 If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
 point at the roadmap. Don't pretend the rest of the CLI is there.
