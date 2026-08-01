@@ -1,6 +1,13 @@
-# debugpy quirks
+---
+title: "debugpy quirks"
+description: "16 places debugpy behaves differently from the other adapters, captured off the wire."
+---
 
-The counterpart to [`codelldb-quirks.md`](codelldb-quirks.md), and much shorter
+:::note[Generated page]
+From [`docs/reference/debugpy-quirks.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/reference/debugpy-quirks.md) in the repository, which is where these are written as they are found. To change this page, change that file, then run `npm run generate` in `site/` and commit the result. CI fails if the two disagree.
+:::
+
+The counterpart to [`codelldb-quirks.md`](/reference/codelldb-quirks/), and much shorter
 on purpose: debugpy follows the DAP specification closely, so most of this file
 records places where it does something *differently from codelldb* rather than
 something wrong.
@@ -362,3 +369,10 @@ program's output —
 
 — so anything comparing captured output against expected text needs to strip `\r`, and anything
 splitting it into lines should concatenate the chunks first and split on the result.
+
+## See also
+
+- [Write one script for four languages](/guides/adapters/) — what differs between the three adapters, side by side
+- [codelldb quirks](/reference/codelldb-quirks/) — the same treatment for codelldb
+- [delve quirks](/reference/delve-quirks/) — the same treatment for delve
+- [Troubleshooting](/troubleshooting/) — the same ground, organised by symptom

@@ -105,8 +105,23 @@ $ lazydap doctor --format json
 {
   "checks": [
     {
+      "detail": "none; create /Users/you/.config/lazydap/config.toml to add one",
+      "name": "config.file",
+      "ok": true
+    },
+    {
       "detail": "/Users/you/.local/bin/codelldb",
       "name": "adapter.codelldb",
+      "ok": true
+    },
+    {
+      "detail": "/opt/homebrew/bin/python3",
+      "name": "adapter.debugpy",
+      "ok": true
+    },
+    {
+      "detail": "/Users/you/go/bin/dlv",
+      "name": "adapter.delve",
       "ok": true
     },
     {
@@ -115,7 +130,7 @@ $ lazydap doctor --format json
       "ok": true
     },
     {
-      "detail": "instance lazydap-demo-13cc8efcde46, pid 2452, protocol v2",
+      "detail": "instance lazydap-demo-13cc8efcde46, pid 53846, protocol v6",
       "name": "daemon",
       "ok": true
     }
@@ -124,15 +139,19 @@ $ lazydap doctor --format json
 }
 ```
 
-Three checks: the adapter is on `PATH`, the project's breakpoint file is readable, and a
-daemon is answering. `"ok": true` on all three means you can debug something.
+Six checks: whether a config file was found, one per adapter, whether the project's breakpoint
+file is readable, and whether a daemon is answering. `"ok": true` on all six means you can
+debug anything lazydap supports.
+
+You do not need all three adapters. An `adapter.*` check that is `false` only rules out that
+language — `"ok": false` overall, exit code 1, and everything else still works. Install the
+one you need and run `doctor` again.
 
 `doctor` started that daemon. So does every other command — there is nothing to launch by
 hand, and [the daemon guide](/guides/daemon/) explains what it does while it is there.
 
-If `adapter.codelldb` is `false`, lazydap searched `PATH` and found nothing. Adapter discovery
-is `PATH`-only today; the config file that would let you point at an arbitrary path is
-specified and not built.
+If an adapter check is `false`, lazydap looked in the config file first and then on `PATH`, and
+found nothing either way. `config.file` shows which file it read, or where to create one.
 
 ## 4. Shell completions
 

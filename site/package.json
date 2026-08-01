@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "generate": "node scripts/generate-cli-reference.mjs",
-    "check:generated": "node scripts/generate-cli-reference.mjs && git diff --exit-code -- src/content/docs/reference/cli",
+    "generate": "node scripts/generate-cli-reference.mjs && node scripts/generate-quirks.mjs",
+    "generate:quirks": "node scripts/generate-quirks.mjs",
+    "check:generated": "npm run generate && git diff --exit-code -- src/content/docs/reference/cli src/content/docs/reference/codelldb-quirks.md src/content/docs/reference/debugpy-quirks.md src/content/docs/reference/delve-quirks.md",
     "validate": "node scripts/validate-docs.mjs",
     "dev": "astro dev",
     "build": "npm run validate && astro build && node scripts/generate-llms-txt.mjs",
