@@ -470,18 +470,15 @@ impl Wait {
         &self,
         frames: &[lazydap_core::StackFrame],
     ) -> Option<lazydap_core::StackFrame> {
-        if let Some(frame) = frames.iter().find(|frame| has_source_path(frame)) {
-            return Some(frame.clone());
-        }
-        if frames.len() < USER_FRAME_SEARCH_DEPTH as usize {
-            // The window held the whole stack, so the absence is the answer.
-            return None;
-        }
+        let thread_id = match search(frames, USER_FRAME_SEARCH_DEPTH) {
+            Search::Found(frame) => return Some(frame),
+            Search::Absent => return None,
+            Search::LookFurther => self
+                .blob
+                .thread_id
+                .or_else(|| self.session.last_thread_id())?,
+        };
 
-        let thread_id = self
-            .blob
-            .thread_id
-            .or_else(|| self.session.last_thread_id())?;
         match self
             .session
             .adapter()
@@ -586,6 +583,32 @@ impl Wait {
     }
 }
 
+/// What a search of the fetched window settled.
+#[derive(Debug, PartialEq)]
+enum Search {
+    /// The nearest frame in the user's own code.
+    Found(lazydap_core::StackFrame),
+    /// The window held the whole stack and none of it had a source path, so
+    /// the absence is the answer.
+    Absent,
+    /// The window ran out first, so absence would be two answers wearing one
+    /// face — "no frame has a path" and "none of the first two dozen did".
+    LookFurther,
+}
+
+/// Look for a frame in the user's code among the `depth` frames fetched.
+///
+/// Split out from the fetching so the *decision* — and particularly the
+/// distinction between a settled absence and an exhausted window — is testable
+/// without an adapter (D083).
+fn search(frames: &[lazydap_core::StackFrame], depth: u32) -> Search {
+    match frames.iter().find(|frame| has_source_path(frame)) {
+        Some(frame) => Search::Found(frame.clone()),
+        None if frames.len() < depth as usize => Search::Absent,
+        None => Search::LookFurther,
+    }
+}
+
 /// Whether a frame names a file on disk somebody could open.
 ///
 /// A `source` with only a `source_reference` is the adapter offering to send
@@ -643,6 +666,44 @@ mod tests {
             all_threads_stopped: all_threads,
             hit_breakpoint_ids: vec![BreakpointId(1)],
         }
+    }
+
+    /// A frame with a source path, or one without — a library frame carries a
+    /// `source_reference` and no file anybody can open.
+    fn frame(named: bool) -> lazydap_core::StackFrame {
+        lazydap_core::StackFrame {
+            id: 1,
+            name: "f".to_string(),
+            line: 1,
+            column: 0,
+            source: Some(lazydap_core::SourceRef {
+                name: Some("f".to_string()),
+                path: named.then(|| PathBuf::from("/tmp/f.c")),
+                source_reference: (!named).then_some(1000),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_window_holding_the_whole_stack_settles_the_question() {
+        // Fewer frames than the window means the stack ended, so "no frame in
+        // the user's code" is a fact rather than a limit of how far we looked.
+        assert_eq!(search(&[frame(false), frame(false)], 24), Search::Absent);
+    }
+
+    #[test]
+    fn a_window_that_ran_out_without_a_hit_is_not_an_answer_yet() {
+        // The ambiguity this exists to remove: `user_frame: null` would mean
+        // both "no frame has a source path" and "none of the first two dozen
+        // did", and only the first is something a reader can act on (D083).
+        let frames: Vec<_> = (0..24).map(|_| frame(false)).collect();
+        assert_eq!(search(&frames, 24), Search::LookFurther);
+    }
+
+    #[test]
+    fn the_nearest_frame_with_a_path_wins_however_deep_the_window_went() {
+        let frames = vec![frame(false), frame(false), frame(true)];
+        assert!(matches!(search(&frames, 24), Search::Found(_)));
     }
 
     fn options(timeout_ms: u64) -> WaitOptions {
