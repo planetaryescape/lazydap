@@ -431,17 +431,25 @@ impl Wait {
         // Only when the top frame cannot answer it itself. A `user_frame`
         // repeating `frame` would invite a reader to think the two had been
         // compared and found to differ.
-        if !has_source_path(&top) {
-            self.blob.user_frame = frames
-                .iter()
-                .find(|frame| has_source_path(frame))
-                .cloned()
-                .map(|frame| crate::handlers::inspect::ours(&self.session, fence, frame));
-        }
+        let responsible = if has_source_path(&top) {
+            None
+        } else {
+            frames.iter().find(|frame| has_source_path(frame)).cloned()
+        };
 
-        let adapter_frame_id = top.id;
+        // The locals belong to whichever frame a person would look at, which is
+        // the responsible one when there is one. A crash inside `strcmp` has no
+        // locals worth reading in `strcmp`; the ones that explain it are in the
+        // caller that passed the null. Reporting the top frame's empty list
+        // there would have been true and useless, and would have cost the two
+        // round trips this exists to save. `locals.frame_id` names which frame
+        // it is, so the choice is never something a reader has to infer (D078).
+        let locals_frame_id = responsible.as_ref().unwrap_or(&top).id;
+
+        self.blob.user_frame = responsible
+            .map(|frame| crate::handlers::inspect::ours(&self.session, fence, frame));
         self.blob.frame = Some(crate::handlers::inspect::ours(&self.session, fence, top));
-        self.fetch_locals(fence, adapter_frame_id).await;
+        self.fetch_locals(fence, locals_frame_id).await;
     }
 
     /// The top frame's locals, so reading one is not a second command.
@@ -511,12 +519,12 @@ impl Wait {
         }
 
         self.blob.locals = Some(lazydap_protocol::FrameLocals {
+            // Our handle for the frame these came from, which is `user_frame`'s
+            // when there is one and `frame`'s otherwise. Both were minted a
+            // moment ago, so this resolves rather than mints.
             frame_id: self
-                .blob
-                .frame
-                .as_ref()
-                .map(|frame| frame.id)
-                .unwrap_or_default(),
+                .session
+                .mint_handle(fence, crate::handles::HandleKind::Frame, adapter_frame_id),
             variables_reference: self.session.mint_handle(
                 fence,
                 crate::handles::HandleKind::Variables,
