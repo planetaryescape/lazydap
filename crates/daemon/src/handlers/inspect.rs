@@ -113,15 +113,14 @@ pub async fn variables(
     // The window the caller will actually be given: the narrower of what they
     // asked for and what the cap allows.
     let limit = row_limit(count, max);
-    let (variables, truncated) = session
+    let returned = session
         .adapter()
         .variables(reference, filter, start, probe(limit))
         .await
-        .map_err(AdapterError::into_ipc)
-        .map(|variables| take(variables, limit))?;
+        .map_err(AdapterError::into_ipc)?;
 
     still_paused(&session, fence)?;
-    let mut variables = variables;
+    let (mut variables, truncated) = take(returned, limit);
     for variable in &mut variables {
         variable.variables_reference =
             session.mint_variables_reference(fence, variable.variables_reference);

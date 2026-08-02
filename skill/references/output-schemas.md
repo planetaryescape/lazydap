@@ -195,11 +195,12 @@ stub, disassembly) and has no file on disk.
 position in the stack — `--frame 0` is not "the top frame", it is a number
 nobody handed out, and lazydap refuses it saying so.
 
-**A handle stops being valid the moment the program moves.** Fetch a new stack
-after every step. Using an old one is refused with `StaleHandle` and exit 1
-rather than answered: handles are never reused, so lazydap can always tell an
-old one from a current one, and you can never be given another frame's data by
-accident. Both `frame_id` and `variables_reference` work this way.
+**A handle stops being valid the moment the program moves,** and again when the
+session ends. Fetch a new stack after every step. Using an old one is refused
+with `StaleHandle` and exit 1 rather than answered: handles are numbered by the
+daemon and never reused, so lazydap can always tell an old one from a current
+one, and you can never be given another frame's — or another *session's* — data
+by accident. Both `frame_id` and `variables_reference` work this way.
 
 ## `scopes`
 
@@ -247,12 +248,17 @@ including ones that ignore them on the wire. `--filter` is passed straight to
 the debugger, and a debugger that does not implement it returns everything —
 lazydap does not second-guess which children are indexed.
 
-`truncated` is `true` when you are seeing a prefix. **At most 200 rows come
-back by default**, so a `Vec` of two thousand does not silently become two
-thousand and one rows of your context. Page on with `--start`, or raise the cap
-with `--max N` — `--max 0` lifts it entirely. Values themselves are never
-shortened: a truncated *list* is recoverable, a truncated *value* would be a
-claim about the data.
+`truncated` means **there is more than you are seeing** — whatever narrowed the
+list. It is `true` when the default cap bit *and* when your own `--count` left
+rows behind, so you can page on it without tracking which limit applied. A
+window that happens to reach the end of the list reports `false`.
+
+**At most 200 rows come back by default**, so a `Vec` of two thousand does not
+silently become two thousand and one rows of your context. Page on with
+`--start`, or raise the cap with `--max N` — `--max 0` lifts it entirely. When
+both are given, the narrower wins. Values themselves are never shortened: a
+truncated *list* is recoverable, a truncated *value* would be a claim about the
+data.
 
 `--count 0` and `--max 0` both mean "no limit", the way `--timeout 0` does.
 

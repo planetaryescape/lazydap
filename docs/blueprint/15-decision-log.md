@@ -1652,3 +1652,86 @@ launch without `--stop-on-entry`, so it waits and reports honestly about what it
 "Pause" has no second reading: the program is stopped, that is already the state the caller
 wanted, there is nothing to interrupt and no future stop to wait for. The only alternatives
 were an error or a fabricated one.
+
+---
+
+## D082 — handles are numbered by the daemon, not by each session
+
+**Status:** decided (2026-08-02, review of D075).
+
+**Why:** D075 gave every `Session` its own counter starting at `1`, and that reintroduced the
+exact failure it had just removed, one scope out. The inspection commands resolve against
+*whichever session is current* — a client passes a handle, not a session — so a handle minted
+in session A was a live handle in session B. Reproduced:
+
+```
+session A (./crash):  locals reference 4 -> wanted="gamma", i=2
+disconnect; launch ./fast as session B
+session B:            variables --reference 4 -> big, total, i     # exit 0
+```
+
+Session A's reference came back full of **another program's** variables, under exit 0, with
+nothing anywhere to say who had answered. Adapter death and relaunch is the same path. The
+per-session counter made the collision *likely* rather than merely possible: both sessions
+number from one, so their handles overlap from the first stop.
+
+**Decision:** one counter per daemon, shared by every session it runs. A number is never
+issued twice for as long as the daemon lives, so the numbering of two sessions is disjoint by
+construction and B has nothing to answer A's handle with. Each session records where the
+counter stood when it began, which is what lets the refusal say *which* kind of stale it is —
+"belongs to a session that has ended" rather than "belongs to an earlier stop". Both are
+`StaleHandle`; the difference is only in what the message tells the caller to do.
+
+**Why not a session id inside the handle.** It was considered and is unreachable code: the
+table is only ever consulted through the session that owns it, so a stored session id would
+always match itself. The binding that actually does the work is the numbering being global,
+and adding a field that can never be false would be a check in name only.
+
+**A known residual, stated rather than papered over.** The counter resets when the daemon
+restarts, so a client that held a handle across `lazydap shutdown` and then inspected a fresh
+session could still collide. It is not reachable by the campaign's sequence — a restart ends
+the session, and every client re-resolves the current one — and closing it would mean seeding
+the counter with clock or random entropy, making every handle a twelve-digit number for a
+case nobody has hit. Recorded here so the next person finds a decision rather than an
+oversight.
+
+---
+
+## D083 — a window says when it left rows behind, and asks for one more than it needs
+
+**Status:** decided (2026-08-02, review of D078/D080).
+
+**Why:** three faults in what the caps actually did, all of the same family — a limit that
+described the reply rather than the question, or that did not describe itself.
+
+**`truncated` reported only one of the two ways a list can be short.** `--count 5` on a
+2000-element container returned five rows and `truncated: false`, because the flag was set by
+the cap alone. That contradicts the field's documented meaning and breaks the one thing it is
+for: a client deciding whether to keep paging. This is D072's lesson exactly — there,
+`output_truncated` had to cover both the in-wait cap and the pre-wait buffer drop, because the
+flag means *there is more than you are seeing*, whatever the cause. Any user-supplied window
+that leaves rows behind now sets it, and a window that happens to reach the end does not.
+
+**The two limits ignored each other.** `--count` and `--max` are both limits, and honouring
+only one of them ignores the other; the effective window is now the narrower.
+
+**The request asked for everything.** The cap was applied after the whole DAP response had
+been deserialised, and the stop-locals fetch passed no window at all. The request now asks for
+`limit + 1` — one more than will be returned, which is also how "there is more" is decided
+without a second call.
+
+**What that does and does not buy, honestly.** `count` reaches the wire only for an adapter
+that declared `supportsVariablePaging`; for one that has not, D067/D073 deliberately send no
+window and lazydap applies it after the fact. **codelldb, debugpy and delve all report
+`supports_variable_paging: false`** (verified 2026-08-02), so today this bounds the *reply*
+and not the transfer on every adapter lazydap drives. Asking anyway costs nothing, is the
+only half lazydap owns, and means the bound arrives free with the first adapter that pages.
+Claiming the round trip is bounded would be the kind of false report this whole campaign
+exists to remove.
+
+**`user_frame: null` was two answers wearing one face.** The search looks at the first 24
+frames; absence after an *exhausted* window meant either "no frame in this stack has a source
+path" or "none of the first two dozen did", and only the first is actionable. An exhausted
+window now costs one more request rather than a plausible-looking absence. It is reached only
+by a stop two dozen library frames deep — never by an ordinary breakpoint, which stops in code
+with a path and does not search at all.

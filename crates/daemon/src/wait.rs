@@ -534,7 +534,7 @@ impl Wait {
         // two-thousand-element frame cross the wire in full before the cap threw
         // it away — a cap on the reply is not a cap on the round trip (D083).
         let wanted = STOP_LOCALS_CAP as u32 + 1;
-        let variables = match self
+        let mut variables = match self
             .session
             .adapter()
             .variables(
@@ -561,7 +561,8 @@ impl Wait {
             return;
         }
 
-        let mut variables = variables;
+        // Same rule as `variables` applies to its own cap: what came back is one
+        // row longer than the cap exactly when there is more (D083).
         let truncated = variables.len() > STOP_LOCALS_CAP;
         variables.truncate(STOP_LOCALS_CAP);
         for variable in &mut variables {

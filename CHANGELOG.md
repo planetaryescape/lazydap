@@ -34,6 +34,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v8*
 
 ### Fixed
 
+**A stale `variables_reference` could return another *session's* data.** Handles were numbered per session, so one minted in a session that has since ended was a live handle in the next one — and because inspection commands resolve against whichever session is current, a reference remembered across a `disconnect` came back full of a different program's variables under exit 0. Handles are now numbered by the daemon and never reused, and one from an ended session is refused with `StaleHandle` saying so.
+
+**`truncated` now means "there is more than you are seeing", whatever narrowed the list.** `--count 5` on a 2000-element container used to return five rows and `truncated: false`, which contradicts the field and stops a client that pages on it. When both `--count` and `--max` are given the narrower wins, and a window that reaches the end of the list correctly reports `false`.
+
 **A stale `variables_reference` could return another frame's data.** The adapter's handles stop being valid the moment the program moves, and an adapter is free to hand the same number out again at the next stop for something else — so a reference remembered across a `continue` either errored obscurely or, worse, was answered with somebody else's variables under exit 0. lazydap now mints its own handles, one per stop and never reused, and refuses one from an earlier stop with `StaleHandle` before the debugger is asked anything.
 
 **`eval --frame 0` claimed the program was running while it was stopped.** `--frame` takes an opaque frame id and `0` is the obvious thing to type; codelldb reports an unresolvable frame id as *"can't evaluate expressions when the process is running"*, which is false and sends an agent off to poll a program that is never going to move. Unknown frame ids no longer reach the debugger: the refusal names the problem and says that ids come from `lazydap stack`. The `--help` for every `--frame` says so too.
