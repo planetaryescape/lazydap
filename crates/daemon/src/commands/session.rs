@@ -344,13 +344,19 @@ pub async fn step(
         Response::Continued {
             session_id,
             thread_id,
+            already_running,
         } => View::single(
             serde_json::json!({
                 "session_id": session_id.to_string(),
                 "thread_id": thread_id,
                 "state": "running",
+                "already_running": already_running,
             }),
-            format!("running (thread {})", or_dash(thread_id)),
+            if already_running {
+                "already running; nothing was resumed".to_string()
+            } else {
+                format!("running (thread {})", or_dash(thread_id))
+            },
         )
         .print(format),
         other => Err(unexpected(other)),

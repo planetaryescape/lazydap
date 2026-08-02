@@ -46,6 +46,18 @@ const EXIT_CODE_POLL: Duration = Duration::from_millis(10);
 /// Most output a single wait will carry, before it starts dropping it (D9).
 const OUTPUT_CAP_BYTES: usize = 1_000_000;
 
+/// How far down the stack to look for a frame in the user's own code.
+///
+/// Deep enough for the case it is about — a handful of library frames between
+/// the crash and the caller responsible for it — and bounded so a thousand-deep
+/// recursion costs the adapter no more to answer than a shallow one. The whole
+/// search is one `stackTrace`, so this is a size, not a number of round trips.
+const USER_FRAME_SEARCH_DEPTH: u32 = 24;
+
+/// Most locals a stop blob carries. Beyond it the list is a flagged prefix and
+/// `lazydap variables` reads the rest (D078).
+const STOP_LOCALS_CAP: usize = 100;
+
 pub struct WaitOptions {
     /// `None` waits forever, which the caller has asked for explicitly.
     pub timeout: Option<Duration>,
@@ -123,7 +135,7 @@ impl Wait {
             if !options.all_threads {
                 self.coalesce().await;
             }
-            self.fetch_top_frame().await;
+            self.fetch_stop_context().await;
         }
 
         if !outcome.is_live() && self.blob.exit_code.is_none() {
@@ -356,14 +368,21 @@ impl Wait {
         }
     }
 
-    /// Fetch the frame the program is sitting in.
+    /// Fetch where the program is, whose code that is, and what is in scope.
     ///
     /// A convenience the blueprint asks for: the overwhelmingly common next
     /// question after "it stopped" is "where?", and making every caller spend
     /// a second round trip on it is the sort of thing that gets a debugger
-    /// called clunky. A failure here is not the caller's problem — the stop
-    /// itself is still true — so it is logged and left out.
-    async fn fetch_top_frame(&mut self) {
+    /// called clunky. Two more questions turned out to be just as common and
+    /// just as reliably asked, so they are answered here too (D078) — the
+    /// nearest frame in the user's own code, which the top frame is not when a
+    /// program dies inside libc, and the top frame's locals.
+    ///
+    /// A failure anywhere here is not the caller's problem — the stop itself is
+    /// still true — so it is logged and the field left out. Absent is honest;
+    /// an empty list would claim the frame has no locals when the truth is that
+    /// nobody could find out.
+    async fn fetch_stop_context(&mut self) {
         let Some(thread_id) = self
             .blob
             .thread_id
@@ -371,22 +390,154 @@ impl Wait {
         else {
             return;
         };
+        let fence = self.session.stop_generation();
 
-        match self
+        // One request, not one per frame: `user_frame` costs a longer answer to
+        // the stack trace already being made, and nothing else. That is what
+        // keeps it always-on rather than a flag.
+        let frames = match self
             .session
             .adapter()
-            .stack_trace(thread_id, Some(0), Some(1))
+            .stack_trace(thread_id, Some(0), Some(USER_FRAME_SEARCH_DEPTH))
             .await
         {
-            Ok((frames, _)) => self.blob.frame = frames.into_iter().next(),
-            Err(error) => tracing::debug!(
+            Ok((frames, _)) => frames,
+            Err(error) => {
+                tracing::debug!(
+                    target: "daemon.session",
+                    session_id = %self.session.id,
+                    %error,
+                    "could not fetch the top frame for a wait",
+                );
+                return;
+            }
+        };
+
+        // The program moved while we were asking. Reporting these frames would
+        // describe a moment it has left, and minting handles for them would
+        // stamp them with a stop they did not come from.
+        if !self.session.still_at(fence) {
+            tracing::debug!(
                 target: "daemon.session",
                 session_id = %self.session.id,
-                %error,
-                "could not fetch the top frame for a wait",
-            ),
+                "the program moved before its stop context could be read",
+            );
+            return;
         }
+
+        let Some(top) = frames.first().cloned() else {
+            return;
+        };
+        // Only when the top frame cannot answer it itself. A `user_frame`
+        // repeating `frame` would invite a reader to think the two had been
+        // compared and found to differ.
+        if !has_source_path(&top) {
+            self.blob.user_frame = frames
+                .iter()
+                .find(|frame| has_source_path(frame))
+                .cloned()
+                .map(|frame| crate::handlers::inspect::ours(&self.session, fence, frame));
+        }
+
+        let adapter_frame_id = top.id;
+        self.blob.frame = Some(crate::handlers::inspect::ours(&self.session, fence, top));
+        self.fetch_locals(fence, adapter_frame_id).await;
     }
+
+    /// The top frame's locals, so reading one is not a second command.
+    ///
+    /// Two round trips — `scopes`, then `variables` on whichever of them is the
+    /// local one. They are the two every caller was making by hand anyway
+    /// (D078).
+    async fn fetch_locals(&mut self, fence: u64, adapter_frame_id: i64) {
+        let scopes = match self.session.adapter().scopes(adapter_frame_id).await {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                tracing::debug!(
+                    target: "daemon.session",
+                    session_id = %self.session.id,
+                    %error,
+                    "could not fetch the stopped frame's scopes",
+                );
+                return;
+            }
+        };
+
+        // The locals, not every scope. `Registers` and `Global` are large,
+        // rarely what anybody meant, and `expensive` exists to say "do not
+        // fetch this without being asked".
+        let Some(local) = scopes
+            .iter()
+            .find(|scope| !scope.expensive && scope.name.eq_ignore_ascii_case("local"))
+            .or_else(|| scopes.iter().find(|scope| !scope.expensive))
+        else {
+            return;
+        };
+        let reference = local.variables_reference;
+
+        let variables = match self
+            .session
+            .adapter()
+            .variables(reference, lazydap_core::VariableFilter::All, None, None)
+            .await
+        {
+            Ok(variables) => variables,
+            Err(error) => {
+                tracing::debug!(
+                    target: "daemon.session",
+                    session_id = %self.session.id,
+                    %error,
+                    "could not fetch the stopped frame's locals",
+                );
+                return;
+            }
+        };
+
+        if !self.session.still_at(fence) {
+            return;
+        }
+
+        let mut variables = variables;
+        let truncated = variables.len() > STOP_LOCALS_CAP;
+        variables.truncate(STOP_LOCALS_CAP);
+        for variable in &mut variables {
+            if variable.variables_reference != 0 {
+                variable.variables_reference = self.session.mint_handle(
+                    fence,
+                    crate::handles::HandleKind::Variables,
+                    variable.variables_reference,
+                );
+            }
+        }
+
+        self.blob.locals = Some(lazydap_protocol::FrameLocals {
+            frame_id: self
+                .blob
+                .frame
+                .as_ref()
+                .map(|frame| frame.id)
+                .unwrap_or_default(),
+            variables_reference: self.session.mint_handle(
+                fence,
+                crate::handles::HandleKind::Variables,
+                reference,
+            ),
+            variables,
+            truncated,
+        });
+    }
+}
+
+/// Whether a frame names a file on disk somebody could open.
+///
+/// A `source` with only a `source_reference` is the adapter offering to send
+/// bytes for something that has no path — libc, a JIT frame — and is exactly
+/// the case `user_frame` exists for.
+fn has_source_path(frame: &lazydap_core::StackFrame) -> bool {
+    frame
+        .source
+        .as_ref()
+        .is_some_and(|source| source.path.is_some())
 }
 
 #[cfg(test)]
@@ -549,17 +700,32 @@ mod tests {
         assert!(blob.frame.is_none(), "an exited program has no frame");
     }
 
-    #[tokio::test]
+    /// DAP does not order `exited` before `terminated`. Without the grace
+    /// window the one blob the agent reads has no exit code in it.
+    ///
+    /// **Time is controlled rather than raced.** This used to sleep 30ms of
+    /// real time against a 250ms real grace window and failed once under load —
+    /// the machine was busy enough that 250ms of wall clock passed before the
+    /// 30ms sleep was scheduled. The margin was never the point of the test,
+    /// and a test that fails under load teaches people to re-run rather than to
+    /// read. Under `start_paused` the clock only advances when every task is
+    /// idle, so the ordering below is a fact about the code rather than about
+    /// the machine: the setter fires at 25ms, and the grace loop — which polls
+    /// every 10ms for 250ms — next looks at 30ms and finds it. Load cannot
+    /// change either number.
+    #[tokio::test(start_paused = true)]
     async fn a_termination_that_learns_its_exit_code_late_still_reports_it() {
-        // DAP does not order `exited` before `terminated`. Without the grace
-        // window the one blob the agent reads has no exit code in it.
         let session = session();
         let wait = Wait::begin(&session);
 
         session.end_once(EndReason::Terminated);
         let late = Arc::clone(&session);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            // Deliberately not a multiple of EXIT_CODE_POLL: landing exactly on
+            // a poll instant would make the answer depend on which of two
+            // ready tasks the scheduler picked first, which is the sort of
+            // coin-toss this test was rewritten to remove.
+            tokio::time::sleep(Duration::from_millis(25)).await;
             late.set_exit_code(Some(3));
         });
 

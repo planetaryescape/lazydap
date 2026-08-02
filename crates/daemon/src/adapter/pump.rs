@@ -295,6 +295,10 @@ fn adapter_breakpoint(body: &serde_json::Value) -> AdapterBreakpoint {
         line: body["line"].as_u64().map(|line| line as u32),
         message: body["message"].as_str().map(str::to_string),
     }
+    // Same rule as the `setBreakpoints` response it corrects: a verified
+    // breakpoint's message is commentary, and `Resolved locations: 1` reads
+    // like a change of state when nothing changed (D077).
+    .without_settled_message()
 }
 
 /// The read side died. Make sure clients hear about it (D022).

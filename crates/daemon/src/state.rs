@@ -1,5 +1,6 @@
 use crate::adapter::AdapterHandle;
 use crate::debuggee::Debuggee;
+use crate::handles::{HandleKind, HandleTable};
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointStatus, EndReason, OutputChunk,
     SessionId, SessionState,
@@ -445,6 +446,9 @@ pub struct Session {
     /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
     /// adapter ids exclusively.
     breakpoints: Mutex<BreakpointMap>,
+    /// The frame ids and variables references this session has handed out, and
+    /// which stop each belongs to. See [`crate::handles`].
+    handles: Mutex<HandleTable>,
     /// The program the adapter started for us, once it has said which pid.
     ///
     /// Set only for a program *we launched*. When `attach` lands it must stay
@@ -478,6 +482,7 @@ impl Session {
             last_thread_id: RwLock::new(None),
             outstanding: RwLock::new(Markers::default()),
             breakpoints: Mutex::new(BreakpointMap::default()),
+            handles: Mutex::new(HandleTable::default()),
             debuggee: Mutex::new(None),
         }
     }
@@ -667,6 +672,21 @@ impl Session {
 
     fn bump_stop_generation(&self) {
         self.stop_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Our handle for one of the adapter's frame ids or variables references.
+    ///
+    /// `fence` is the generation the number was read at, and the caller must
+    /// have confirmed the session is still there — a handle stamped with a stop
+    /// the data did not come from is the lie this whole mechanism removes.
+    pub fn mint_handle(&self, fence: u64, kind: HandleKind, adapter: i64) -> i64 {
+        lock(&self.handles).mint(fence, kind, adapter)
+    }
+
+    /// The adapter's own number for a handle a caller presented, or a refusal
+    /// naming why it is no good.
+    pub fn resolve_handle(&self, fence: u64, kind: HandleKind, handle: i64) -> Result<i64, IpcError> {
+        lock(&self.handles).resolve(fence, kind, handle)
     }
 
     /// Whether the session is still sitting at the stop `fence` was taken at.

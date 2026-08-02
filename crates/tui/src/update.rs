@@ -658,6 +658,12 @@ fn expand(mut state: AppState) -> (AppState, Cmd) {
                 filter: VariableFilter::All,
                 start: None,
                 count: None,
+                // The cap exists to keep an agent's context from being spent on
+                // one container (D080). A pane scrolls, so there is nothing
+                // here for it to protect — and a tree that silently stopped at
+                // two hundred children, with no row saying so, would be the
+                // same lie the flag was added to prevent.
+                max: Some(0),
             },
         },
     )
@@ -1068,7 +1074,7 @@ fn daemon_response(mut state: AppState, id: u64, response: Response) -> (AppStat
                 .retain(|_, pending| pending.scopes == id);
             (state, Cmd::None)
         }
-        Response::Variables(variables) => (variables_arrived(state, id, variables), Cmd::None),
+        Response::Variables(list) => (variables_arrived(state, id, list.variables), Cmd::None),
         Response::Breakpoints(report) => {
             state.pending_breakpoints.remove(&id);
             // The TUI never asks for a preview, but applying one would write
@@ -1858,7 +1864,7 @@ mod tests {
             state,
             Msg::DaemonResponse {
                 id,
-                response: Box::new(Response::Variables(variables)),
+                response: Box::new(Response::Variables(lazydap_protocol::VariableList::whole(variables))),
             },
         )
     }
@@ -2575,6 +2581,7 @@ mod tests {
                 filter: VariableFilter::All,
                 start: None,
                 count: None,
+                max: Some(0),
             },
         );
 
