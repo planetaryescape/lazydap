@@ -1459,3 +1459,196 @@ schema doc tells agents that a value wrapped in angle brackets is worth a second
 
 Widening this needs better evidence than a substring: an adapter that fails the request, or a
 marker in the response. Not a longer list of words that sometimes mean failure.
+
+---
+
+## D075 — a frame id and a variables reference are lazydap's, minted per stop
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** both used to be the adapter's own numbers, passed through in each direction. They
+are valid only until the program moves, and an adapter is free to hand the same number out
+again at the next stop for something else. A caller holding one across a `continue` therefore
+had two futures, and the quiet one is much the worse:
+
+- the number addresses nothing, and the adapter says so in its own words. `scopes --frame 0`
+  gave `Invalid frame reference: 0`, which is at least true. `eval --frame 0` gave **`can't
+  evaluate expressions when the process is running`** about a program that was plainly
+  stopped — and an agent reading that starts polling something that is never going to move;
+- the number has been **recycled**, and the adapter answers it. Somebody else's variables
+  come back under exit 0, with nothing in the response to say the question was about a moment
+  that has passed. That was reported as `{"variables": []}` and is the reason this is a Tier A
+  finding rather than a message-quality one.
+
+**Decision:** lazydap mints its own handles. One monotonic sequence per session, never reused,
+each recorded against the stop generation it was issued at (D059's fence, which already counts
+exactly this). A handle presented from an older generation is refused *before the adapter is
+asked anything*, with `StaleHandle`; a number that was never a handle at all is `BadRequest`.
+Both name the command that hands out a fresh one.
+
+**Why minting rather than a check against the adapter's numbers.** A registry that merely
+recorded which adapter numbers had been handed out cannot catch the recycled case: at the new
+stop `1007` genuinely is a current handle, so the check passes and the caller still gets
+another frame's variables. Only a number that is never reused makes "this belongs to an
+earlier stop" decidable. That is the whole argument for the extra layer.
+
+**Two codes, not one.** `StaleHandle` and `BadRequest` need different reactions — ask again
+at this stop and retry, versus stop making the number up — so collapsing them would throw
+away the only part a caller can act on. `--frame 0` is the second: an obvious thing to type,
+never issued by anything, and nothing to do with the program having moved.
+
+**Consequences:** `frame_id` and `variables_reference` are opaque small integers with no
+relation to anything DAP said, which is what they always claimed to be. Handles are minted
+under the same fence as the data they describe, so one can never be stamped with a stop its
+frame did not come from — which added a fence re-check to `stack_trace` and `variables`,
+where D059 had judged there was no gap. There was: between the adapter answering and the
+numbers being handed out. A `variables_reference` of `0` is left alone, because it is DAP's
+"this is a scalar" and not a reference. The protocol goes to v8: a v7 client would decode
+these integers happily and then send them back to be read against a different table.
+
+---
+
+## D076 — `continue` on a running program reports what it did, which is nothing
+
+**Status:** decided (2026-08-02, review of D055).
+
+**Why:** D055 established that lazydap does not *send* a continue to a program already
+running: codelldb ignores it and debugpy never answers, and the acknowledgement timeout that
+follows kills the session. It said nothing about what to report, and what was reported was
+
+```json
+{"state":"running","thread_id":0}
+```
+
+under exit 0. Two inventions in one line. Nothing was resumed, so calling it a plain success
+is a claim about an action that did not happen; and `thread_id: 0` is whatever codelldb
+answers a `threads` call on a running process with, which is not a thread — the same class of
+fabrication D065 removed from `ThreadInfo::name`.
+
+**Decision:** `Response::Continued` carries `already_running`, and `thread_id` is `None` when
+it is set. The field is not invented data — it is the daemon reporting its own decision.
+
+**Why not an error.** "Continue" has a second reading — *get me to the next stop* — and with
+`--wait` that is the documented ordinary sequence for a launch without `--stop-on-entry`
+(D055). Erroring would break it. So the wait path is unchanged and only the fire-and-forget
+answer had to stop lying. `pause` is the opposite case and is refused (D081).
+
+---
+
+## D077 — a message explains a refusal; a verified breakpoint has nothing to explain
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** `launch` answered with a breakpoint that contradicted itself:
+
+```json
+{"id":6,"line":37,"verified":true,"message":"Resolved locations: 0"}
+```
+
+and the next `continue --wait` corrected it by event to `Resolved locations: 1`. `verified` is
+the trustworthy half — a breakpoint on a comment line reports `false` in the same response —
+so the stale count was making a working breakpoint look broken to anyone who read the fields
+together.
+
+**Decision:** drop `message` when `verified` is true, wherever an `AdapterBreakpoint` is built
+from something an adapter said. What is left is the case the field is actually read for: an
+unverified breakpoint, where the message is the reason.
+
+**Why not wait for the adapter to settle.** The other option was to hold the launch open until
+the `breakpoint` events arrived. That pays for a cosmetic field with launch latency on every
+session, forever, and there is no upper bound on how long an adapter takes to make up its
+mind. Dropping the message costs nothing real: where a breakpoint ended up is `line`, whether
+it took is `verified`, and `Resolved locations: 1` was never actionable either.
+
+**Consequences:** D048's symlink retry is unaffected — it reads the message of an *unverified*
+breakpoint, which is exactly what is kept.
+
+---
+
+## D078 — a stop carries the frame responsible for it, and that frame's locals
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** two independent sources found the same friction. Reading a local was always two
+commands (`scopes`, then `variables --reference N`) for the single most common thing anybody
+does after a program stops. And a crash blob's `frame` is usually not the frame anybody wants:
+a real segfault reported `_platform_strcmp$VARIANT$Base`, which has a `source_reference` and
+no path at all, and naming the responsible `lookup_key` at `config.c:40` turned a
+two-command diagnosis into a five-command one.
+
+**Decision:** one mechanism, in the wait's existing "fetch the top frame" step.
+
+- **`user_frame`** — the nearest frame below `frame` that has a source path, present only when
+  `frame` has none. **`frame` is never overwritten**: it is where the program stopped and
+  stays that, whatever it turns out to be. Read it as `user_frame` first, `frame` second.
+- **`locals`** — the locals of whichever of those two a person would look at, with
+  `frame_id` naming which, so the choice is never something a reader has to infer. A crash
+  inside `strcmp` has no locals worth reading in `strcmp`; the ones that explain it are in the
+  caller that passed the null.
+
+**Always on, because it was measured.** `user_frame` costs a longer answer to a `stackTrace`
+that was already being made — 24 frames instead of 1, one round trip either way. `locals`
+costs two more round trips. Measured over 15 stops on the same fixture: median `elapsed_ms`
+57 with the context and 57 without, means 68.5 and 67.5. The cost is about a millisecond
+against a wait dominated by the program itself, so a flag would have bought nothing and left
+the common path needing two commands anyway.
+
+**Bounded and honest.** The frame search stops at 24 frames, so a thousand-deep recursion
+costs no more than a shallow one. Locals are capped at 100 with `truncated` saying so, the
+same pattern as `output_truncated`. Every part is best-effort and absent when the adapter
+would not answer — never an empty list, which would claim a frame has no locals when the
+truth is that nobody could find out (D065's rule).
+
+---
+
+## D079 — `0` means no limit, for every flag that takes a count
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** `--timeout 0` means "wait forever" and is documented. `stack --levels 0` meant
+"nothing", and answered `{"frames":[]}` under exit 0 — a plausible-looking empty stack for a
+paused program. DAP itself says `levels: 0` means all frames, so the passthrough was wrong
+twice.
+
+**Decision:** `0` is spelled "no limit" on `--levels`, `--count` and `--max`. Applied in the
+daemon rather than the CLI so every client gets the same reading.
+
+---
+
+## D080 — a variables answer is capped by default and says when that bit
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** now that `--start/--count` actually work (D073), nothing else bounded a response. A
+`Vec` of 2000 expands to 2001 rows in one answer, and an agent that asked what a container
+held had spent most of its context on one variable with nothing in the response to say so.
+
+**Decision:** a default of 200 rows, `--max` to change it, `--max 0` to lift it, and
+`truncated` on the response — so `Response::Variables` becomes a struct rather than a bare
+`Vec`, which had nowhere to put the flag. The TUI passes `--max 0` explicitly: the cap
+protects an agent's context, and a pane scrolls.
+
+**Values are never shortened.** Only the list is. A 5000-character string is one row, and a
+row reading `"abcd…"` would be a claim about the *data* rather than about the list — a caller
+cannot tell a truncation marker from a value that really does end in an ellipsis. Truncating
+a container is recoverable with `--start`; truncating a value silently changes what the
+program was observed to contain, which is the one thing this must not become.
+
+---
+
+## D081 — `pause` on a stopped program is refused, not answered with the stop it found
+
+**Status:** decided (2026-08-02, dogfooding round two).
+
+**Why:** `pause --wait` on an already-paused session handed back the stop the program was
+*already* sitting at, wearing a fresh `elapsed_ms` — a blob indistinguishable from one the
+request had caused. An agent reading it concluded its pause had worked.
+
+**Decision:** refuse it, `BadRequest`, naming the state and pointing at `lazydap status`.
+
+**Why an error here and not for `continue` (D076).** The asymmetry is real. "Continue" has a
+second reading — get me to the next stop — and it is the documented ordinary sequence after a
+launch without `--stop-on-entry`, so it waits and reports honestly about what it did.
+"Pause" has no second reading: the program is stopped, that is already the state the caller
+wanted, there is nothing to interrupt and no future stop to wait for. The only alternatives
+were an error or a fabricated one.

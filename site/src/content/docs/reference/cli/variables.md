@@ -20,7 +20,8 @@ lazydap variables [OPTIONS] --reference <REFERENCE>
 | `--reference <REFERENCE>` | The `variables_reference` from `scopes` or a parent variable |
 | `--filter <FILTER>` | Fetch only named members or only indexed elements [default: all] |
 | `--start <START>` | Skip this many |
-| `--count <COUNT>` | Take at most this many |
+| `--count <COUNT>` | Take at most this many. `0` means no limit |
+| `--max <MAX>` | Most rows to answer with, before the list is truncated and flagged. `0` lifts the cap |
 
 Plus the [options every command takes](/reference/cli/#options-every-command-takes).
 

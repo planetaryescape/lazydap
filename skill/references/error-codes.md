@@ -40,7 +40,8 @@ is the contract.
 | `SessionNotPaused` | You asked about the stack, scopes, variables or an expression while the program is running. | `lazydap pause --wait`, or `continue --wait` to a breakpoint, then retry. |
 | `SessionNotFound` | No session — you have not launched, or you already disconnected. | `lazydap launch <program>` first. |
 | `SessionAlreadyActive` | A program is already being debugged. Only one at a time. | `lazydap disconnect`, then launch. `details` names the session in the way. |
-| `BadRequest` | The request made no sense here — commonly stepping a program that has already exited. | Read `message`; it says what to do. For a finished program, launch again. |
+| `StaleHandle` | You passed a `--frame` or `--reference` from a stop the program has since left. | Ask again *at this stop* — `lazydap stack` for a frame id, `lazydap scopes` for a reference — and retry with the new one. Never a reason to re-launch. |
+| `BadRequest` | The request made no sense here — a handle nobody handed out (`--frame 0` is not "the top frame"), stepping a program that has already exited, or pausing one that is already stopped. | Read `message`; it says what to do and where a valid value comes from. |
 | `AdapterNotFound` | No codelldb on `PATH`. | Nothing you can do in-session. Report it; `details.searched` lists where it looked. |
 | `DapProtocolError` | The debugger refused. Usually your expression, not lazydap. | Read `details.adapter_message` — it is the debugger's own words, e.g. *use of undeclared identifier 'y'*. |
 | `AdapterCrashed` | The debugger process died. | The session is unrecoverable. `disconnect`, then launch again. |

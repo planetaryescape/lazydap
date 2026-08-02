@@ -346,7 +346,13 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
 
-Note the protocol is at **v7** (D065–D069: `ThreadInfo::name` became optional,
+Note the protocol is at **v8** (D075–D081: a `frame_id` and a
+`variables_reference` are now lazydap's own handles, minted per stop and never
+reused, so one from an earlier stop is refused with `StaleHandle` instead of
+colliding with a number the adapter has since recycled; `Response::Continued`
+gained `already_running`; `Response::Variables` became a struct with a
+`truncated` flag; the `--wait` blob gained `user_frame` and `locals`; and
+`ErrorCode` gained `StaleHandle`. v7 was D065–D069: `ThreadInfo::name` became optional,
 `Event::Stopped` and the `--wait` blob gained `adapter_thread_id`, `AdapterCapabilities`
 gained `supports_variable_paging`, and a variable gained `evaluate_name` — none of them a
 new request, so a v6 daemon decodes what a v7 client sends and then answers `threads` in a
