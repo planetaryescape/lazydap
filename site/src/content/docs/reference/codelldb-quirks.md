@@ -1,6 +1,6 @@
 ---
 title: "codelldb quirks"
-description: "All 21 codelldb behaviours that have cost this project time, each with its cause and its fix."
+description: "All 24 codelldb behaviours that have cost this project time, each with its cause and its fix."
 ---
 
 :::note[Generated page]
@@ -36,6 +36,9 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 19 | [`eval` cannot call methods](#19-eval-cannot-call-methods) | Dogfooding campaign (2026-08-01) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 20 | [Unknown-identifier errors open with an alarming irrelevant banner](#20-unknown-identifier-errors-open-with-an-alarming-irrelevant-banner) | Dogfooding campaign (2026-08-01) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 21 | [The adapter's own chatter is emitted as `stderr`](#21-the-adapters-own-chatter-is-emitted-as-stderr) | Dogfooding campaign (2026-08-01) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 22 | [An unresolvable frame id in `evaluate` is reported as "the process is running"](#22-an-unresolvable-frame-id-in-evaluate-is-reported-as-the-process-is-running) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 23 | [`setBreakpoints` answers `verified: true` with `Resolved locations: 0`](#23-setbreakpoints-answers-verified-true-with-resolved-locations-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 24 | [`threads` on a running process answers with a thread whose id is `0`](#24-threads-on-a-running-process-answers-with-a-thread-whose-id-is-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 
 Quirks 11 to 20 are all about **reading values** — the summary strings in `value`, and what
 `eval` will and will not do. They were found in one sitting against a Rust fixture holding one
@@ -1375,6 +1378,110 @@ The chunk does not appear without `--stop-on-entry`.
 - Quirk 6 — the `SIGSTOP` mechanism this is the narration of
 - D033 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md) — the `reason`/`raw_reason` normalisation of the same stop
 - [`delve-quirks.md`](/reference/delve-quirks/) quirk 3 — delve mixing its own chatter into `stdout`, the same problem in the other category
+
+---
+
+## 22. An unresolvable frame id in `evaluate` is reported as "the process is running"
+
+### Symptom
+
+The program is stopped. `status` says so. An `evaluate` naming a `frameId` codelldb cannot
+resolve comes back:
+
+```
+$ lazydap status --format json    # -> "state": "paused"
+$ lazydap eval 'x' --frame 0 --format json
+{"error":"DapProtocolError","details":{"adapter_message":"can't evaluate expressions when the process is running."}}
+```
+
+The message is simply false, and it is the worst possible false thing to say to an agent: the
+obvious reaction is to poll until the program stops, and it is already stopped, so the poll
+never ends.
+
+### Root cause
+
+codelldb resolves `frameId` to an LLDB frame and, when it cannot, falls through to a generic
+"no valid frame" path whose message assumes the only ordinary reason for having no frame — a
+running process. `scopes` with the same unresolvable id says `Internal debugger error: Invalid
+frame reference: 0`, which is honest, so the wording belongs to `evaluate` rather than to the
+resolution.
+
+`--frame 0` is the case that reaches it in practice: the flag takes an opaque adapter id and
+`0` is the obvious thing to type for "the top frame".
+
+### Fix or workaround
+
+lazydap no longer lets an unresolvable frame id reach the adapter. Frame ids are minted per
+stop and checked first, so `--frame 0` is refused with `BadRequest` naming `lazydap stack`,
+and one from an earlier stop with `StaleHandle` (D075). If you are talking to codelldb
+directly, do not believe this message without checking the process state independently.
+
+### Cross-references
+
+- D075 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md) — the handles that make this unreachable
+- Quirk 20 — another codelldb error message that misdescribes its own cause
+
+---
+
+## 23. `setBreakpoints` answers `verified: true` with `Resolved locations: 0`
+
+### Symptom
+
+The response to the `setBreakpoints` sent during launch contradicts itself:
+
+```json
+{"id":6,"line":37,"verified":true,"message":"Resolved locations: 0"}
+```
+
+A `breakpoint` event a moment later corrects the same breakpoint to `Resolved locations: 1`.
+
+### Root cause
+
+codelldb verifies the location before it has finished resolving how many machine locations the
+line maps to, and puts the not-yet-settled count in `message`. `verified` is the field that is
+already correct — a breakpoint on a line with no code reports `verified: false` in the same
+response — so the count is stale rather than the verification being wrong.
+
+### Fix or workaround
+
+lazydap drops `message` from any breakpoint whose `verified` is true, on the rule that a
+message explains a refusal and a breakpoint that took has nothing to explain (D077). Read
+`verified` for whether it took and `line` for where it ended up. If you are reading DAP
+directly, treat `message` on a verified breakpoint as commentary, and wait for the
+`breakpoint` event before believing a location count.
+
+### Cross-references
+
+- D077 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
+- Quirk 8 — the other case where a breakpoint's `message` is load-bearing, which is when it is *not* verified
+
+---
+
+## 24. `threads` on a running process answers with a thread whose id is `0`
+
+### Symptom
+
+Asking a running (not stopped) process for its threads returns a list whose first entry has
+id `0`. There is no such thread; a real codelldb thread id is a large opaque number
+(`36836940` in one session).
+
+### Root cause
+
+The thread list of a running process is not a meaningful question, and codelldb answers it
+with a placeholder rather than an error or an empty list.
+
+### Fix or workaround
+
+Do not resolve a thread against a running program and then report it as one. lazydap used to
+answer `continue` on an already-running program with `{"state":"running","thread_id":0}`, and
+that `0` came from here; it now reports `already_running: true` and no thread at all (D076).
+`lazydap threads` is a fair question about a running program — which threads exist — but the
+id it gives back before anything has stopped is not something to act on.
+
+### Cross-references
+
+- D076 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
+- D065 — the same rule applied to a thread's *name*: absence beats invention
 
 ---
 

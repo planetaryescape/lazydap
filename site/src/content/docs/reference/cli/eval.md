@@ -23,7 +23,7 @@ lazydap eval [OPTIONS] <EXPRESSION>
 
 | Flag | Description |
 | --- | --- |
-| `--frame <FRAME>` | Which frame to evaluate in. Defaults to the top one |
+| `--frame <FRAME>` | A frame id from `lazydap stack` — not a position in it. Defaults to the top frame |
 | `--context <CONTEXT>` | How the adapter should read the expression. `watch` and `hover` evaluate it in the program; `repl` runs it as an adapter command, which for codelldb means an LLDB command [default: watch] |
 
 Plus the [options every command takes](/reference/cli/#options-every-command-takes).

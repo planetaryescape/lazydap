@@ -13,6 +13,7 @@ pub mod commands;
 pub mod debuggee;
 pub mod error;
 pub mod handlers;
+pub mod handles;
 pub mod instance;
 pub mod output;
 pub mod server;
@@ -233,7 +234,8 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             filter,
             start,
             count,
-        } => inspect::variables(&instance, reference, filter, start, count, format).await,
+            max,
+        } => inspect::variables(&instance, reference, filter, start, count, max, format).await,
         Command::Eval {
             expression,
             frame,

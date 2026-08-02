@@ -320,15 +320,17 @@ mod tests {
             state,
             Msg::DaemonResponse {
                 id,
-                response: Box::new(Response::Variables(vec![Variable {
-                    name: "x".to_string(),
-                    value: "5".to_string(),
-                    type_name: Some("int".to_string()),
-                    evaluate_name: None,
-                    variables_reference: 0,
-                    named_variables: None,
-                    indexed_variables: None,
-                }])),
+                response: Box::new(Response::Variables(lazydap_protocol::VariableList::whole(
+                    vec![Variable {
+                        name: "x".to_string(),
+                        value: "5".to_string(),
+                        type_name: Some("int".to_string()),
+                        evaluate_name: None,
+                        variables_reference: 0,
+                        named_variables: None,
+                        indexed_variables: None,
+                    }],
+                ))),
             },
         );
         state.breakpoints = vec![breakpoint(19, true)];

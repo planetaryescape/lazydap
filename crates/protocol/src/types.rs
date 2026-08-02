@@ -66,7 +66,20 @@ use std::path::PathBuf;
 /// this build's `ThreadInfo` cannot read at all, and reports a stepped thread
 /// the way D066 says not to. The bump is what turns a silently wrong answer
 /// back into the `VersionMismatch` `lazydap shutdown` clears.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 7;
+///
+/// v8 (D075–D080): what a stop reports, and what a handle means.
+/// [`StableState`] gained `user_frame` and `locals` (D078), [`Response::Continued`]
+/// gained `already_running` (D076), [`Response::Variables`] became a struct with
+/// a `truncated` flag (D080), and [`ErrorCode`] gained `StaleHandle` (D075).
+/// Three of those are new *variants or shapes* on the daemon's side of the wire,
+/// which a v7 client cannot decode at all — an added `ErrorCode` variant fails
+/// the whole envelope, exactly as D061's `AdapterKind` did. The subtler one is
+/// D075: `frame_id` and `variables_reference` are no longer the adapter's own
+/// numbers but handles lazydap mints per stop, so a v7 client that decoded them
+/// anyway would be sending back integers this daemon reads against a different
+/// table. Both failures are silent without the bump, and a `VersionMismatch`
+/// `lazydap shutdown` clears is the better one.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 8;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,6 +221,9 @@ pub enum Request {
         filter: VariableFilter,
         start: Option<u32>,
         count: Option<u32>,
+        /// Most to answer with. `None` takes the daemon's default, `Some(0)`
+        /// lifts the cap the way `Some(0)` lifts a wait's timeout (D080).
+        max: Option<u32>,
     },
     Eval {
         session_id: SessionId,
@@ -356,7 +372,19 @@ pub enum Response {
     /// A stepping request that did not wait. The program is running now.
     Continued {
         session_id: SessionId,
+        /// The thread that was resumed. `None` when nothing was — see
+        /// `already_running`, which is the only case that produces it.
         thread_id: Option<i64>,
+        /// Nothing was resumed, because nothing was stopped.
+        ///
+        /// `continue` on a program that is already running sends no request at
+        /// all (D055): there is nothing to ask for. Reporting that as an
+        /// ordinary success made the two indistinguishable, and the `thread_id`
+        /// that came with it was worse than useless — it was whatever the
+        /// adapter answered a `threads` call on a running process with, which
+        /// against codelldb is `0`, a thread that does not exist. So the field
+        /// is `None` here and this one says why (D076).
+        already_running: bool,
     },
     /// A stepping request that waited: one blob describing everything that
     /// happened until the program settled.
@@ -374,7 +402,7 @@ pub enum Response {
         total: Option<u32>,
     },
     Scopes(Vec<Scope>),
-    Variables(Vec<Variable>),
+    Variables(VariableList),
     Evaluated(EvalResult),
     Output {
         chunks: Vec<OutputChunk>,
@@ -385,6 +413,53 @@ pub enum Response {
 
     Breakpoints(BreakpointReport),
     Watches(WatchReport),
+}
+
+/// One `variables` answer, and whether it is the whole of one.
+///
+/// A bare `Vec` could not say. A `Vec` of 2000 elements expands to 2001 rows in
+/// a single response, and an agent that asked for a container's contents got
+/// them all with nothing to indicate it had just spent most of its context on
+/// one variable. The cap is a default with a flag to raise it, and this says
+/// when it bit — the same honesty [`StableState::output_truncated`] applies to
+/// output (D080).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VariableList {
+    pub variables: Vec<Variable>,
+    /// `variables` is a prefix, not the whole list. Ask again with `--start`
+    /// past what you have, or raise `--max`.
+    pub truncated: bool,
+}
+
+impl VariableList {
+    /// The whole of a list, however long: nothing was left out.
+    pub fn whole(variables: Vec<Variable>) -> Self {
+        Self {
+            variables,
+            truncated: false,
+        }
+    }
+}
+
+/// The top frame's locals, carried by a stop rather than fetched afterwards.
+///
+/// Reading a local was two commands — `scopes`, then `variables --reference N`
+/// — for the single most common thing anybody does after a program stops. The
+/// two round trips were the daemon's to make, not the caller's, so it makes
+/// them (D078).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameLocals {
+    /// The frame these belong to: [`StableState::frame`]'s id. Present so a
+    /// reader never has to assume which frame was asked about.
+    pub frame_id: i64,
+    /// The handle these came from, for paging past `truncated` with
+    /// `lazydap variables --reference N --start ...`.
+    pub variables_reference: i64,
+    pub variables: Vec<Variable>,
+    /// `variables` is a prefix. A frame with two thousand locals must not blow
+    /// the blob, and a blob that silently dropped the rest would be the lie
+    /// this field exists to prevent.
+    pub truncated: bool,
 }
 
 /// What a `--wait` saw. The one shape agents read.
@@ -423,6 +498,29 @@ pub struct StableState {
     pub exit_code: Option<i32>,
     /// The top frame, fetched for convenience whenever the program paused.
     pub frame: Option<StackFrame>,
+    /// The nearest frame below [`Self::frame`] that has a source path, when
+    /// `frame` has none.
+    ///
+    /// **Not a correction of `frame`.** `frame` is where the program stopped
+    /// and stays that, whatever it turns out to be; overwriting it would be
+    /// lying about where the program is. This is the separate question an agent
+    /// actually asks next — *whose code is responsible* — and it has a
+    /// different answer whenever a program dies inside a library. A real
+    /// segfault stopped in `_platform_strcmp$VARIANT$Base`, which has no path
+    /// at all, and naming the user's `lookup_key` at `config.c:40` took a
+    /// second command it should not have (D078).
+    ///
+    /// `None` when `frame` already has a source path — there is nothing to add
+    /// — or when no frame in the stack has one. Read it as
+    /// `user_frame` first, `frame` second.
+    pub user_frame: Option<StackFrame>,
+    /// [`Self::frame`]'s locals, so reading one is not a second round trip.
+    ///
+    /// `None` when the program is not paused, when the adapter would not say,
+    /// or when there is no frame to have locals — never a fabricated empty
+    /// list, which would claim a frame has no locals when the truth is that
+    /// nobody could find out.
+    pub locals: Option<FrameLocals>,
     pub captured_output: Vec<OutputChunk>,
     /// You are not seeing all of it.
     ///
@@ -463,6 +561,8 @@ impl StableState {
             hit_breakpoint_ids: Vec::new(),
             exit_code: None,
             frame: None,
+            user_frame: None,
+            locals: None,
             captured_output: Vec::new(),
             output_truncated: false,
             dropped_events: 0,
@@ -803,6 +903,16 @@ pub enum ErrorCode {
     /// Asking for them is a caller mistake, not an adapter failure
     /// (`docs/blueprint/10-async-to-sync.md`).
     SessionNotPaused,
+    /// A `frame_id` or `variables_reference` from a stop the program has left.
+    ///
+    /// Distinct from [`Self::BadRequest`], which is a handle that was never
+    /// handed out at all. The two need different reactions and so cannot share
+    /// a code: a stale handle means "ask again at this stop and retry", a bad
+    /// one means "you made that number up". Both used to reach the adapter,
+    /// where a stale handle either errored obscurely or — the reason this
+    /// exists — collided with one the adapter had since recycled and returned
+    /// somebody else's variables under exit 0 (D075).
+    StaleHandle,
     InvalidLaunchConfig,
     InvalidProjectRoot,
     DapProtocolError,

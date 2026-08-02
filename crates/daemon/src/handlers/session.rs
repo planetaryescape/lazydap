@@ -84,6 +84,7 @@ pub async fn launch(
         launched.state,
         launched.handle,
         state.events(),
+        state.handle_sequence(),
     ));
     session.set_last_thread_id(launched.thread_id);
     session.record_breakpoints(&launched.breakpoints);
@@ -243,6 +244,7 @@ pub async fn execute(
     all_threads: bool,
 ) -> Result<Response> {
     let session = live_session(state, session_id)?;
+    refuse_pointless_pause(&session, movement)?;
     let thread_id = resolve_thread(&session, thread_id).await?;
 
     // Step 1. Dropped at the end of this function, so it covers the wait too.
@@ -299,9 +301,16 @@ pub async fn execute(
     }
 
     let Some(waiting) = waiting else {
+        // Nothing was sent, so nothing was resumed, and the thread resolved
+        // above is not a thread that moved — on a running program codelldb
+        // answers `threads` with id `0`, which is not a thread at all. Saying
+        // "running, thread 0" to that was two inventions in one line: a resume
+        // that did not happen and a thread that does not exist (D076).
+        let already_running = matches!(claim, Some(RunClaim::AlreadyRunning));
         return Ok(Response::Continued {
             session_id,
-            thread_id: Some(thread_id),
+            thread_id: (!already_running).then_some(thread_id),
+            already_running,
         });
     };
 
@@ -321,6 +330,39 @@ pub async fn execute(
         "wait finished",
     );
     Ok(Response::Stepped(Box::new(blob)))
+}
+
+/// Refuse a `pause` on a program that is already stopped.
+///
+/// There is nothing to interrupt and no future stop to wait for, so what the
+/// wait did instead was hand back the stop the program was *already* sitting
+/// at, wearing a fresh `elapsed_ms` — a blob indistinguishable from one the
+/// request had caused. An agent reading it concluded its pause had worked.
+///
+/// This is deliberately not what `continue` on a *running* program does (D076),
+/// and the asymmetry is real rather than an oversight. "Continue" has a second
+/// reading — *get me to the next stop* — and it is the documented ordinary
+/// sequence for a launch without `--stop-on-entry` (D055), so it waits and
+/// answers truthfully about what it did. "Pause" has no second reading: the
+/// program is stopped, that is the state the caller wanted, and the only honest
+/// answers are an error or a fabricated stop. `lazydap status` is the command
+/// for where it is (D081).
+fn refuse_pointless_pause(session: &Arc<Session>, movement: Movement) -> Result<()> {
+    if !matches!(movement, Movement::Pause) || session.state() != SessionState::Paused {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        ErrorCode::BadRequest,
+        format!(
+            "session {} is already stopped; there is nothing to pause \
+             (`lazydap status` says where it is)",
+            session.id,
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": session.id.to_string(),
+        "state": SessionState::Paused,
+    })))
 }
 
 /// Record what the program has just been asked to do, and name the marker so

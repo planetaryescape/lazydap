@@ -23,11 +23,21 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
   "hit_breakpoint_ids": [1],
   "exit_code": null,
   "frame": {
-    "id": 1002,
+    "id": 1,
     "name": "main",
     "line": 19,
     "column": 30,
     "source": { "name": "main.c", "path": "/abs/path/main.c" }
+  },
+  "user_frame": null,
+  "locals": {
+    "frame_id": 1,
+    "variables_reference": 2,
+    "variables": [
+      { "name": "x", "value": "10", "type_name": "int",
+        "evaluate_name": "x", "variables_reference": 0 }
+    ],
+    "truncated": false
   },
   "captured_output": [
     { "category": "stdout", "output": "hello\r\n", "timestamp_ms": 1785433977464 }
@@ -52,6 +62,8 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
 | `hit_breakpoint_ids` | Your breakpoint ids — the same numbers `lazydap break` returned. Empty unless a breakpoint caused the stop. |
 | `exit_code` | The program's status. Present when it finished. `null` otherwise. |
 | `frame` | Where it stopped. `null` when the program is no longer there. |
+| `user_frame` | The nearest frame **below** `frame` that has a source path, present only when `frame` has none. A crash inside a library stops in something like `_platform_strcmp$VARIANT$Base`, which has no file you can open; this is the frame in the code you are debugging. It is never a correction of `frame` — that is genuinely where the program is. **Read `user_frame` first and fall back to `frame`.** `null` when `frame` already has a path, or when no frame in the stack does. |
+| `locals` | The locals of whichever of those two a person would look at, so reading one is not a second command. `frame_id` says which frame they belong to. `null` when the program is not paused or the debugger would not answer — never an empty list standing in for "could not find out". Capped at 100, with `truncated` saying so; page the rest with `variables --reference` and `--start`. |
 | `captured_output` | Everything printed during this call, in order. See below. |
 | `output_truncated` | `true` when you are **not** seeing all of it — either the run outran the 1 MB output cap (what you keep is then a *prefix*; nothing after the cap is spliced on), or events were lost before this call could read them (what you keep is then a *suffix*). |
 | `dropped_events` | How many events were lost before this call could carry them. `0` when nothing was lost that way — including when `output_truncated` was set by the output cap, which drops bytes rather than events. |
@@ -106,7 +118,23 @@ absent when the two agree. Read `reason`.
 ```
 
 `breakpoints` is what your saved breakpoints did on this launch — check
-`verified` here rather than assuming they took.
+`verified` here rather than assuming they took. A `message` appears only on one
+that did **not** verify, where it is the reason; a verified breakpoint carries
+none, because the debugger's commentary on one it accepted contradicted itself
+more often than it informed.
+
+## `continue`, `step` and friends *without* `--wait`
+
+```json
+{ "session_id": "971baa06-…", "state": "running", "thread_id": 26836542,
+  "already_running": false }
+```
+
+`already_running: true` means **nothing was resumed, because nothing was
+stopped** — the request was a no-op and `thread_id` is `null`. It is not a
+failure and not a success at moving the program; it is the honest answer to
+`continue` on a program that is already going. Use `--wait` if what you wanted
+was the next stop.
 
 ## `break` — every mode
 
@@ -119,8 +147,7 @@ same shape, so you parse it once.
   "dry_run": false,
   "breakpoints": [
     { "id": 1, "source": "/abs/path/main.c", "line": 19,
-      "enabled": true, "verified": true,
-      "message": "Resolved locations: 1" }
+      "enabled": true, "verified": true }
   ],
   "not_found": [],
   "applied_to_session": true
@@ -164,18 +191,30 @@ Innermost frame first. A frame with a `source.path` is a file you can read; one
 with only a `source_reference` is code the debugger holds itself (a system
 stub, disassembly) and has no file on disk.
 
-`id` is a handle for `scopes --frame` and `eval --frame`. **It stops being
-valid the moment the program moves** — fetch a new stack after every step.
+`id` is a handle for `scopes --frame` and `eval --frame`. It is **not** a
+position in the stack — `--frame 0` is not "the top frame", it is a number
+nobody handed out, and lazydap refuses it saying so.
+
+**A handle stops being valid the moment the program moves,** and again when the
+session ends. Fetch a new stack after every step. Using an old one is refused
+with `StaleHandle` and exit 1 rather than answered: handles are numbered by the
+daemon and never reused, so lazydap can always tell an old one from a current
+one, and you can never be given another frame's — or another *session's* — data
+by accident. Both `frame_id` and `variables_reference` work this way.
 
 ## `scopes`
 
 ```json
 { "scopes": [
-    { "name": "Local", "variables_reference": 1005, "expensive": false },
-    { "name": "Static", "variables_reference": 1006, "expensive": false },
-    { "name": "Global", "variables_reference": 1007, "expensive": false },
-    { "name": "Registers", "variables_reference": 1008, "expensive": false } ] }
+    { "name": "Local", "variables_reference": 5, "expensive": false },
+    { "name": "Static", "variables_reference": 6, "expensive": false },
+    { "name": "Global", "variables_reference": 7, "expensive": false },
+    { "name": "Registers", "variables_reference": 8, "expensive": false } ] }
 ```
+
+Usually you do not need this call at all: the `--wait` blob already carries the
+stopped frame's locals. Reach for it when you want another scope, or the locals
+of a frame further down.
 
 `Local` is almost always the one you want. Pass its `variables_reference` to
 `variables`. `expensive: true` warns that expanding it is slow.
@@ -189,7 +228,8 @@ valid the moment the program moves** — fetch a new stack after every step.
     { "name": "[100]", "value": "100", "type_name": "int",
       "evaluate_name": "big[100]", "variables_reference": 0 },
     { "name": "buf", "value": "char [64]", "type_name": "char [64]",
-      "evaluate_name": "buf", "variables_reference": 1012 } ] }
+      "evaluate_name": "buf", "variables_reference": 12 } ],
+  "truncated": false }
 ```
 
 `value` is always a string — the debugger's own rendering, which is what you
@@ -207,6 +247,20 @@ is what you can actually pass. Absent when the debugger did not supply one.
 including ones that ignore them on the wire. `--filter` is passed straight to
 the debugger, and a debugger that does not implement it returns everything —
 lazydap does not second-guess which children are indexed.
+
+`truncated` means **there is more than you are seeing** — whatever narrowed the
+list. It is `true` when the default cap bit *and* when your own `--count` left
+rows behind, so you can page on it without tracking which limit applied. A
+window that happens to reach the end of the list reports `false`.
+
+**At most 200 rows come back by default**, so a `Vec` of two thousand does not
+silently become two thousand and one rows of your context. Page on with
+`--start`, or raise the cap with `--max N` — `--max 0` lifts it entirely. When
+both are given, the narrower wins. Values themselves are never shortened: a
+truncated *list* is recoverable, a truncated *value* would be a claim about the
+data.
+
+`--count 0` and `--max 0` both mean "no limit", the way `--timeout 0` does.
 
 ## `eval`
 
@@ -252,7 +306,7 @@ Reading it does not consume it.
   "instance": "lazydap-myproject",
   "daemon_pid": 77256,
   "uptime_ms": 776,
-  "protocol_version": 7,
+  "protocol_version": 8,
   "lazydap_version": "0.1.0",
   "session": {
     "session_id": "971baa06-...",

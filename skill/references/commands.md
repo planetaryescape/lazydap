@@ -268,7 +268,7 @@ Usage: lazydap stack [OPTIONS]
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--thread <THREAD>` | no | - | Which thread. Defaults to the one that stopped last |
-| `--levels <LEVELS>` | no | - | How many frames. Defaults to all of them |
+| `--levels <LEVELS>` | no | - | How many frames. `0` or unset means all of them |
 | `--start <START>` | no | - | Skip this many frames from the top |
 
 ### `lazydap scopes`
@@ -281,7 +281,7 @@ Usage: lazydap scopes [OPTIONS]
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
-| `--frame <FRAME>` | no | - | Which frame. Defaults to the top one |
+| `--frame <FRAME>` | no | - | A frame id from `lazydap stack` — not a position in it. Defaults to the top frame |
 
 ### `lazydap variables`
 
@@ -296,7 +296,8 @@ Usage: lazydap variables [OPTIONS] --reference <REFERENCE>
 | `--reference <REFERENCE>` | yes | - | The `variables_reference` from `scopes` or a parent variable |
 | `--filter <FILTER>` | no | `all` | Fetch only named members or only indexed elements |
 | `--start <START>` | no | - | Skip this many |
-| `--count <COUNT>` | no | - | Take at most this many |
+| `--count <COUNT>` | no | - | Take at most this many. `0` means no limit |
+| `--max <MAX>` | no | - | Most rows to answer with, before the list is truncated and flagged. `0` lifts the cap |
 
 ### `lazydap eval`
 
@@ -309,7 +310,7 @@ Usage: lazydap eval [OPTIONS] <EXPRESSION>
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `<EXPRESSION>` | yes | - | The expression, in the debuggee's own language |
-| `--frame <FRAME>` | no | - | Which frame to evaluate in. Defaults to the top one |
+| `--frame <FRAME>` | no | - | A frame id from `lazydap stack` — not a position in it. Defaults to the top frame |
 | `--context <CONTEXT>` | no | `watch` | How the adapter should read the expression. `watch` and `hover` evaluate it in the program; `repl` runs it as an adapter command, which for codelldb means an LLDB command |
 
 ### `lazydap threads`

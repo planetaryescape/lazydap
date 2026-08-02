@@ -4,7 +4,7 @@ All notable changes to lazydap are recorded here.
 
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The **lazydap protocol** is versioned separately from the binary. It is at **v7**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+The **lazydap protocol** is versioned separately from the binary. It is at **v8**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
 
 ## [Unreleased]
 
@@ -20,11 +20,33 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v7*
 
 **Protocol v4 → v5.** The watch requests and the `WatchUpdated` event. A `Request` variant an older daemon does not know is not a soft failure — it cannot decode the frame at all, so it never reaches the version field it would have refused on. The bump turns "old daemon still running" into the `VersionMismatch` that `lazydap shutdown` clears and auto-spawn replaces.
 
+**A stop now answers the next two questions as well.** The `--wait` blob carries `user_frame` — the nearest frame in *your* code, for when the program died inside a library and the frame it stopped in is `_platform_strcmp$VARIANT$Base` with no file you can open — and `locals`, the variables of whichever of those two frames is the one worth reading. `frame` is untouched and still says exactly where it stopped. Reading a local was two commands and diagnosing a crash was five; both are now one. Measured at about a millisecond against a wait that is dominated by the program itself, so it is always on.
+
+**`lazydap variables` has a default cap.** 200 rows, with `truncated` on the response saying when it bit, `--start` to page and `--max N` (or `--max 0`) to raise or lift it. A `Vec` of two thousand used to come back as two thousand and one rows with nothing to indicate it. Values themselves are never shortened — a truncated list is recoverable, a truncated value is a claim about the data.
+
+**`0` means "no limit" on `--levels`, `--count` and `--max`,** the way it already did on `--timeout`. `stack --levels 0` used to return an empty list of frames under exit 0.
+
+**Protocol v7 → v8.** `frame_id` and `variables_reference` are lazydap's own handles rather than the adapter's numbers, `Response::Continued` gained `already_running`, `Response::Variables` became a struct with `truncated`, the `--wait` blob gained `user_frame` and `locals`, and `ErrorCode` gained `StaleHandle`.
+
 **Protocol v5 → v7.** v6 added the `delve` adapter — a new `AdapterKind` variant, which an older daemon cannot decode at all. v7 changed four things about what the daemon reports: `threads` may omit a thread's `name`, the `--wait` blob and the `Stopped` event gained `adapter_thread_id`, `capabilities` gained `supports_variable_paging`, and a variable gained `evaluate_name`.
 
 **`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
 
 ### Fixed
+
+**A stale `variables_reference` could return another *session's* data.** Handles were numbered per session, so one minted in a session that has since ended was a live handle in the next one — and because inspection commands resolve against whichever session is current, a reference remembered across a `disconnect` came back full of a different program's variables under exit 0. Handles are now numbered by the daemon and never reused, and one from an ended session is refused with `StaleHandle` saying so.
+
+**`truncated` now means "there is more than you are seeing", whatever narrowed the list.** `--count 5` on a 2000-element container used to return five rows and `truncated: false`, which contradicts the field and stops a client that pages on it. When both `--count` and `--max` are given the narrower wins, and a window that reaches the end of the list correctly reports `false`.
+
+**A stale `variables_reference` could return another frame's data.** The adapter's handles stop being valid the moment the program moves, and an adapter is free to hand the same number out again at the next stop for something else — so a reference remembered across a `continue` either errored obscurely or, worse, was answered with somebody else's variables under exit 0. lazydap now mints its own handles, one per stop and never reused, and refuses one from an earlier stop with `StaleHandle` before the debugger is asked anything.
+
+**`eval --frame 0` claimed the program was running while it was stopped.** `--frame` takes an opaque frame id and `0` is the obvious thing to type; codelldb reports an unresolvable frame id as *"can't evaluate expressions when the process is running"*, which is false and sends an agent off to poll a program that is never going to move. Unknown frame ids no longer reach the debugger: the refusal names the problem and says that ids come from `lazydap stack`. The `--help` for every `--frame` says so too.
+
+**`continue` on an already-running program reported a resume that never happened.** It answered `{"state":"running","thread_id":0}` under exit 0 — but nothing was sent, because there was nothing to resume, and `0` is what codelldb answers a thread query on a running process with rather than a real thread. It now reports `already_running: true` and no thread at all.
+
+**`launch` returned breakpoints that contradicted themselves.** codelldb answers with `verified: true` alongside `Resolved locations: 0`, then corrects itself by event a moment later — making a working breakpoint look broken. A `message` is now kept only on a breakpoint that did *not* verify, where it is the reason.
+
+**`pause --wait` on a program that was already stopped re-reported the previous stop** with a fresh `elapsed_ms`, indistinguishable from a pause that had worked. It is now refused, naming the state.
 
 **`lazydap pause --wait` reported a crash.** codelldb implements `pause` by signalling the process, and LLDB calls a signal stop an exception — so asking a program to stop came back as `"reason": "exception"`, which reads as a segfault. It is now `"reason": "pause"`, with the adapter's own word kept in `raw_reason`. The same fix covers a `pause` racing a step: both are tracked, so neither answer is lost.
 

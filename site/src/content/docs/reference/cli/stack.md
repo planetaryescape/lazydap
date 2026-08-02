@@ -18,7 +18,7 @@ lazydap stack [OPTIONS]
 | Flag | Description |
 | --- | --- |
 | `--thread <THREAD>` | Which thread. Defaults to the one that stopped last |
-| `--levels <LEVELS>` | How many frames. Defaults to all of them |
+| `--levels <LEVELS>` | How many frames. `0` or unset means all of them |
 | `--start <START>` | Skip this many frames from the top |
 
 Plus the [options every command takes](/reference/cli/#options-every-command-takes).

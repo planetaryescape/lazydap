@@ -104,6 +104,7 @@ pub async fn variables(
     filter: VariableFilter,
     start: Option<u32>,
     count: Option<u32>,
+    max: Option<u32>,
     format: OutputFormat,
 ) -> Result<()> {
     let mut client = ensure_daemon_running(instance).await?;
@@ -116,11 +117,14 @@ pub async fn variables(
             filter,
             start,
             count,
+            max,
         })
         .await?;
-    let Response::Variables(variables) = response else {
+    let Response::Variables(list) = response else {
         return Err(unexpected(response));
     };
+    let truncated = list.truncated;
+    let variables = list.variables;
 
     let rows = variables
         .iter()
@@ -141,8 +145,19 @@ pub async fn variables(
         })
         .collect();
 
+    if truncated {
+        // On stderr so it cannot corrupt a pipeline, but said out loud: a
+        // partial list that looks complete is the thing the cap must not
+        // create. The JSON carries `truncated` for anything parsing it.
+        eprintln!(
+            "warning: more variables than the cap; showing a prefix. \
+             Use `--start {}` for the next page, or `--max 0` for all of them",
+            start.unwrap_or(0) as usize + variables.len(),
+        );
+    }
+
     View::list(
-        serde_json::json!({ "variables": variables }),
+        serde_json::json!({ "variables": variables, "truncated": truncated }),
         &["name", "value", "type", "reference"],
         rows,
     )

@@ -1,8 +1,9 @@
 use crate::adapter::AdapterHandle;
 use crate::debuggee::Debuggee;
+use crate::handles::{HandleKind, HandleTable};
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointStatus, EndReason, OutputChunk,
-    SessionId, SessionState,
+    SessionId, SessionState, StackFrame,
 };
 use lazydap_protocol::{
     ErrorCode, Event, IpcError, LAZYDAP_PROTOCOL_VERSION, SessionSummary, StatusReport,
@@ -35,6 +36,10 @@ pub struct DaemonState {
     /// Keyed by id even though v0.1 allows one at a time (D007): the map is
     /// what makes lifting that limit a daemon-only change.
     sessions: RwLock<HashMap<SessionId, Slot>>,
+    /// The frame ids and variables references this daemon has handed out, as
+    /// one counter across every session it runs. See [`HandleTable`] — a
+    /// per-session counter made one session's handles live in the next (D082).
+    handle_sequence: Arc<AtomicU64>,
     event_tx: broadcast::Sender<SeqEvent>,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -71,9 +76,15 @@ impl DaemonState {
             store,
             started_at: Instant::now(),
             sessions: RwLock::new(HashMap::new()),
+            handle_sequence: Arc::new(AtomicU64::new(0)),
             event_tx,
             shutdown_tx,
         })
+    }
+
+    /// The counter every session mints its handles from.
+    pub fn handle_sequence(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.handle_sequence)
     }
 
     pub fn uptime_ms(&self) -> u64 {
@@ -445,6 +456,9 @@ pub struct Session {
     /// `breakpoint` event or a `hitBreakpointIds` list, both of which speak
     /// adapter ids exclusively.
     breakpoints: Mutex<BreakpointMap>,
+    /// The frame ids and variables references this session has handed out, and
+    /// which stop each belongs to. See [`crate::handles`].
+    handles: Mutex<HandleTable>,
     /// The program the adapter started for us, once it has said which pid.
     ///
     /// Set only for a program *we launched*. When `attach` lands it must stay
@@ -462,6 +476,9 @@ impl Session {
         state: SessionState,
         adapter: AdapterHandle,
         event_tx: broadcast::Sender<SeqEvent>,
+        // The daemon's counter, not this session's: a handle must not mean one
+        // thing here and something else in the session that follows (D082).
+        handle_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             id,
@@ -478,6 +495,7 @@ impl Session {
             last_thread_id: RwLock::new(None),
             outstanding: RwLock::new(Markers::default()),
             breakpoints: Mutex::new(BreakpointMap::default()),
+            handles: Mutex::new(HandleTable::new(handle_sequence)),
             debuggee: Mutex::new(None),
         }
     }
@@ -667,6 +685,46 @@ impl Session {
 
     fn bump_stop_generation(&self) {
         self.stop_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The frame, with our handle in place of the adapter's id.
+    ///
+    /// `fence` is the generation the frame was read at, and the caller must
+    /// have confirmed the session is still there — a handle stamped with a stop
+    /// the data did not come from is the lie this whole mechanism removes.
+    pub fn mint_frame(&self, fence: u64, mut frame: StackFrame) -> StackFrame {
+        frame.id = lock(&self.handles).mint(fence, HandleKind::Frame, frame.id);
+        frame
+    }
+
+    /// Our handle for one of the adapter's frame ids, on its own.
+    pub fn mint_frame_id(&self, fence: u64, adapter: i64) -> i64 {
+        lock(&self.handles).mint(fence, HandleKind::Frame, adapter)
+    }
+
+    /// Our handle for a `variables_reference`, **preserving DAP's `0`**.
+    ///
+    /// Zero is not a reference: it is "this is a scalar, there is nothing
+    /// inside it". Minting a handle for it would turn every scalar into
+    /// something a client offers to expand. The rule lives here, in one place,
+    /// because it is an invariant rather than a detail — three call sites each
+    /// remembering it is three chances to forget.
+    pub fn mint_variables_reference(&self, fence: u64, adapter: i64) -> i64 {
+        if adapter == 0 {
+            return 0;
+        }
+        lock(&self.handles).mint(fence, HandleKind::Variables, adapter)
+    }
+
+    /// The adapter's own number for a handle a caller presented, or a refusal
+    /// naming why it is no good.
+    pub fn resolve_handle(
+        &self,
+        fence: u64,
+        kind: HandleKind,
+        handle: i64,
+    ) -> Result<i64, IpcError> {
+        lock(&self.handles).resolve(fence, kind, handle)
     }
 
     /// Whether the session is still sitting at the stop `fence` was taken at.
@@ -1070,6 +1128,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             event_tx,
+            Arc::new(AtomicU64::new(0)),
         )
     }
 
@@ -1107,6 +1166,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             state.events(),
+            Arc::new(AtomicU64::new(0)),
         ));
 
         let mut events = state.events().subscribe();
@@ -1281,6 +1341,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             tokio::sync::broadcast::channel(16).0,
+            Arc::new(AtomicU64::new(0)),
         );
         for index in 0..(EVENT_BUFFER_CAPACITY + 5) {
             session.emit(output_event(session.id, &format!("line {index}")));

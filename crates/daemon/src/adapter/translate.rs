@@ -152,12 +152,18 @@ pub fn reconcile_breakpoints(
     returned
         .into_iter()
         .enumerate()
-        .map(|(index, adapter)| AdapterBreakpoint {
-            id: requested.get(index).map(|breakpoint| breakpoint.id),
-            adapter_id: adapter.id,
-            verified: adapter.verified,
-            line: adapter.line,
-            message: adapter.message,
+        .map(|(index, adapter)| {
+            AdapterBreakpoint {
+                id: requested.get(index).map(|breakpoint| breakpoint.id),
+                adapter_id: adapter.id,
+                verified: adapter.verified,
+                line: adapter.line,
+                message: adapter.message,
+            }
+            // codelldb's `Resolved locations: 0` arrives beside `verified:
+            // true` and is corrected by an event a moment later. Carrying it
+            // made a working breakpoint look broken (D077).
+            .without_settled_message()
         })
         .collect()
 }

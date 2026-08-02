@@ -90,6 +90,35 @@ pub struct AdapterBreakpoint {
     pub message: Option<String>,
 }
 
+impl AdapterBreakpoint {
+    /// Drop a `message` that a verified breakpoint has no business carrying.
+    ///
+    /// **A message explains a refusal. A breakpoint that took has nothing to
+    /// explain.** codelldb answers `setBreakpoints` during launch with
+    /// `verified: true` and `message: "Resolved locations: 0"` — the
+    /// verification is real and the count is simply not settled yet, and a
+    /// `breakpoint` event corrects it to `1` a moment later. Held together in
+    /// one response those two fields contradict each other, and the one a
+    /// reader believes is the wrong one: `verified` is trustworthy (an
+    /// unverifiable breakpoint on a comment line reports `false` in the same
+    /// response), so a good breakpoint was made to look broken by commentary
+    /// about it.
+    ///
+    /// The alternative was to hold the launch open until the adapter settled,
+    /// which pays for a cosmetic field with launch latency on every session.
+    /// Dropping the message costs nothing real: where a breakpoint *ended up*
+    /// is `line`, and whether it took is `verified`. What is left is the case
+    /// the field is actually read for — an unverified breakpoint, where the
+    /// message is the reason (D077).
+    #[must_use]
+    pub fn without_settled_message(mut self) -> Self {
+        if self.verified {
+            self.message = None;
+        }
+        self
+    }
+}
+
 /// A breakpoint plus the adapter's current opinion of it. What `lazydap break`
 /// and `lazydap break --list` print.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

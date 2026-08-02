@@ -17,7 +17,7 @@ lazydap scopes [OPTIONS]
 
 | Flag | Description |
 | --- | --- |
-| `--frame <FRAME>` | Which frame. Defaults to the top one |
+| `--frame <FRAME>` | A frame id from `lazydap stack` — not a position in it. Defaults to the top frame |
 
 Plus the [options every command takes](/reference/cli/#options-every-command-takes).
 

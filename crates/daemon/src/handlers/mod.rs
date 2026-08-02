@@ -116,7 +116,19 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             filter,
             start,
             count,
-        } => inspect::variables(state, session_id, variables_reference, filter, start, count).await,
+            max,
+        } => {
+            inspect::variables(
+                state,
+                session_id,
+                variables_reference,
+                filter,
+                start,
+                count,
+                max,
+            )
+            .await
+        }
         Request::Eval {
             session_id,
             expression,

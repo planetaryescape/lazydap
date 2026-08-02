@@ -808,3 +808,379 @@ fn listing_ids_feeds_removing_by_id() {
     let left = sandbox.json(&["--format", "json", "break", "--list"]);
     assert_eq!(left["breakpoints"].as_array().map(Vec::len), Some(0));
 }
+
+/// The error a refused command printed to stderr.
+fn refusal(output: &Output, command: &[&str]) -> Value {
+    assert!(
+        !output.status.success(),
+        "`lazydap {}` should have failed",
+        command.join(" "),
+    );
+    serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+        unreachable!(
+            "`lazydap {}` printed something that is not JSON ({error}): {}",
+            command.join(" "),
+            String::from_utf8_lossy(&output.stderr),
+        )
+    })
+}
+
+#[test]
+fn a_crash_inside_a_library_names_the_frame_in_the_user_s_code() {
+    // The hunter's segfault: codelldb stopped in
+    // `_platform_strcmp$VARIANT$Base`, which has a `source_reference` and no
+    // path, and finding `lookup_key` took a second `stack` call. `frame` still
+    // says where it stopped — overwriting it would be lying about that — and
+    // `user_frame` answers the question the caller actually had (D078).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("usrfrm");
+
+    let program = toolchain.build("library_crash.c");
+    sandbox.json(&["--format", "json", "launch", &program.to_string_lossy()]);
+    let blob = sandbox.wait("30");
+
+    assert_eq!(blob["state"], "paused", "got: {blob}");
+    let top = &blob["frame"];
+    assert!(
+        top["source"]["path"].is_null(),
+        "the premise of this test is a top frame with no path: {top}",
+    );
+
+    let user = &blob["user_frame"];
+    assert_eq!(user["name"], "lookup_key", "got: {user}");
+    assert!(
+        user["source"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("library_crash.c")),
+        "the user frame has to name a file somebody can open: {user}",
+    );
+    assert_ne!(
+        user["id"], top["id"],
+        "and be a different frame from the one it stopped in",
+    );
+
+    // And the locals that explain it, which are the *responsible* frame's:
+    // `strcmp` has none worth reading, `lookup_key` has the key it was given.
+    let locals = &blob["locals"];
+    assert_eq!(locals["frame_id"], user["id"], "got: {locals}");
+    let names: Vec<&str> = locals["variables"]
+        .as_array()
+        .expect("locals")
+        .iter()
+        .filter_map(|variable| variable["name"].as_str())
+        .collect();
+    assert!(names.contains(&"wanted"), "got: {names:?}");
+}
+
+#[test]
+fn a_handle_from_an_earlier_stop_is_refused_rather_than_answered() {
+    // The dangerous half of the finding. A `variables_reference` the caller
+    // remembered across a `continue` used to reach the adapter, which had since
+    // recycled that number for another frame — so somebody else's variables
+    // came back under exit 0, with nothing saying the question was about a
+    // moment that had passed (D075).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("stale");
+
+    let program = toolchain.build("inspects.c");
+    // Inside the loop, so it is hit again and again and there is a genuine
+    // second stop for the first stop's handles to go stale against.
+    sandbox.breakpoint("inspects.c", 14);
+    sandbox.launch(&program);
+
+    let first = sandbox.wait("30");
+    assert_eq!(first["state"], "paused", "got: {first}");
+    let stale_reference = first["locals"]["variables_reference"].to_string();
+    let stale_frame = first["frame"]["id"].to_string();
+
+    // Good at the stop it belongs to.
+    let here = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &stale_reference,
+    ]);
+    assert!(
+        here["variables"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "the handle has to work where it was issued: {here}",
+    );
+
+    let second = sandbox.wait("30");
+    assert_eq!(second["state"], "paused", "got: {second}");
+    assert_ne!(
+        second["locals"]["variables_reference"], first["locals"]["variables_reference"],
+        "a new stop must not reissue the previous stop's handle",
+    );
+
+    for command in [
+        vec![
+            "--format",
+            "json",
+            "variables",
+            "--reference",
+            &stale_reference,
+        ],
+        vec!["--format", "json", "eval", "i", "--frame", &stale_frame],
+    ] {
+        let error = refusal(&sandbox.run(&command), &command);
+        assert_eq!(error["error"], "StaleHandle", "got: {error}");
+        assert_eq!(error["details"]["stale"], true, "got: {error}");
+    }
+}
+
+#[test]
+fn a_frame_id_nobody_handed_out_says_where_frame_ids_come_from() {
+    // `--frame 0` is the obvious thing to type and is always wrong: the flag
+    // takes an opaque id, not a position in the stack. It used to reach
+    // codelldb, which answered `can't evaluate expressions when the process is
+    // running` about a program that was plainly stopped — and an agent reading
+    // that starts polling something that is never going to move (D075).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("badfrm");
+
+    let program = toolchain.build("inspects.c");
+    sandbox.launch(&program);
+
+    let status = sandbox.json(&["--format", "json", "status"]);
+    assert_eq!(status["session"]["state"], "paused", "got: {status}");
+
+    for command in [
+        vec!["--format", "json", "eval", "sum", "--frame", "0"],
+        vec!["--format", "json", "scopes", "--frame", "0"],
+    ] {
+        let error = refusal(&sandbox.run(&command), &command);
+        assert_eq!(error["error"], "BadRequest", "got: {error}");
+
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("lazydap stack"),
+            "a refusal has to say where a good one comes from: {error}",
+        );
+        assert!(
+            !message.contains("running"),
+            "and must never claim a stopped program is running: {error}",
+        );
+    }
+}
+
+#[test]
+fn what_the_daemon_reports_at_a_stop_is_bounded_and_does_not_contradict_itself() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("atstop");
+
+    let program = toolchain.build("inspects.c");
+    sandbox.breakpoint("inspects.c", 20);
+    let launched = sandbox.launch(&program);
+
+    // codelldb answers the launch with `verified: true` *and* `Resolved
+    // locations: 0`, then corrects itself by event a moment later. Held
+    // together in one response those two made a working breakpoint look
+    // broken (D077).
+    for breakpoint in launched["breakpoints"].as_array().expect("breakpoints") {
+        if breakpoint["verified"] == true {
+            assert!(
+                breakpoint["message"].is_null(),
+                "a verified breakpoint has nothing to explain: {breakpoint}",
+            );
+        }
+    }
+
+    // The program is stopped at entry, so there is nothing to interrupt. This
+    // used to hand back the stop it was already sitting at, wearing a fresh
+    // `elapsed_ms` (D081).
+    let command = ["--format", "json", "pause", "--wait", "--timeout", "5"];
+    let error = refusal(&sandbox.run(&command), &command);
+    assert_eq!(error["error"], "BadRequest", "got: {error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already stopped"),
+        "got: {error}",
+    );
+
+    sandbox.wait("30");
+
+    // `0` means no limit, the way `--timeout 0` does. It used to mean "none of
+    // them", answered with an empty list under exit 0 (D079).
+    let all = sandbox.json(&["--format", "json", "stack", "--levels", "0"]);
+    assert!(
+        all["frames"]
+            .as_array()
+            .is_some_and(|frames| !frames.is_empty()),
+        "`--levels 0` means all of them, not none of them: {all}",
+    );
+
+    // `big` is two thousand elements. Unasked-for, that is most of an agent's
+    // context spent on one variable, and nothing used to say so (D080).
+    let big = sandbox.json(&["--format", "json", "eval", "big"]);
+    let reference = big["variables_reference"].to_string();
+
+    let capped = sandbox.json(&["--format", "json", "variables", "--reference", &reference]);
+    let rows = capped["variables"].as_array().expect("variables").len();
+    assert!(rows < 2_000, "the default has to cap something: {rows}");
+    assert_eq!(capped["truncated"], true, "and say that it did: {capped}");
+
+    let whole = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--max",
+        "0",
+    ]);
+    assert!(
+        whole["variables"].as_array().expect("variables").len() > rows,
+        "`--max 0` has to lift the cap: {whole}",
+    );
+    assert_eq!(whole["truncated"], false, "and nothing is missing then");
+}
+
+#[test]
+fn a_handle_from_a_session_that_has_ended_is_refused_by_the_next_one() {
+    // The same failure as a recycled adapter number, one scope out. Handles
+    // used to be numbered from `1` per session, and the inspection commands
+    // resolve against whichever session is current — so session A's reference
+    // was a *live* handle in session B and came back full of another program's
+    // variables under exit 0, with nothing to say who had answered (D082).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("xsess");
+
+    // Session A: stop inside the library crash, where the locals are distinctive.
+    let crashes = toolchain.build("library_crash.c");
+    sandbox.json(&["--format", "json", "launch", &crashes.to_string_lossy()]);
+    let first = sandbox.wait("30");
+    let stale = first["locals"]["variables_reference"].to_string();
+    let names = |value: &Value| -> Vec<String> {
+        value["variables"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row["name"].as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let theirs = names(&sandbox.json(&["--format", "json", "variables", "--reference", &stale]));
+    assert!(theirs.contains(&"wanted".to_string()), "got: {theirs:?}");
+
+    // Session B: a different program, in the same daemon.
+    sandbox.run(&["disconnect"]);
+    let inspects = toolchain.build("inspects.c");
+    sandbox.breakpoint("inspects.c", 20);
+    sandbox.json(&["--format", "json", "launch", &inspects.to_string_lossy()]);
+    let second = sandbox.wait("30");
+    assert_eq!(second["state"], "paused", "got: {second}");
+    // Mint enough handles that session A's number would have been reachable
+    // under the old per-session counter.
+    sandbox.json(&["--format", "json", "scopes"]);
+
+    let command = ["--format", "json", "variables", "--reference", &stale];
+    let error = refusal(&sandbox.run(&command), &command);
+    assert_eq!(error["error"], "StaleHandle", "got: {error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("session that has ended"),
+        "and says which kind of stale it is: {error}",
+    );
+}
+
+#[test]
+fn a_window_that_leaves_rows_behind_says_so_however_it_was_narrowed() {
+    // `--count 5` on a 2000-element container returned five rows and
+    // `truncated: false`, which contradicts the field's documented meaning and
+    // stops a client that pages on it. The flag means "there is more than you
+    // are seeing", whatever narrowed the list — D072's lesson, applied to this
+    // field (D083).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("window");
+
+    let program = toolchain.build("inspects.c");
+    sandbox.breakpoint("inspects.c", 20);
+    sandbox.launch(&program);
+    sandbox.wait("30");
+
+    let big = sandbox.json(&["--format", "json", "eval", "big"]);
+    let reference = big["variables_reference"].to_string();
+    let rows = |value: &Value| value["variables"].as_array().expect("variables").len();
+
+    // A caller's own window, well inside the cap, that still leaves rows behind.
+    let counted = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--count",
+        "5",
+    ]);
+    assert_eq!(rows(&counted), 5, "got: {counted}");
+    assert_eq!(
+        counted["truncated"], true,
+        "five of two thousand is not the whole list: {counted}",
+    );
+
+    // The tail: a window that happens to reach the end leaves nothing behind
+    // and must not claim it did.
+    let tail = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--start",
+        "1998",
+        "--count",
+        "50",
+        "--max",
+        "0",
+    ]);
+    assert_eq!(
+        tail["truncated"], false,
+        "nothing was left behind, so nothing is missing: {tail}",
+    );
+
+    // The narrower of the two limits wins, and is still reported honestly.
+    let both = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--count",
+        "500",
+        "--max",
+        "5",
+    ]);
+    assert_eq!(rows(&both), 5, "the cap binds under a wider count: {both}");
+    assert_eq!(both["truncated"], true);
+}
+
+#[test]
+fn continuing_a_program_that_is_already_running_reports_it_and_invents_no_thread() {
+    // Nothing is sent, because there is nothing to ask for (D055). Reporting
+    // that as an ordinary resume — with the thread id codelldb answers a
+    // `threads` call on a running process with, which is `0`, which is not a
+    // thread — was two inventions in one line (D076).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("running");
+
+    let program = toolchain.build("spins.c");
+    // No `--stop-on-entry`: the program is running from the moment it starts.
+    sandbox.json(&["--format", "json", "launch", &program.to_string_lossy()]);
+
+    let answer = sandbox.json(&["--format", "json", "continue"]);
+
+    assert_eq!(answer["already_running"], true, "got: {answer}");
+    assert!(
+        answer["thread_id"].is_null(),
+        "nothing was resumed, so no thread was: {answer}",
+    );
+}

@@ -213,7 +213,7 @@ pub enum Command {
         #[arg(long)]
         thread: Option<i64>,
 
-        /// How many frames. Defaults to all of them.
+        /// How many frames. `0` or unset means all of them.
         #[arg(long)]
         levels: Option<u32>,
 
@@ -224,7 +224,8 @@ pub enum Command {
 
     /// Show the variable scopes of a frame.
     Scopes {
-        /// Which frame. Defaults to the top one.
+        /// A frame id from `lazydap stack` — not a position in it. Defaults to
+        /// the top frame.
         #[arg(long)]
         frame: Option<i64>,
     },
@@ -243,9 +244,14 @@ pub enum Command {
         #[arg(long)]
         start: Option<u32>,
 
-        /// Take at most this many.
+        /// Take at most this many. `0` means no limit.
         #[arg(long)]
         count: Option<u32>,
+
+        /// Most rows to answer with, before the list is truncated and flagged.
+        /// `0` lifts the cap.
+        #[arg(long)]
+        max: Option<u32>,
     },
 
     /// Evaluate an expression in the debuggee.
@@ -253,7 +259,8 @@ pub enum Command {
         /// The expression, in the debuggee's own language.
         expression: String,
 
-        /// Which frame to evaluate in. Defaults to the top one.
+        /// A frame id from `lazydap stack` — not a position in it. Defaults to
+        /// the top frame.
         #[arg(long)]
         frame: Option<i64>,
 

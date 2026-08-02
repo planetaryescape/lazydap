@@ -164,6 +164,11 @@ fn classify(code: ErrorCode) -> (&'static str, u8) {
         ErrorCode::SessionNotFound => ("SessionNotFound", exit::GENERAL),
         ErrorCode::SessionAlreadyActive => ("SessionAlreadyActive", exit::GENERAL),
         ErrorCode::SessionNotPaused => ("SessionNotPaused", exit::GENERAL),
+        // A caller mistake, like `BadRequest`, but not a *usage* one: the
+        // command was spelled correctly and the handle was real when it was
+        // issued. Exit 2 would tell a script to check its arguments, when what
+        // it should do is ask again at this stop.
+        ErrorCode::StaleHandle => ("StaleHandle", exit::GENERAL),
         ErrorCode::InvalidLaunchConfig => ("InvalidLaunchConfig", exit::GENERAL),
         ErrorCode::InvalidProjectRoot => ("InvalidProjectRoot", exit::GENERAL),
         ErrorCode::DapProtocolError => ("DapProtocolError", exit::GENERAL),

@@ -7,10 +7,19 @@
 
 use super::{Result, find_session, live_session, paused_session};
 use crate::adapter::AdapterError;
+use crate::handles::HandleKind;
 use crate::state::{DaemonState, Session};
 use lazydap_core::{EvalContext, SessionId, VariableFilter};
-use lazydap_protocol::{ErrorCode, IpcError, Response};
+use lazydap_protocol::{ErrorCode, IpcError, Response, VariableList};
 use std::sync::Arc;
+
+/// How many variables one `variables` answer carries when nobody said.
+///
+/// A `Vec` of two thousand expands to two thousand and one rows, and an agent
+/// that asked what a container held used most of its context finding out —
+/// with nothing in the response to say so. The number is a default rather than
+/// a limit: `--max 0` lifts it entirely for a caller who means it (D080).
+pub const DEFAULT_VARIABLE_CAP: u32 = 200;
 
 pub async fn threads(state: &Arc<DaemonState>, session_id: SessionId) -> Result<Response> {
     // Deliberately not `paused_session`: which threads exist is a fair
@@ -33,6 +42,7 @@ pub async fn stack_trace(
     levels: Option<u32>,
 ) -> Result<Response> {
     let session = paused_session(state, session_id)?;
+    let fence = session.stop_generation();
     let thread_id = match thread_id {
         Some(thread_id) => thread_id,
         None => stopped_thread(&session)?,
@@ -40,9 +50,22 @@ pub async fn stack_trace(
 
     let (frames, total) = session
         .adapter()
-        .stack_trace(thread_id, start_frame, levels)
+        // `0` means "no limit" everywhere else a count is asked for — it is
+        // what `--timeout 0` means — and DAP says the same thing about
+        // `levels`. Answering it with an empty list under exit 0, which is what
+        // passing it through did, is the one reading nobody could have wanted
+        // (D079).
+        .stack_trace(thread_id, start_frame, levels.filter(|levels| *levels > 0))
         .await
         .map_err(AdapterError::into_ipc)?;
+
+    // Before the ids are handed out, not after: a handle stamped with a stop
+    // its frame did not come from is precisely what the table exists to stop.
+    still_paused(&session, fence)?;
+    let frames = frames
+        .into_iter()
+        .map(|frame| session.mint_frame(fence, frame))
+        .collect();
     Ok(Response::StackTrace { frames, total })
 }
 
@@ -53,14 +76,20 @@ pub async fn scopes(
 ) -> Result<Response> {
     let session = paused_session(state, session_id)?;
     let fence = session.stop_generation();
-    let frame_id = resolve_frame(&session, frame_id).await?;
+    let frame_id = resolve_frame(&session, fence, frame_id).await?;
     still_paused(&session, fence)?;
 
-    let scopes = session
+    let mut scopes = session
         .adapter()
         .scopes(frame_id)
         .await
         .map_err(AdapterError::into_ipc)?;
+
+    still_paused(&session, fence)?;
+    for scope in &mut scopes {
+        scope.variables_reference =
+            session.mint_variables_reference(fence, scope.variables_reference);
+    }
     Ok(Response::Scopes(scopes))
 }
 
@@ -71,14 +100,95 @@ pub async fn variables(
     filter: VariableFilter,
     start: Option<u32>,
     count: Option<u32>,
+    max: Option<u32>,
 ) -> Result<Response> {
     let session = paused_session(state, session_id)?;
-    let variables = session
+    let fence = session.stop_generation();
+    // Before the adapter is asked anything. A reference from an earlier stop
+    // either errored obscurely or — the reason this check exists — collided
+    // with one the adapter had recycled and came back full of another frame's
+    // variables under exit 0 (D075).
+    let reference = session.resolve_handle(fence, HandleKind::Variables, variables_reference)?;
+
+    // The window the caller will actually be given: the narrower of what they
+    // asked for and what the cap allows.
+    let limit = row_limit(count, max);
+    let returned = session
         .adapter()
-        .variables(variables_reference, filter, start, count)
+        .variables(reference, filter, start, probe(limit))
         .await
         .map_err(AdapterError::into_ipc)?;
-    Ok(Response::Variables(variables))
+
+    still_paused(&session, fence)?;
+    let (mut variables, truncated) = take(returned, limit);
+    for variable in &mut variables {
+        variable.variables_reference =
+            session.mint_variables_reference(fence, variable.variables_reference);
+    }
+
+    Ok(Response::Variables(VariableList {
+        variables,
+        truncated,
+    }))
+}
+
+/// How many rows one `variables` answer may carry.
+///
+/// The narrower of the caller's own `--count` and the cap, because both are
+/// limits and honouring only one of them would ignore the other. `0` means "no
+/// limit" for either, the way `--timeout 0` does (D079).
+///
+/// Only the *list* is ever shortened: a five-thousand character string is one
+/// row, and a row reading `"abcd…"` would be a claim about the *data* rather
+/// than about the list, which is the one thing truncation must not become
+/// (D080).
+fn row_limit(count: Option<u32>, max: Option<u32>) -> usize {
+    let unlimited = |value: u32| match value {
+        0 => usize::MAX,
+        value => value as usize,
+    };
+    let cap = unlimited(max.unwrap_or(DEFAULT_VARIABLE_CAP));
+    match count {
+        Some(count) => cap.min(unlimited(count)),
+        None => cap,
+    }
+}
+
+/// How many rows to *ask the adapter for*: one more than will be returned.
+///
+/// The extra row is how "there is more than you are seeing" is decided without
+/// a second call — if it comes back, there was more. Asking for exactly the
+/// limit could not distinguish a container of exactly that many from a larger
+/// one.
+///
+/// **Whether this bounds the round trip is the adapter's to decide, and today
+/// none of them do.** `count` reaches the wire only for an adapter that
+/// declared `supportsVariablePaging`; for one that did not, D067/D073 send no
+/// window at all and [`AdapterHandle::variables`] applies it here instead — so
+/// the full two thousand rows still cross the wire and are deserialised before
+/// being trimmed. codelldb, debugpy and delve all report
+/// `supports_variable_paging: false` (verified 2026-08-02), which makes this
+/// currently a bound on the *reply* rather than on the transfer. Asking anyway
+/// costs nothing and is the only half lazydap owns; the rest is a fact about
+/// the adapter rather than a gap to paper over (D083).
+///
+/// `None` when the caller lifted the limit — then there is nothing to probe
+/// for, because everything is being returned.
+fn probe(limit: usize) -> Option<u32> {
+    (limit < usize::MAX).then(|| u32::try_from(limit).unwrap_or(u32::MAX).saturating_add(1))
+}
+
+/// Keep at most `limit`, and say whether that left anything behind.
+///
+/// The count is of what the *adapter* returned against a request for
+/// `limit + 1`, so this is exact for an adapter that pages and for one that
+/// does not — [`AdapterHandle::variables`] applies the window itself in the
+/// second case (D067/D073), and either way what arrives here is already
+/// windowed.
+fn take<T>(mut rows: Vec<T>, limit: usize) -> (Vec<T>, bool) {
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    (rows, truncated)
 }
 
 pub async fn eval(
@@ -94,14 +204,18 @@ pub async fn eval(
     // An expression without a frame is evaluated in the global scope, where
     // none of the local variables the caller means exist. Defaulting to the
     // frame they are looking at is what they meant.
-    let frame_id = Some(resolve_frame(&session, frame_id).await?);
+    let frame_id = Some(resolve_frame(&session, fence, frame_id).await?);
     still_paused(&session, fence)?;
 
-    let result = session
+    let mut result = session
         .adapter()
         .evaluate(expression, frame_id, context)
         .await
         .map_err(AdapterError::into_ipc)?;
+
+    still_paused(&session, fence)?;
+    result.variables_reference =
+        session.mint_variables_reference(fence, result.variables_reference);
     Ok(Response::Evaluated(result))
 }
 
@@ -153,14 +267,21 @@ pub fn output(
     Ok(Response::Output { chunks, dropped })
 }
 
-/// The frame a request means when it did not name one: the top of the stack.
+/// The adapter's frame id for what a request named, or the top of the stack.
 ///
-/// Fetched rather than remembered, because frame ids are only valid until the
-/// program moves, and a remembered one would be a stale handle the adapter
-/// would either reject or — worse — answer about the wrong frame.
-async fn resolve_frame(session: &Arc<Session>, explicit: Option<i64>) -> Result<i64> {
+/// An explicit `--frame` is one of *our* handles and is checked against this
+/// stop before anything is asked of the adapter. It used to be passed straight
+/// through, which is how `eval --frame 0` came back claiming the process was
+/// running while it was plainly stopped: codelldb reports an unresolvable frame
+/// that way, and an agent reading it starts polling a program that is not going
+/// anywhere. `scopes --frame 0` said `Invalid frame reference: 0`, which is at
+/// least true; now neither reaches the adapter at all (D075).
+///
+/// A request that named nothing gets the top frame, fetched rather than
+/// remembered: the adapter's ids are only valid until the program moves.
+async fn resolve_frame(session: &Arc<Session>, fence: u64, explicit: Option<i64>) -> Result<i64> {
     if let Some(frame_id) = explicit {
-        return Ok(frame_id);
+        return session.resolve_handle(fence, HandleKind::Frame, frame_id);
     }
 
     let thread_id = stopped_thread(session)?;
@@ -185,4 +306,81 @@ fn stopped_thread(session: &Arc<Session>) -> Result<i64> {
             "no thread has stopped yet, so there is nothing to inspect",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saying_nothing_about_a_limit_gets_the_default_cap() {
+        assert_eq!(row_limit(None, None), DEFAULT_VARIABLE_CAP as usize);
+    }
+
+    #[test]
+    fn zero_lifts_the_cap_the_way_it_lifts_a_wait_s_timeout() {
+        assert_eq!(
+            row_limit(None, Some(0)),
+            usize::MAX,
+            "`0` is the documented spelling of `no limit` (D079)",
+        );
+    }
+
+    #[test]
+    fn an_explicit_cap_is_used_as_given() {
+        assert_eq!(row_limit(None, Some(5)), 5);
+    }
+
+    #[test]
+    fn a_count_narrower_than_the_cap_is_the_limit() {
+        // Both are limits. Honouring only the cap would ignore what the caller
+        // actually asked for.
+        assert_eq!(row_limit(Some(5), Some(200)), 5);
+    }
+
+    #[test]
+    fn a_count_wider_than_the_cap_does_not_escape_it() {
+        assert_eq!(row_limit(Some(5_000), Some(200)), 200);
+    }
+
+    #[test]
+    fn a_count_still_binds_when_the_cap_is_lifted() {
+        assert_eq!(row_limit(Some(5), Some(0)), 5);
+    }
+
+    #[test]
+    fn the_adapter_is_asked_for_one_more_row_than_will_be_returned() {
+        // The extra row is the whole truncation signal: if it comes back, there
+        // was more. Asking for exactly the limit cannot tell a container of
+        // exactly that size from a larger one (D083).
+        assert_eq!(probe(200), Some(201));
+        assert_eq!(
+            probe(usize::MAX),
+            None,
+            "nothing to probe for when everything is being returned",
+        );
+    }
+
+    #[test]
+    fn a_window_that_left_rows_behind_says_so_whichever_limit_bound_it() {
+        // The finding: `--count 5` on a 2000-element container returned five
+        // rows and `truncated: false`, which contradicts the field's meaning
+        // and stops a client that pages on it. The flag means "there is more
+        // than you are seeing", whatever caused it — D072's lesson, applied to
+        // this field (D083).
+        let rows: Vec<u32> = (0..6).collect();
+        let (kept, truncated) = take(rows, 5);
+
+        assert_eq!(kept.len(), 5);
+        assert!(truncated, "the sixth row is the evidence there is more");
+    }
+
+    #[test]
+    fn a_window_that_left_nothing_behind_says_that_too() {
+        let rows: Vec<u32> = (0..5).collect();
+        let (kept, truncated) = take(rows, 5);
+
+        assert_eq!(kept.len(), 5);
+        assert!(!truncated, "exactly the window is not a truncation");
+    }
 }
