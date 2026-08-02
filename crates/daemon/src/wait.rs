@@ -431,10 +431,9 @@ impl Wait {
         // Only when the top frame cannot answer it itself. A `user_frame`
         // repeating `frame` would invite a reader to think the two had been
         // compared and found to differ.
-        let responsible = if has_source_path(&top) {
-            None
-        } else {
-            frames.iter().find(|frame| has_source_path(frame)).cloned()
+        let responsible = match has_source_path(&top) {
+            true => None,
+            false => self.responsible_frame(&frames).await,
         };
 
         // The locals belong to whichever frame a person would look at, which is
@@ -449,6 +448,57 @@ impl Wait {
         self.blob.user_frame = responsible.map(|frame| self.session.mint_frame(fence, frame));
         self.blob.frame = Some(self.session.mint_frame(fence, top));
         self.fetch_locals(fence, locals_frame_id).await;
+    }
+
+    /// The nearest frame in the user's own code, looking past the window if it
+    /// has to.
+    ///
+    /// `frames` is the first [`USER_FRAME_SEARCH_DEPTH`] of the stack, which is
+    /// enough for the case this is about — a handful of library frames between
+    /// a crash and the caller responsible for it — and cheap for the deep
+    /// recursion it is bounded against.
+    ///
+    /// When the window is *exhausted* without a hit, though, `None` would be
+    /// two different answers wearing one face: "no frame in this stack has a
+    /// source path" and "none of the first two dozen did". Only the first is
+    /// something a reader can act on, so the ambiguous case costs one more
+    /// request rather than a plausible-looking absence (D083). It is reached
+    /// only by a stop two dozen library frames deep, which is rare, and never
+    /// by an ordinary breakpoint — those stop in code with a path and never
+    /// search at all.
+    async fn responsible_frame(
+        &self,
+        frames: &[lazydap_core::StackFrame],
+    ) -> Option<lazydap_core::StackFrame> {
+        if let Some(frame) = frames.iter().find(|frame| has_source_path(frame)) {
+            return Some(frame.clone());
+        }
+        if frames.len() < USER_FRAME_SEARCH_DEPTH as usize {
+            // The window held the whole stack, so the absence is the answer.
+            return None;
+        }
+
+        let thread_id = self
+            .blob
+            .thread_id
+            .or_else(|| self.session.last_thread_id())?;
+        match self
+            .session
+            .adapter()
+            .stack_trace(thread_id, None, None)
+            .await
+        {
+            Ok((whole, _)) => whole.into_iter().find(has_source_path),
+            Err(error) => {
+                tracing::debug!(
+                    target: "daemon.session",
+                    session_id = %self.session.id,
+                    %error,
+                    "could not search the whole stack for a frame in the user's code",
+                );
+                None
+            }
+        }
     }
 
     /// The top frame's locals, so reading one is not a second command.
@@ -482,10 +532,20 @@ impl Wait {
         };
         let reference = local.variables_reference;
 
+        // One more than the cap, so the transfer is bounded and "there is more
+        // than you are seeing" is still decidable. Asking for everything let a
+        // two-thousand-element frame cross the wire in full before the cap threw
+        // it away — a cap on the reply is not a cap on the round trip (D083).
+        let wanted = STOP_LOCALS_CAP as u32 + 1;
         let variables = match self
             .session
             .adapter()
-            .variables(reference, lazydap_core::VariableFilter::All, None, None)
+            .variables(
+                reference,
+                lazydap_core::VariableFilter::All,
+                None,
+                Some(wanted),
+            )
             .await
         {
             Ok(variables) => variables,
@@ -548,6 +608,7 @@ mod tests {
         SessionState,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
 
     /// A session with no adapter behind it. Everything below exercises the
     /// event arithmetic, which is where the subtle bugs live; the adapter
@@ -561,6 +622,7 @@ mod tests {
             SessionState::Running,
             AdapterHandle::detached(),
             event_tx,
+            Arc::new(AtomicU64::new(0)),
         ))
     }
 

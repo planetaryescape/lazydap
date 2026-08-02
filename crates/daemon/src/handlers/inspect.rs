@@ -110,17 +110,18 @@ pub async fn variables(
     // variables under exit 0 (D075).
     let reference = session.resolve_handle(fence, HandleKind::Variables, variables_reference)?;
 
-    let variables = session
+    // The window the caller will actually be given: the narrower of what they
+    // asked for and what the cap allows.
+    let limit = row_limit(count, max);
+    let (variables, truncated) = session
         .adapter()
-        .variables(reference, filter, start, count.filter(|count| *count > 0))
+        .variables(reference, filter, start, probe(limit))
         .await
-        .map_err(AdapterError::into_ipc)?;
+        .map_err(AdapterError::into_ipc)
+        .map(|variables| take(variables, limit))?;
 
     still_paused(&session, fence)?;
-    let limit = variable_limit(max);
-    let truncated = variables.len() > limit;
     let mut variables = variables;
-    variables.truncate(limit);
     for variable in &mut variables {
         variable.variables_reference =
             session.mint_variables_reference(fence, variable.variables_reference);
@@ -134,16 +135,61 @@ pub async fn variables(
 
 /// How many rows one `variables` answer may carry.
 ///
-/// `Some(0)` is the caller lifting the cap, the way `--timeout 0` lifts the
-/// wait (D079). Only the *list* is ever shortened: a five-thousand character
-/// string is one row, and a row reading `"abcd…"` would be a claim about the
-/// *data* rather than about the list, which is the one thing truncation must
-/// not become (D080).
-fn variable_limit(max: Option<u32>) -> usize {
-    match max.unwrap_or(DEFAULT_VARIABLE_CAP) {
+/// The narrower of the caller's own `--count` and the cap, because both are
+/// limits and honouring only one of them would ignore the other. `0` means "no
+/// limit" for either, the way `--timeout 0` does (D079).
+///
+/// Only the *list* is ever shortened: a five-thousand character string is one
+/// row, and a row reading `"abcd…"` would be a claim about the *data* rather
+/// than about the list, which is the one thing truncation must not become
+/// (D080).
+fn row_limit(count: Option<u32>, max: Option<u32>) -> usize {
+    let unlimited = |value: u32| match value {
         0 => usize::MAX,
-        limit => limit as usize,
+        value => value as usize,
+    };
+    let cap = unlimited(max.unwrap_or(DEFAULT_VARIABLE_CAP));
+    match count {
+        Some(count) => cap.min(unlimited(count)),
+        None => cap,
     }
+}
+
+/// How many rows to *ask the adapter for*: one more than will be returned.
+///
+/// The extra row is how "there is more than you are seeing" is decided without
+/// a second call — if it comes back, there was more. Asking for exactly the
+/// limit could not distinguish a container of exactly that many from a larger
+/// one.
+///
+/// **Whether this bounds the round trip is the adapter's to decide, and today
+/// none of them do.** `count` reaches the wire only for an adapter that
+/// declared `supportsVariablePaging`; for one that did not, D067/D073 send no
+/// window at all and [`AdapterHandle::variables`] applies it here instead — so
+/// the full two thousand rows still cross the wire and are deserialised before
+/// being trimmed. codelldb, debugpy and delve all report
+/// `supports_variable_paging: false` (verified 2026-08-02), which makes this
+/// currently a bound on the *reply* rather than on the transfer. Asking anyway
+/// costs nothing and is the only half lazydap owns; the rest is a fact about
+/// the adapter rather than a gap to paper over (D083).
+///
+/// `None` when the caller lifted the limit — then there is nothing to probe
+/// for, because everything is being returned.
+fn probe(limit: usize) -> Option<u32> {
+    (limit < usize::MAX).then(|| u32::try_from(limit).unwrap_or(u32::MAX).saturating_add(1))
+}
+
+/// Keep at most `limit`, and say whether that left anything behind.
+///
+/// The count is of what the *adapter* returned against a request for
+/// `limit + 1`, so this is exact for an adapter that pages and for one that
+/// does not — [`AdapterHandle::variables`] applies the window itself in the
+/// second case (D067/D073), and either way what arrives here is already
+/// windowed.
+fn take<T>(mut rows: Vec<T>, limit: usize) -> (Vec<T>, bool) {
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    (rows, truncated)
 }
 
 pub async fn eval(
@@ -269,13 +315,13 @@ mod tests {
 
     #[test]
     fn saying_nothing_about_a_limit_gets_the_default_cap() {
-        assert_eq!(variable_limit(None), DEFAULT_VARIABLE_CAP as usize);
+        assert_eq!(row_limit(None, None), DEFAULT_VARIABLE_CAP as usize);
     }
 
     #[test]
     fn zero_lifts_the_cap_the_way_it_lifts_a_wait_s_timeout() {
         assert_eq!(
-            variable_limit(Some(0)),
+            row_limit(None, Some(0)),
             usize::MAX,
             "`0` is the documented spelling of `no limit` (D079)",
         );
@@ -283,6 +329,59 @@ mod tests {
 
     #[test]
     fn an_explicit_cap_is_used_as_given() {
-        assert_eq!(variable_limit(Some(5)), 5);
+        assert_eq!(row_limit(None, Some(5)), 5);
+    }
+
+    #[test]
+    fn a_count_narrower_than_the_cap_is_the_limit() {
+        // Both are limits. Honouring only the cap would ignore what the caller
+        // actually asked for.
+        assert_eq!(row_limit(Some(5), Some(200)), 5);
+    }
+
+    #[test]
+    fn a_count_wider_than_the_cap_does_not_escape_it() {
+        assert_eq!(row_limit(Some(5_000), Some(200)), 200);
+    }
+
+    #[test]
+    fn a_count_still_binds_when_the_cap_is_lifted() {
+        assert_eq!(row_limit(Some(5), Some(0)), 5);
+    }
+
+    #[test]
+    fn the_adapter_is_asked_for_one_more_row_than_will_be_returned() {
+        // The extra row is the whole truncation signal: if it comes back, there
+        // was more. Asking for exactly the limit cannot tell a container of
+        // exactly that size from a larger one (D083).
+        assert_eq!(probe(200), Some(201));
+        assert_eq!(
+            probe(usize::MAX),
+            None,
+            "nothing to probe for when everything is being returned",
+        );
+    }
+
+    #[test]
+    fn a_window_that_left_rows_behind_says_so_whichever_limit_bound_it() {
+        // The finding: `--count 5` on a 2000-element container returned five
+        // rows and `truncated: false`, which contradicts the field's meaning
+        // and stops a client that pages on it. The flag means "there is more
+        // than you are seeing", whatever caused it — D072's lesson, applied to
+        // this field (D083).
+        let rows: Vec<u32> = (0..6).collect();
+        let (kept, truncated) = take(rows, 5);
+
+        assert_eq!(kept.len(), 5);
+        assert!(truncated, "the sixth row is the evidence there is more");
+    }
+
+    #[test]
+    fn a_window_that_left_nothing_behind_says_that_too() {
+        let rows: Vec<u32> = (0..5).collect();
+        let (kept, truncated) = take(rows, 5);
+
+        assert_eq!(kept.len(), 5);
+        assert!(!truncated, "exactly the window is not a truncation");
     }
 }

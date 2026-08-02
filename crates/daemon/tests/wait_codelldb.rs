@@ -1041,6 +1041,129 @@ fn what_the_daemon_reports_at_a_stop_is_bounded_and_does_not_contradict_itself()
 }
 
 #[test]
+fn a_handle_from_a_session_that_has_ended_is_refused_by_the_next_one() {
+    // The same failure as a recycled adapter number, one scope out. Handles
+    // used to be numbered from `1` per session, and the inspection commands
+    // resolve against whichever session is current — so session A's reference
+    // was a *live* handle in session B and came back full of another program's
+    // variables under exit 0, with nothing to say who had answered (D082).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("xsess");
+
+    // Session A: stop inside the library crash, where the locals are distinctive.
+    let crashes = toolchain.build("library_crash.c");
+    sandbox.json(&["--format", "json", "launch", &crashes.to_string_lossy()]);
+    let first = sandbox.wait("30");
+    let stale = first["locals"]["variables_reference"].to_string();
+    let names = |value: &Value| -> Vec<String> {
+        value["variables"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row["name"].as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let theirs = names(&sandbox.json(&["--format", "json", "variables", "--reference", &stale]));
+    assert!(theirs.contains(&"wanted".to_string()), "got: {theirs:?}");
+
+    // Session B: a different program, in the same daemon.
+    sandbox.run(&["disconnect"]);
+    let inspects = toolchain.build("inspects.c");
+    sandbox.breakpoint("inspects.c", 20);
+    sandbox.json(&["--format", "json", "launch", &inspects.to_string_lossy()]);
+    let second = sandbox.wait("30");
+    assert_eq!(second["state"], "paused", "got: {second}");
+    // Mint enough handles that session A's number would have been reachable
+    // under the old per-session counter.
+    sandbox.json(&["--format", "json", "scopes"]);
+
+    let command = ["--format", "json", "variables", "--reference", &stale];
+    let error = refusal(&sandbox.run(&command), &command);
+    assert_eq!(error["error"], "StaleHandle", "got: {error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("session that has ended"),
+        "and says which kind of stale it is: {error}",
+    );
+}
+
+#[test]
+fn a_window_that_leaves_rows_behind_says_so_however_it_was_narrowed() {
+    // `--count 5` on a 2000-element container returned five rows and
+    // `truncated: false`, which contradicts the field's documented meaning and
+    // stops a client that pages on it. The flag means "there is more than you
+    // are seeing", whatever narrowed the list — D072's lesson, applied to this
+    // field (D083).
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("window");
+
+    let program = toolchain.build("inspects.c");
+    sandbox.breakpoint("inspects.c", 20);
+    sandbox.launch(&program);
+    sandbox.wait("30");
+
+    let big = sandbox.json(&["--format", "json", "eval", "big"]);
+    let reference = big["variables_reference"].to_string();
+    let rows = |value: &Value| value["variables"].as_array().expect("variables").len();
+
+    // A caller's own window, well inside the cap, that still leaves rows behind.
+    let counted = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--count",
+        "5",
+    ]);
+    assert_eq!(rows(&counted), 5, "got: {counted}");
+    assert_eq!(
+        counted["truncated"], true,
+        "five of two thousand is not the whole list: {counted}",
+    );
+
+    // The tail: a window that happens to reach the end leaves nothing behind
+    // and must not claim it did.
+    let tail = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--start",
+        "1998",
+        "--count",
+        "50",
+        "--max",
+        "0",
+    ]);
+    assert_eq!(
+        tail["truncated"], false,
+        "nothing was left behind, so nothing is missing: {tail}",
+    );
+
+    // The narrower of the two limits wins, and is still reported honestly.
+    let both = sandbox.json(&[
+        "--format",
+        "json",
+        "variables",
+        "--reference",
+        &reference,
+        "--count",
+        "500",
+        "--max",
+        "5",
+    ]);
+    assert_eq!(rows(&both), 5, "the cap binds under a wider count: {both}");
+    assert_eq!(both["truncated"], true);
+}
+
+#[test]
 fn continuing_a_program_that_is_already_running_reports_it_and_invents_no_thread() {
     // Nothing is sent, because there is nothing to ask for (D055). Reporting
     // that as an ordinary resume — with the thread id codelldb answers a

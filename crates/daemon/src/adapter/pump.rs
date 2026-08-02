@@ -365,6 +365,7 @@ mod tests {
             SessionState::Running,
             AdapterHandle::detached(),
             event_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ))
     }
 

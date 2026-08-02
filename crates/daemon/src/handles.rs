@@ -23,6 +23,8 @@
 
 use lazydap_protocol::{ErrorCode, IpcError};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which kind of thing a handle addresses. They are numbered from one sequence
 /// so a handle is never ambiguous, and kept apart so a frame id presented as a
@@ -66,13 +68,34 @@ impl Side {
     }
 }
 
+/// Where a handle a caller presented came from, when it is not current.
+enum Origin {
+    /// Issued by a session that has since ended.
+    EarlierSession,
+    /// Issued by this session, at a stop it has left.
+    EarlierStop,
+    /// Never issued by anything.
+    Nowhere,
+}
+
 /// Every handle this session has outstanding, and the stop they belong to.
 pub struct HandleTable {
+    /// The daemon's handle counter, shared by every session it runs.
+    ///
+    /// **Shared rather than per-session, and that is the whole point.** A
+    /// counter that restarted at `1` for each session made a handle from
+    /// session A a *live handle* in session B, because the inspection commands
+    /// resolve against whichever session is current. Session A's reference `4`
+    /// came back full of session B's variables — from a different program —
+    /// with exit 0 and nothing to say the question had been answered by
+    /// somebody else. Which is precisely the failure this module was written to
+    /// remove, one scope out (D082).
+    sequence: Arc<AtomicU64>,
     /// The stop generation `frames` and `variables` describe.
     generation: u64,
-    /// The next handle to issue. Monotonic for the life of the session: a
-    /// handle is never reused, which is the whole point.
-    next: i64,
+    /// The highest handle the daemon had issued when this session began.
+    /// Anything at or below it belongs to a session that is over.
+    session_floor: i64,
     /// The highest handle issued before `generation`. Anything at or below it
     /// that is not in the current maps was issued at an earlier stop, which is
     /// what lets a refusal say *stale* rather than merely *unknown*.
@@ -81,36 +104,54 @@ pub struct HandleTable {
     variables: Side,
 }
 
-impl Default for HandleTable {
-    fn default() -> Self {
+impl HandleTable {
+    /// A table for a session starting now, numbering from wherever the daemon
+    /// has got to.
+    pub fn new(sequence: Arc<AtomicU64>) -> Self {
+        let issued = sequence.load(Ordering::SeqCst) as i64;
         Self {
+            sequence,
             generation: 0,
-            // From one, so no handle is ever `0`. A `variables_reference` of
-            // zero means "this is a scalar, do not try to expand it", and a
-            // handle that collided with it would invite exactly that.
-            next: 1,
-            stale_floor: 0,
+            session_floor: issued,
+            stale_floor: issued,
             frames: Side::default(),
             variables: Side::default(),
         }
     }
-}
 
-impl HandleTable {
     /// Forget the previous stop's handles, once, when the program has moved.
     ///
     /// Lazy rather than driven by the state writer: the table is only
     /// interesting to a request, and a request always brings the current
-    /// generation with it. `next` is deliberately *not* reset — reusing a
+    /// generation with it. The counter is deliberately *not* reset — reusing a
     /// number is the failure mode this module exists to remove.
     fn sync(&mut self, generation: u64) {
         if self.generation == generation {
             return;
         }
         self.generation = generation;
-        self.stale_floor = self.next - 1;
+        self.stale_floor = self.sequence.load(Ordering::SeqCst) as i64;
         self.frames.clear();
         self.variables.clear();
+    }
+
+    /// The next unused handle, daemon-wide.
+    ///
+    /// From one, so no handle is ever `0`. A `variables_reference` of zero
+    /// means "this is a scalar, do not try to expand it", and a handle that
+    /// collided with it would invite exactly that.
+    fn next(&self) -> i64 {
+        self.sequence.fetch_add(1, Ordering::SeqCst) as i64 + 1
+    }
+
+    /// Where a handle that is not in the current maps came from.
+    fn origin(&self, handle: i64) -> Origin {
+        match handle {
+            handle if handle <= 0 => Origin::Nowhere,
+            handle if handle <= self.session_floor => Origin::EarlierSession,
+            handle if handle <= self.stale_floor => Origin::EarlierStop,
+            _ => Origin::Nowhere,
+        }
     }
 
     fn side(&mut self, kind: HandleKind) -> &mut Side {
@@ -128,14 +169,13 @@ impl HandleTable {
     /// would have no way to tell they were the same thing.
     pub fn mint(&mut self, generation: u64, kind: HandleKind, adapter: i64) -> i64 {
         self.sync(generation);
-        let next = self.next;
-        let side = self.side(kind);
-        if let Some(existing) = side.to_ours.get(&adapter) {
+        if let Some(existing) = self.side(kind).to_ours.get(&adapter) {
             return *existing;
         }
+        let next = self.next();
+        let side = self.side(kind);
         side.to_adapter.insert(next, adapter);
         side.to_ours.insert(adapter, next);
-        self.next += 1;
         next
     }
 
@@ -151,9 +191,19 @@ impl HandleTable {
             return Ok(*adapter);
         }
 
-        let stale = handle > 0 && handle <= self.stale_floor;
-        Err(if stale {
-            IpcError::new(
+        let origin = self.origin(handle);
+        let stale = !matches!(origin, Origin::Nowhere);
+        Err(match origin {
+            Origin::EarlierSession => IpcError::new(
+                ErrorCode::StaleHandle,
+                format!(
+                    "{} {handle} belongs to a session that has ended. \
+                     Ask {} again in this one",
+                    kind.noun(),
+                    kind.source(),
+                ),
+            ),
+            Origin::EarlierStop => IpcError::new(
                 ErrorCode::StaleHandle,
                 format!(
                     "{} {handle} belongs to an earlier stop; the program has moved since. \
@@ -161,16 +211,15 @@ impl HandleTable {
                     kind.noun(),
                     kind.source(),
                 ),
-            )
-        } else {
-            IpcError::new(
+            ),
+            Origin::Nowhere => IpcError::new(
                 ErrorCode::BadRequest,
                 format!(
                     "no {} {handle} at this stop; they come from {}",
                     kind.noun(),
                     kind.source(),
                 ),
-            )
+            ),
         }
         .with_details(serde_json::json!({
             "handle": handle,
@@ -184,9 +233,14 @@ impl HandleTable {
 mod tests {
     use super::*;
 
+    /// A table numbering from zero, standing in for a daemon with no history.
+    fn table() -> HandleTable {
+        HandleTable::new(Arc::new(AtomicU64::new(0)))
+    }
+
     #[test]
     fn a_handle_minted_at_this_stop_resolves_to_the_adapter_s_own_number() {
-        let mut table = HandleTable::default();
+        let mut table = table();
         let handle = table.mint(4, HandleKind::Variables, 1007);
 
         assert_eq!(table.resolve(4, HandleKind::Variables, handle), Ok(1007));
@@ -196,13 +250,13 @@ mod tests {
     fn no_handle_is_ever_zero_because_zero_already_means_something() {
         // A `variables_reference` of 0 is DAP's "this is a scalar". A handle
         // that collided with it would invite a client to try expanding one.
-        let mut table = HandleTable::default();
+        let mut table = table();
         assert_ne!(table.mint(1, HandleKind::Variables, 99), 0);
     }
 
     #[test]
     fn one_adapter_number_asked_about_twice_at_one_stop_is_one_handle() {
-        let mut table = HandleTable::default();
+        let mut table = table();
         let first = table.mint(2, HandleKind::Frame, 1000);
         let second = table.mint(2, HandleKind::Frame, 1000);
 
@@ -211,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_handle_from_an_earlier_stop_is_refused_as_stale() {
-        let mut table = HandleTable::default();
+        let mut table = table();
         let handle = table.mint(2, HandleKind::Variables, 1007);
 
         let error = table
@@ -232,7 +286,7 @@ mod tests {
     /// and only the fresh one resolves.
     #[test]
     fn a_stale_handle_is_still_refused_when_the_adapter_has_recycled_its_number() {
-        let mut table = HandleTable::default();
+        let mut table = table();
         let stale = table.mint(2, HandleKind::Variables, 1007);
 
         // Next stop. codelldb hands `1007` out again, for a different scope.
@@ -252,13 +306,49 @@ mod tests {
         assert_eq!(table.resolve(3, HandleKind::Variables, fresh), Ok(1007));
     }
 
+    /// The same failure as the recycled-number case, one scope out.
+    ///
+    /// Every session used to number from `1`, and the inspection commands
+    /// resolve against whichever session is current — so session A's handle was
+    /// a *live* handle in session B and came back full of another program's
+    /// variables under exit 0. Sharing the daemon's counter makes the numbers
+    /// disjoint, so B has nothing to answer A's handle with (D082).
+    #[test]
+    fn a_handle_from_a_session_that_has_ended_is_refused_by_the_next_one() {
+        let sequence = Arc::new(AtomicU64::new(0));
+
+        let mut first = HandleTable::new(Arc::clone(&sequence));
+        let from_first = first.mint(1, HandleKind::Variables, 1007);
+
+        // The session ends and another starts, against the same daemon.
+        let mut second = HandleTable::new(Arc::clone(&sequence));
+        let from_second = second.mint(1, HandleKind::Variables, 1007);
+
+        assert_ne!(
+            from_first, from_second,
+            "two sessions must not both be handing out the same number",
+        );
+        let error = second
+            .resolve(1, HandleKind::Variables, from_first)
+            .expect_err("that handle belongs to a session that is over");
+        assert_eq!(error.code, ErrorCode::StaleHandle, "got: {error}");
+        assert!(
+            error.to_string().contains("session that has ended"),
+            "and says so rather than blaming the stop: {error}",
+        );
+        assert_eq!(
+            second.resolve(1, HandleKind::Variables, from_second),
+            Ok(1007)
+        );
+    }
+
     #[test]
     fn a_number_that_was_never_a_handle_is_a_bad_request_not_a_stale_one() {
         // `--frame 0` is the case: an obvious thing to type, never issued by
         // anything, and nothing to do with the program having moved. Telling
         // the caller it went stale would send them to re-run `stack` when the
         // real fix is to stop making the number up.
-        let mut table = HandleTable::default();
+        let mut table = table();
         table.mint(1, HandleKind::Frame, 1000);
 
         let error = table
@@ -281,6 +371,7 @@ mod tests {
             lazydap_core::SessionState::Paused,
             crate::adapter::AdapterHandle::detached(),
             tokio::sync::broadcast::channel(4).0,
+            Arc::new(AtomicU64::new(0)),
         );
         let fence = session.stop_generation();
 
@@ -294,7 +385,7 @@ mod tests {
 
     #[test]
     fn a_frame_handle_is_not_a_variables_handle() {
-        let mut table = HandleTable::default();
+        let mut table = table();
         let frame = table.mint(1, HandleKind::Frame, 1000);
 
         table

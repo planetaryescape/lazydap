@@ -36,6 +36,10 @@ pub struct DaemonState {
     /// Keyed by id even though v0.1 allows one at a time (D007): the map is
     /// what makes lifting that limit a daemon-only change.
     sessions: RwLock<HashMap<SessionId, Slot>>,
+    /// The frame ids and variables references this daemon has handed out, as
+    /// one counter across every session it runs. See [`HandleTable`] — a
+    /// per-session counter made one session's handles live in the next (D082).
+    handle_sequence: Arc<AtomicU64>,
     event_tx: broadcast::Sender<SeqEvent>,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -72,9 +76,15 @@ impl DaemonState {
             store,
             started_at: Instant::now(),
             sessions: RwLock::new(HashMap::new()),
+            handle_sequence: Arc::new(AtomicU64::new(0)),
             event_tx,
             shutdown_tx,
         })
+    }
+
+    /// The counter every session mints its handles from.
+    pub fn handle_sequence(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.handle_sequence)
     }
 
     pub fn uptime_ms(&self) -> u64 {
@@ -466,6 +476,9 @@ impl Session {
         state: SessionState,
         adapter: AdapterHandle,
         event_tx: broadcast::Sender<SeqEvent>,
+        // The daemon's counter, not this session's: a handle must not mean one
+        // thing here and something else in the session that follows (D082).
+        handle_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             id,
@@ -482,7 +495,7 @@ impl Session {
             last_thread_id: RwLock::new(None),
             outstanding: RwLock::new(Markers::default()),
             breakpoints: Mutex::new(BreakpointMap::default()),
-            handles: Mutex::new(HandleTable::default()),
+            handles: Mutex::new(HandleTable::new(handle_sequence)),
             debuggee: Mutex::new(None),
         }
     }
@@ -1115,6 +1128,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             event_tx,
+            Arc::new(AtomicU64::new(0)),
         )
     }
 
@@ -1152,6 +1166,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             state.events(),
+            Arc::new(AtomicU64::new(0)),
         ));
 
         let mut events = state.events().subscribe();
@@ -1326,6 +1341,7 @@ mod tests {
             SessionState::Running,
             crate::adapter::AdapterHandle::detached(),
             tokio::sync::broadcast::channel(16).0,
+            Arc::new(AtomicU64::new(0)),
         );
         for index in 0..(EVENT_BUFFER_CAPACITY + 5) {
             session.emit(output_event(session.id, &format!("line {index}")));

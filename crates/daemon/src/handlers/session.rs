@@ -84,6 +84,7 @@ pub async fn launch(
         launched.state,
         launched.handle,
         state.events(),
+        state.handle_sequence(),
     ));
     session.set_last_thread_id(launched.thread_id);
     session.record_breakpoints(&launched.breakpoints);
