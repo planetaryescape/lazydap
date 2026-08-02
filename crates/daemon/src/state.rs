@@ -3,7 +3,7 @@ use crate::debuggee::Debuggee;
 use crate::handles::{HandleKind, HandleTable};
 use lazydap_core::{
     AdapterBreakpoint, AdapterKind, BreakpointId, BreakpointStatus, EndReason, OutputChunk,
-    SessionId, SessionState,
+    SessionId, SessionState, StackFrame,
 };
 use lazydap_protocol::{
     ErrorCode, Event, IpcError, LAZYDAP_PROTOCOL_VERSION, SessionSummary, StatusReport,
@@ -674,18 +674,43 @@ impl Session {
         self.stop_generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Our handle for one of the adapter's frame ids or variables references.
+    /// The frame, with our handle in place of the adapter's id.
     ///
-    /// `fence` is the generation the number was read at, and the caller must
+    /// `fence` is the generation the frame was read at, and the caller must
     /// have confirmed the session is still there — a handle stamped with a stop
     /// the data did not come from is the lie this whole mechanism removes.
-    pub fn mint_handle(&self, fence: u64, kind: HandleKind, adapter: i64) -> i64 {
-        lock(&self.handles).mint(fence, kind, adapter)
+    pub fn mint_frame(&self, fence: u64, mut frame: StackFrame) -> StackFrame {
+        frame.id = lock(&self.handles).mint(fence, HandleKind::Frame, frame.id);
+        frame
+    }
+
+    /// Our handle for one of the adapter's frame ids, on its own.
+    pub fn mint_frame_id(&self, fence: u64, adapter: i64) -> i64 {
+        lock(&self.handles).mint(fence, HandleKind::Frame, adapter)
+    }
+
+    /// Our handle for a `variables_reference`, **preserving DAP's `0`**.
+    ///
+    /// Zero is not a reference: it is "this is a scalar, there is nothing
+    /// inside it". Minting a handle for it would turn every scalar into
+    /// something a client offers to expand. The rule lives here, in one place,
+    /// because it is an invariant rather than a detail — three call sites each
+    /// remembering it is three chances to forget.
+    pub fn mint_variables_reference(&self, fence: u64, adapter: i64) -> i64 {
+        if adapter == 0 {
+            return 0;
+        }
+        lock(&self.handles).mint(fence, HandleKind::Variables, adapter)
     }
 
     /// The adapter's own number for a handle a caller presented, or a refusal
     /// naming why it is no good.
-    pub fn resolve_handle(&self, fence: u64, kind: HandleKind, handle: i64) -> Result<i64, IpcError> {
+    pub fn resolve_handle(
+        &self,
+        fence: u64,
+        kind: HandleKind,
+        handle: i64,
+    ) -> Result<i64, IpcError> {
         lock(&self.handles).resolve(fence, kind, handle)
     }
 

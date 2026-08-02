@@ -238,7 +238,10 @@ mod tests {
         // Next stop. codelldb hands `1007` out again, for a different scope.
         let fresh = table.mint(3, HandleKind::Variables, 1007);
 
-        assert_ne!(stale, fresh, "a recycled adapter number is not a recycled handle");
+        assert_ne!(
+            stale, fresh,
+            "a recycled adapter number is not a recycled handle"
+        );
         assert_eq!(
             table
                 .resolve(3, HandleKind::Variables, stale)
@@ -264,6 +267,29 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::BadRequest, "got: {error}");
         assert!(error.to_string().contains("lazydap stack"), "got: {error}");
+    }
+
+    #[test]
+    fn a_scalar_keeps_its_zero_rather_than_being_given_a_handle() {
+        // `Session::mint_variables_reference` owns this rule so that three call
+        // sites cannot each forget it. Zero is DAP's "there is nothing inside
+        // this"; a handle in its place offers an expansion that cannot work.
+        let session = crate::state::Session::new(
+            lazydap_core::SessionId::new(),
+            lazydap_core::AdapterKind::Codelldb,
+            std::path::PathBuf::from("/tmp/hello"),
+            lazydap_core::SessionState::Paused,
+            crate::adapter::AdapterHandle::detached(),
+            tokio::sync::broadcast::channel(4).0,
+        );
+        let fence = session.stop_generation();
+
+        assert_eq!(session.mint_variables_reference(fence, 0), 0);
+        assert_ne!(
+            session.mint_variables_reference(fence, 1007),
+            0,
+            "and a real reference still gets one",
+        );
     }
 
     #[test]

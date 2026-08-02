@@ -9,7 +9,7 @@ use super::{Result, find_session, live_session, paused_session};
 use crate::adapter::AdapterError;
 use crate::handles::HandleKind;
 use crate::state::{DaemonState, Session};
-use lazydap_core::{EvalContext, SessionId, StackFrame, VariableFilter};
+use lazydap_core::{EvalContext, SessionId, VariableFilter};
 use lazydap_protocol::{ErrorCode, IpcError, Response, VariableList};
 use std::sync::Arc;
 
@@ -64,15 +64,9 @@ pub async fn stack_trace(
     still_paused(&session, fence)?;
     let frames = frames
         .into_iter()
-        .map(|frame| ours(&session, fence, frame))
+        .map(|frame| session.mint_frame(fence, frame))
         .collect();
     Ok(Response::StackTrace { frames, total })
-}
-
-/// A frame with our handle in place of the adapter's id.
-pub fn ours(session: &Arc<Session>, fence: u64, mut frame: StackFrame) -> StackFrame {
-    frame.id = session.mint_handle(fence, HandleKind::Frame, frame.id);
-    frame
 }
 
 pub async fn scopes(
@@ -94,7 +88,7 @@ pub async fn scopes(
     still_paused(&session, fence)?;
     for scope in &mut scopes {
         scope.variables_reference =
-            session.mint_handle(fence, HandleKind::Variables, scope.variables_reference);
+            session.mint_variables_reference(fence, scope.variables_reference);
     }
     Ok(Response::Scopes(scopes))
 }
@@ -123,42 +117,32 @@ pub async fn variables(
         .map_err(AdapterError::into_ipc)?;
 
     still_paused(&session, fence)?;
-    Ok(Response::Variables(cap(&session, fence, variables, max)))
-}
-
-/// Keep at most `max` of them, and say whether that lost anything.
-///
-/// `Some(0)` is the caller lifting the cap, the way `--timeout 0` lifts the
-/// wait (D079). The values themselves are never shortened: a five-thousand
-/// character string is one row, and a row reading `"abcd…"` would be a claim
-/// about the *data* rather than about the list, which is the one thing
-/// truncation must not become (D080).
-fn cap(
-    session: &Arc<Session>,
-    fence: u64,
-    mut variables: Vec<lazydap_core::Variable>,
-    max: Option<u32>,
-) -> VariableList {
-    let limit = match max.unwrap_or(DEFAULT_VARIABLE_CAP) {
-        0 => usize::MAX,
-        limit => limit as usize,
-    };
+    let limit = variable_limit(max);
     let truncated = variables.len() > limit;
+    let mut variables = variables;
     variables.truncate(limit);
-
     for variable in &mut variables {
-        // Zero is DAP's "this is a scalar, there is nothing inside it", not a
-        // reference, and minting a handle for it would invite an expansion of
-        // something that cannot be expanded.
-        if variable.variables_reference != 0 {
-            variable.variables_reference =
-                session.mint_handle(fence, HandleKind::Variables, variable.variables_reference);
-        }
+        variable.variables_reference =
+            session.mint_variables_reference(fence, variable.variables_reference);
     }
 
-    VariableList {
+    Ok(Response::Variables(VariableList {
         variables,
         truncated,
+    }))
+}
+
+/// How many rows one `variables` answer may carry.
+///
+/// `Some(0)` is the caller lifting the cap, the way `--timeout 0` lifts the
+/// wait (D079). Only the *list* is ever shortened: a five-thousand character
+/// string is one row, and a row reading `"abcd…"` would be a claim about the
+/// *data* rather than about the list, which is the one thing truncation must
+/// not become (D080).
+fn variable_limit(max: Option<u32>) -> usize {
+    match max.unwrap_or(DEFAULT_VARIABLE_CAP) {
+        0 => usize::MAX,
+        limit => limit as usize,
     }
 }
 
@@ -185,10 +169,8 @@ pub async fn eval(
         .map_err(AdapterError::into_ipc)?;
 
     still_paused(&session, fence)?;
-    if result.variables_reference != 0 {
-        result.variables_reference =
-            session.mint_handle(fence, HandleKind::Variables, result.variables_reference);
-    }
+    result.variables_reference =
+        session.mint_variables_reference(fence, result.variables_reference);
     Ok(Response::Evaluated(result))
 }
 
@@ -279,4 +261,28 @@ fn stopped_thread(session: &Arc<Session>) -> Result<i64> {
             "no thread has stopped yet, so there is nothing to inspect",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saying_nothing_about_a_limit_gets_the_default_cap() {
+        assert_eq!(variable_limit(None), DEFAULT_VARIABLE_CAP as usize);
+    }
+
+    #[test]
+    fn zero_lifts_the_cap_the_way_it_lifts_a_wait_s_timeout() {
+        assert_eq!(
+            variable_limit(Some(0)),
+            usize::MAX,
+            "`0` is the documented spelling of `no limit` (D079)",
+        );
+    }
+
+    #[test]
+    fn an_explicit_cap_is_used_as_given() {
+        assert_eq!(variable_limit(Some(5)), 5);
+    }
 }

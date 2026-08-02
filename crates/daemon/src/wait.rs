@@ -20,7 +20,7 @@
 
 use crate::state::{SeqEvent, Session};
 use lazydap_core::{EndReason, WaitOutcome};
-use lazydap_protocol::{Event, StableState};
+use lazydap_protocol::{Event, FrameLocals, StableState};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -446,9 +446,8 @@ impl Wait {
         // it is, so the choice is never something a reader has to infer (D078).
         let locals_frame_id = responsible.as_ref().unwrap_or(&top).id;
 
-        self.blob.user_frame = responsible
-            .map(|frame| crate::handlers::inspect::ours(&self.session, fence, frame));
-        self.blob.frame = Some(crate::handlers::inspect::ours(&self.session, fence, top));
+        self.blob.user_frame = responsible.map(|frame| self.session.mint_frame(fence, frame));
+        self.blob.frame = Some(self.session.mint_frame(fence, top));
         self.fetch_locals(fence, locals_frame_id).await;
     }
 
@@ -509,27 +508,18 @@ impl Wait {
         let truncated = variables.len() > STOP_LOCALS_CAP;
         variables.truncate(STOP_LOCALS_CAP);
         for variable in &mut variables {
-            if variable.variables_reference != 0 {
-                variable.variables_reference = self.session.mint_handle(
-                    fence,
-                    crate::handles::HandleKind::Variables,
-                    variable.variables_reference,
-                );
-            }
+            variable.variables_reference = self
+                .session
+                .mint_variables_reference(fence, variable.variables_reference);
         }
 
-        self.blob.locals = Some(lazydap_protocol::FrameLocals {
+        self.blob.locals = Some(FrameLocals {
             // Our handle for the frame these came from, which is `user_frame`'s
             // when there is one and `frame`'s otherwise. Both were minted a
-            // moment ago, so this resolves rather than mints.
-            frame_id: self
-                .session
-                .mint_handle(fence, crate::handles::HandleKind::Frame, adapter_frame_id),
-            variables_reference: self.session.mint_handle(
-                fence,
-                crate::handles::HandleKind::Variables,
-                reference,
-            ),
+            // moment ago, and one adapter number yields one handle per stop, so
+            // this is the same number rather than a second name for it.
+            frame_id: self.session.mint_frame_id(fence, adapter_frame_id),
+            variables_reference: self.session.mint_variables_reference(fence, reference),
             variables,
             truncated,
         });

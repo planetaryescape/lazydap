@@ -1864,7 +1864,9 @@ mod tests {
             state,
             Msg::DaemonResponse {
                 id,
-                response: Box::new(Response::Variables(lazydap_protocol::VariableList::whole(variables))),
+                response: Box::new(Response::Variables(lazydap_protocol::VariableList::whole(
+                    variables,
+                ))),
             },
         )
     }

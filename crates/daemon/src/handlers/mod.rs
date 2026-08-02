@@ -9,10 +9,7 @@
 //! and [`watches`] own the project state that outlives any session.
 
 mod breakpoints;
-// Public because `wait` mints the same handles for the frame it reports as
-// `inspect` does for the frames a `stack` asks for; two ways of numbering one
-// stop is the bug, not the fix.
-pub mod inspect;
+mod inspect;
 mod session;
 mod watches;
 
@@ -121,8 +118,16 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             count,
             max,
         } => {
-            inspect::variables(state, session_id, variables_reference, filter, start, count, max)
-                .await
+            inspect::variables(
+                state,
+                session_id,
+                variables_reference,
+                filter,
+                start,
+                count,
+                max,
+            )
+            .await
         }
         Request::Eval {
             session_id,
