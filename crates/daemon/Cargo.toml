@@ -41,3 +41,10 @@ lazydap-dap = { path = "../dap" }
 lazydap-protocol = { path = "../protocol" }
 lazydap-store = { path = "../store" }
 lazydap-tui = { path = "../tui" }
+
+[dev-dependencies]
+# `start_paused` in `wait.rs`, which is what makes the late-exit-code test a
+# fact about the code rather than a race against the machine's load. Stated
+# here rather than relied on: a `--workspace` build unified the feature in from
+# elsewhere and a plain `cargo test -p lazydap-daemon` then did not compile.
+tokio = { workspace = true, features = ["full", "test-util"] }
