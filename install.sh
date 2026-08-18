@@ -12,6 +12,9 @@
 #                         an absolute path is accepted and read as file://<path>
 #   LAZYDAP_RELEASES_URL  where the release list comes from, same rules. Only read
 #                         when no version argument is given
+#   GITHUB_TOKEN, GH_TOKEN  optional. Raises the release-lookup rate limit from
+#                         GitHub's anonymous 60 requests an hour. Sent to
+#                         api.github.com and nowhere else, never printed
 #
 # No sudo, ever. The only thing written outside a temporary directory is the one
 # binary in LAZYDAP_INSTALL_DIR.
@@ -45,6 +48,12 @@ require_safe_scheme() {
     *) die "refusing to fetch $1 — must be https:// or file:// (or an absolute path)" ;;
   esac
 }
+
+# A token is for the release *lookup* only. The assets come from a different
+# host (github.com, redirected to objects.githubusercontent.com) and a public
+# release needs no authentication to download — sending credentials to an origin
+# that did not ask for them is how they end up in somebody else's logs.
+GITHUB_API_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 REPO="${LAZYDAP_REPO:-planetaryescape/lazydap}"
 INSTALL_DIR="${LAZYDAP_INSTALL_DIR:-$HOME/.local/bin}"
@@ -113,6 +122,27 @@ digest_from_manifest() {
   '
 }
 
+# Fetch the release list, authenticating only if it is GitHub's own API.
+#
+# The scheme-and-host test is the whole safeguard: LAZYDAP_RELEASES_URL can name
+# any origin, and the token belongs to exactly one of them.
+#
+# The header arrives through a config file on stdin rather than as an argument
+# because `ps` shows one process's arguments to every user on the machine, and a
+# token is not a thing to put there.
+fetch_releases() {
+  if [ -n "$GITHUB_API_TOKEN" ]; then
+    case "$1" in
+      https://api.github.com/*)
+        printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_API_TOKEN" |
+          curl -fsSL -K - "$1"
+        return
+        ;;
+    esac
+  fi
+  curl -fsSL "$1"
+}
+
 # Which build --------------------------------------------------------------
 #
 # Release assets are named for the Rust target triple they were built on, so
@@ -135,7 +165,7 @@ if [ "$REQUESTED" = "latest" ]; then
   # publishes `chapter-*` releases for the book, and product releases below 1.0
   # go out as prereleases, so that redirect points at a book chapter far more
   # often than it points at lazydap. Read the release list and choose from it.
-  releases="$(curl -fsSL "$RELEASES_URL")" ||
+  releases="$(fetch_releases "$RELEASES_URL")" ||
     die "could not reach ${RELEASES_URL}. Name a version instead: install.sh v0.1.0"
 
   # Two different notions of "prerelease" here, treated differently on purpose.
