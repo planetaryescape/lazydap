@@ -2366,10 +2366,32 @@ and nothing tells them why.
 `Source` selectors of `BreakpointRemove` and `BreakpointToggle`, before the store sees it. The
 store therefore holds one spelling per file whatever a client sends.
 
-**A path that will not canonicalise is kept exactly as it arrived**, which is the half worth
-stating. It almost always means the file is not there *yet* — generated, or on a branch not
-checked out — and a breakpoint waiting for it is a reasonable thing to have persisted;
-refusing it in the daemon would turn a breakpoint the store already holds into an error on the
-next `toggle`. The CLI still refuses a missing file at the point where the user typed it, which
-is both where the better error message is and where the user can do something about it. The two
-are not redundant: the client's check is a message, the daemon's is an invariant.
+**The store closes the same loop on the way in.** `state.toml` is hand-editable, and builds
+before this one wrote whatever the client sent, so a source could arrive in memory under a
+spelling no location selector matched — `break --remove main.c:1` answered `removed` with an
+empty `not_found`, having removed nothing. `file::into_memory` now canonicalises each
+breakpoint's source as it absolutises it, so both entry points into the store agree. The path
+written back out is unaffected: the project root comes from `current_dir()`, which the kernel
+already hands back with symlinks resolved, so a canonical source inside it still relativises.
+
+**A path that will not canonicalise is kept exactly as it arrived**, in both places. It almost
+always means the file is not there *yet* — generated, or on a branch not checked out — and a
+breakpoint waiting for it is a reasonable thing to have persisted; refusing it in the daemon
+would turn a breakpoint the store already holds into an error on the next `toggle`. The CLI
+still refuses a missing file at the point where the user typed it, which is both where the
+better error message is and where the user can do something about it. The two are not
+redundant: the client's check is a message, the daemon's is an invariant.
+
+**What that leaves open, stated rather than left to be found.** A breakpoint persisted for a
+file that does not exist keeps its raw spelling until the file does exist; if a client then adds
+one at the same line under the canonical name, the store sees two different files and holds two
+breakpoints. Closing it would mean re-canonicalising the whole list every time the filesystem
+changes underneath it, which is a filesystem watch for a case that resolves itself the moment
+either breakpoint is re-set. The CLI cannot reach it at all — it refuses a path that does not
+resolve before sending.
+
+**Absolute paths remain the client's job.** `canonicalize` resolves a relative path against the
+daemon's working directory, which is wherever it was started and is nobody's project. The CLI
+and the TUI both send absolute paths (D050 makes the same point about adapter discovery); a
+relative one is left to fail as it always has rather than being rewritten into a confident wrong
+answer.

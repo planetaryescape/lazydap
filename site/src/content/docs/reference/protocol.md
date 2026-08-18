@@ -60,7 +60,7 @@ well-formed frame; there is nothing to recover on the old connection.
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 1,
   "payload": {
     "Request": "Ping"
@@ -87,7 +87,7 @@ A request that does have fields looks like this:
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 5,
   "payload": {
     "Request": {
@@ -99,6 +99,11 @@ A request that does have fields looks like this:
   }
 }
 ```
+
+Both of `Doctor`'s fields are accepted and ignored since v0.2.8: the adapter and state checks
+run in the client, which is the process whose `PATH` and working directory they describe, and
+the daemon answers only for itself. They stay on the wire because removing a field changes the
+frame's shape; they come off at the next protocol bump.
 
 ## Handshake
 
@@ -150,7 +155,7 @@ scroll offsets — not a request variant. Nothing sends it and the daemon has no
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 6,
   "payload": {
     "Request": {
@@ -176,7 +181,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 7,
   "payload": {
     "Request": {
@@ -200,7 +205,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 8,
   "payload": {
     "Request": {
@@ -234,7 +239,7 @@ wire**, even though the Rust variants are not:
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 9,
   "payload": {
     "Request": {
@@ -269,7 +274,7 @@ requests. A client must be able to read a frame it did not ask for at any point.
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 0,
   "payload": {
     "Event": {
@@ -289,7 +294,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 0,
   "payload": {
     "Event": {
@@ -310,7 +315,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 4,
+  "version": 9,
   "id": 0,
   "payload": {
     "Event": {
