@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.5] — 2026-08-18
+
 ### Fixed
 
 **The TUI drew no breakpoint sign for a file reached through a symlink, and `b` there added a second one.** `lazydap break` canonicalises before it records a breakpoint, so on macOS — where `/tmp` is `/private/tmp`, and a checkout under a symlinked directory is ordinary — `lazydap break /tmp/d/hello.c:6` stored `/private/tmp/d/hello.c`. The program stopped there, the TUI opened the file under the adapter's spelling, and line 6 showed nothing; pressing `b` on it recorded a duplicate under a name `lazydap break --remove /tmp/d/hello.c:6` could not select. The pane now holds the file under the name the filesystem gives it, which is the one every breakpoint is recorded under (D097).
