@@ -173,3 +173,14 @@ exactly the reason the bug existed, and the test caught it (see `panes/scopes.rs
 
 Also: a scope from the previous stop can no longer be expanded, for the same reason M12's
 frames can no longer be jumped to.
+
+### Review round, 2026-08-18 (defect campaign)
+
+**The rows were rebuilt by every read.** `rows()` walked the whole visible tree and allocated a
+`Row` and a `String` per node; `render` called it and then called `selected_index()`, which
+called it again, and `move_selection` a third time — ten times a second. On the 100,000-element
+array this pane deliberately does not truncate (D080, `max: Some(0)`) that is millions of
+allocations a second to draw a screenful. The rows are now built when the tree changes —
+`replace`, `populate`, `set_expanded`, `mark_pending`, `abandon_pending` — and reads take a
+slice of them. Paging the children behind an "N more…" row was considered and left alone: it
+would put back the silent truncation D080 removed.

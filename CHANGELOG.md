@@ -8,7 +8,17 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+**The TUI drew no breakpoint sign for a file reached through a symlink, and `b` there added a second one.** `lazydap break` canonicalises before it records a breakpoint, so on macOS — where `/tmp` is `/private/tmp`, and a checkout under a symlinked directory is ordinary — `lazydap break /tmp/d/hello.c:6` stored `/private/tmp/d/hello.c`. The program stopped there, the TUI opened the file under the adapter's spelling, and line 6 showed nothing; pressing `b` on it recorded a duplicate under a name `lazydap break --remove /tmp/d/hello.c:6` could not select. The pane now holds the file under the name the filesystem gives it, which is the one every breakpoint is recorded under (D-WP6-2).
+
+**A daemon that died as fast as the TUI could start one was restarted four times a second.** The reconnection ladder counts from 250ms and doubles to 4s, and a connection coming back put it straight back at the bottom — so a daemon that accepted the connection and then died on the first request it was given (a crash on `Subscribe`, or something killing it in a loop) had the TUI spawning another one every quarter second for as long as it was open. The ladder now keeps its place until a connection has lasted five seconds, and still never gives up (D-WP6-1).
+
+**A panic in the TUI left the terminal wrapping everything you pasted.** ratatui's panic hook restores raw mode and the alternate screen; it knows nothing about bracketed paste, which the TUI turns on itself, so a crash left the mode set and every later paste in that shell arrived surrounded by `\x1b[200~ … \x1b[201~` until the user ran `reset`. The hook is now wrapped with one that turns it back off.
+
+**Pressing Enter in the add-watch prompt while the daemon was away threw the expression away.** The prompt was taken out of the state before the key was looked at, and the refusal never put it back: the notice said the daemon was unreachable and the text was gone, with nothing on screen to retype it from. It stays open, with what was typed still in it.
+
+**Expanding a very large container made the scopes pane redraw slowly.** Every read of the pane's rows walked the whole visible tree and allocated a row and a string per node, and one draw did that three times, ten times a second — so a 100,000-element array, which the pane deliberately does not truncate, cost millions of allocations a second. The rows are built when the tree changes and not when it is read.
 
 ## [0.2.4] — 2026-08-18
 

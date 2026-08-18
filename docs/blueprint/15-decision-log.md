@@ -2169,3 +2169,61 @@ pump disconnect — so both fired, and the pump's carried the opposite
 is non-negotiable #6. `Session::begin_client_teardown` marks the session before
 the client's request goes out, and the pump winds down only a session that ended
 without one.
+
+---
+
+## D-WP6-1 — the TUI's reconnection ladder is only reset by a connection that lasted
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** M19's ladder (D044) counts attempts from 1 and doubles to a 4s ceiling, and it never
+gives up — every attempt can *start* a daemon rather than merely wait for one, so no failure
+here is final. What made that safe was the assumption that a connection coming back means the
+problem is over. It does not. A daemon that accepts the connection and then dies on the first
+request it is given — a crash while handling `Subscribe`, an out-of-memory kill, something
+restarting it in a loop — put the TUI back at `Connected` and therefore back at the bottom of
+the ladder, so the next `DaemonGone` waited 250ms and started another one. That is four daemon
+spawns a second, for as long as the TUI is open, against a machine that is already unwell.
+
+The ladder position is now kept across a connection that did not last, and reset only once one
+has *proved itself*: fifty of the loop's 100ms ticks, five seconds of being reachable. Under
+the ordinary case — `lazydap shutdown` at lunchtime, a `launch` in the afternoon — nothing
+changes, because that connection lasts. Under a crash loop the delay climbs to the same 4s
+ceiling every other failure reaches.
+
+**Ticks rather than a clock,** because the reducer is pure (D012): it has no clock, and the
+one heartbeat it does hear is `Msg::Tick`. Counting those is the only way to express "has been
+up for a while" without giving the reducer something to read the time from.
+
+**A side effect worth having:** attempt numbers are now monotonic for the life of the TUI, so
+the `is_awaiting` check that drops a superseded reconnection cannot mistake attempt 1 of a new
+ladder for attempt 1 of the old one.
+
+---
+
+## D-WP6-2 — the TUI holds a source file under the name the filesystem gives it
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** the two sides were comparing different spellings of the same file. `lazydap break`
+canonicalises before it records a breakpoint (`commands::resolve_source`), and the store
+dedupes on the exact `(source, line)`; the TUI built its `Location` from the adapter's frame
+untouched. On macOS anything under a symlinked directory — `/tmp` is `/private/tmp`, and a
+checkout under one is common — made those differ: `lazydap break /tmp/d/hello.c:6` stored
+`/private/tmp/d/hello.c`, the program stopped there, the TUI opened `/tmp/d/hello.c`, and the
+gutter drew nothing on line 6. Pressing `b` there added a *second* breakpoint under the other
+spelling, which `lazydap break --remove /tmp/d/hello.c:6` could not select.
+
+The file read that the pane already does now resolves the path as well and reports both names:
+the pane holds the canonical one, which is what every breakpoint match and every request `b`
+sends is built from, and remembers the one it was asked for so the next stop in the same file
+is recognised as already open rather than re-read.
+
+**Not in the reducer,** which is pure (D012) — `realpath` is I/O, it can block on a network
+filesystem, and putting it there would also make the reducer's tests depend on what happens to
+exist in `/tmp` on the machine running them.
+
+**Not in the daemon.** Canonicalising a frame's source server-side would cost a filesystem
+call per frame of every stack trace and would change what `lazydap stack` prints, which is a
+JSON output shape and somebody else's contract. The mismatch is the TUI's, because the TUI is
+the only client that matches a frame against a breakpoint.

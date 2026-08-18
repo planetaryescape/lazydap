@@ -234,3 +234,21 @@ pgrep -f "$PWD/target/debug/c-fixtures"   # the one that was missing
 Evidence after the fix: four consecutive full runs of `cargo test --test wait_codelldb`
 (13 tests each), cumulative orphan count `0` after every one. Before it, that suite leaked
 exactly one per run.
+
+### Review round, 2026-08-18 (defect campaign)
+
+**A handshake was taken as proof the daemon works, and it is not.** `daemon_gone` always
+started the ladder at attempt 1, so a daemon that accepted the connection and then died on the
+first request it was given — a crash handling `Subscribe`, an out-of-memory kill, something
+restarting it in a loop — reset the backoff on every cycle: `ensure_daemon()` every 250ms, for
+as long as the TUI was open. The ladder now keeps its rung across a connection that did not
+last and is only reset once one has been up for five seconds, counted in the loop's ticks
+because the reducer has no clock. It still never gives up (**D-WP6-1**). A side effect worth
+having: attempt numbers are now monotonic, so the superseded-attempt check cannot mistake
+attempt 1 of a new ladder for attempt 1 of the old one.
+
+**A panic left bracketed paste on.** `enable_bracketed_paste()` runs after `ratatui::try_init`,
+and ratatui's panic hook only calls `restore()` — raw mode and the alternate screen. A crash
+therefore left the user's shell wrapping every later paste in `\x1b[200~ … \x1b[201~` until
+they ran `reset`. The hook ratatui installed is now wrapped by one that turns paste mode off
+first and then calls it.

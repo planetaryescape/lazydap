@@ -213,3 +213,15 @@ having to express any of them.
 
 Verified live: `lazydap break examples/c-hello/main.c:6` typed in another shell made `◯ 6`
 appear in a running TUI with no keypress, and `--remove` took it away again.
+
+### Review round, 2026-08-18 (defect campaign)
+
+**The gutter and `b` compared source paths literally; the CLI canonicalises.** `lazydap break`
+resolves a path before recording it and the store dedupes on the exact `(source, line)`, so on
+macOS — `/tmp` is `/private/tmp`, and a checkout under a symlinked directory is ordinary — a
+breakpoint set from the shell was stored under a spelling the pane never matched: no sign on
+the line the program was stopped on, and `b` there recorded a duplicate that
+`lazydap break --remove /tmp/…` could not select. The source pane now holds the file under the
+name the filesystem gives it (resolved by the read that was already happening, off the
+reducer), remembers the name it was asked for so the next stop is still "already open", and
+every breakpoint match and request is built from the canonical one (**D-WP6-2**).

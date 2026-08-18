@@ -142,3 +142,11 @@ hand-edited entries), `crates/protocol/src/types.rs` (three requests, `WatchRepo
 - A watch whose `variables_reference` is non-zero (a struct, an array) is shown as a single
   line. Expanding one the way the scopes pane expands a variable is the obvious next step
   and needs no protocol change.
+
+### Review round, 2026-08-18 (defect campaign)
+
+**Enter in the add-watch prompt while the daemon was away discarded what had been typed.** The
+modal is `take()`n before the key is looked at, and `add_watch` while `Reconnecting` only set
+the "not reachable" notice — so the expression went with it, and there was nothing on screen to
+retype it from. `add_watch` now takes the prompt rather than its text and puts it back when it
+cannot send.
