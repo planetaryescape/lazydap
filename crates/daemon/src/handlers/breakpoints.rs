@@ -25,7 +25,7 @@ use lazydap_core::{
 use lazydap_protocol::{BreakpointAction, BreakpointReport, Event, IpcError, Response};
 use lazydap_store::AddOutcome;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn list(state: &Arc<DaemonState>) -> Result<Response> {
@@ -40,6 +40,11 @@ pub fn list(state: &Arc<DaemonState>) -> Result<Response> {
 }
 
 pub async fn add(state: &Arc<DaemonState>, new: NewBreakpoint, dry_run: bool) -> Result<Response> {
+    let new = NewBreakpoint {
+        source: canonical(&new.source),
+        ..new
+    };
+
     if dry_run {
         // Adding is the one mutation whose preview cannot come from a
         // selector: there is nothing to select yet. `preview_add` answers the
@@ -101,6 +106,8 @@ pub async fn remove(
     selector: BreakpointSelector,
     dry_run: bool,
 ) -> Result<Response> {
+    let selector = canonical_selector(selector);
+
     if dry_run {
         let (picked, not_found) = state.store.select(&selector);
         return Ok(Response::Breakpoints(BreakpointReport {
@@ -143,6 +150,8 @@ pub async fn toggle(
     selector: BreakpointSelector,
     dry_run: bool,
 ) -> Result<Response> {
+    let selector = canonical_selector(selector);
+
     if dry_run {
         // Show them as they *would* be, which is the only useful preview of a
         // toggle — echoing the current state would answer a question nobody
@@ -179,6 +188,41 @@ pub async fn toggle(
         not_found: toggled.not_found,
         applied_to_session: applied,
     }))
+}
+
+/// The spelling of a source path the daemon stores and selects on.
+///
+/// A file has more than one true name — `/tmp/x.c` and `/private/tmp/x.c` are
+/// the same file on macOS — and two spellings of one line are two breakpoints
+/// in a list that only ever compares paths for equality. The CLI resolves its
+/// own paths before it sends them (`commands::resolve_source`) and the TUI does
+/// too (D097), but that is each client's courtesy; the daemon is the only place
+/// that can make it the project's rule, and a client that skips it should not
+/// end up with a second breakpoint on a line the CLI already has one on
+/// (D-WP9-1).
+///
+/// A path that will not canonicalise is kept exactly as it arrived. That is
+/// almost always a file which is not there yet — generated, or on a branch not
+/// checked out — and a breakpoint waiting for it is a reasonable thing to hold.
+/// Refusing it here would turn a breakpoint the store persisted quite happily
+/// into an error on the next `toggle`. The CLI still refuses a missing file at
+/// the point where the user typed it, which is where the better message is.
+fn canonical(source: &Path) -> PathBuf {
+    source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf())
+}
+
+/// The same, for the selectors that name a file.
+fn canonical_selector(selector: BreakpointSelector) -> BreakpointSelector {
+    match selector {
+        BreakpointSelector::Location { source, line } => BreakpointSelector::Location {
+            source: canonical(&source),
+            line,
+        },
+        BreakpointSelector::Source(source) => BreakpointSelector::Source(canonical(&source)),
+        other => other,
+    }
 }
 
 /// Tell every subscriber that the project's breakpoints are not what they last
@@ -381,6 +425,65 @@ mod tests {
             !report.breakpoints[0].verified,
             "nothing has checked that the line exists yet",
         );
+    }
+
+    #[tokio::test]
+    async fn two_spellings_of_one_file_are_one_breakpoint() {
+        // The CLI canonicalises before it sends and the TUI does too, so a
+        // client that does neither is the case this covers: without the
+        // daemon canonicalising, `/tmp/…/main.c` and `/private/tmp/…/main.c`
+        // are two entries on one line of one file, and removing "the"
+        // breakpoint leaves the other behind.
+        //
+        // The symlink is built here rather than borrowed from macOS's
+        // `/tmp` → `/private/tmp`, which Linux does not have.
+        let state = state();
+        let real = std::env::temp_dir().join(format!("lazydap-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(&real).expect("create the real directory");
+        std::fs::write(real.join("main.c"), "int main(void) { return 0; }\n").expect("write");
+
+        let linked = real.with_extension("link");
+        let _ = std::fs::remove_file(&linked);
+        std::os::unix::fs::symlink(&real, &linked).expect("symlink the directory");
+
+        for source in [real.join("main.c"), linked.join("main.c")] {
+            let source = source.to_str().expect("a utf-8 temporary directory");
+            report(
+                &state,
+                Request::BreakpointAdd {
+                    breakpoint: new_breakpoint(source, 19),
+                    dry_run: false,
+                },
+            )
+            .await;
+        }
+
+        let breakpoints = state.store.breakpoints();
+        assert_eq!(breakpoints.len(), 1, "got: {breakpoints:?}");
+        assert_eq!(
+            breakpoints[0].source,
+            real.join("main.c").canonicalize().expect("canonicalise"),
+        );
+
+        // And the selectors agree with the spelling the store settled on, so
+        // the same client can take its breakpoint back off again.
+        let removed = report(
+            &state,
+            Request::BreakpointRemove {
+                selector: BreakpointSelector::Location {
+                    source: linked.join("main.c"),
+                    line: 19,
+                },
+                dry_run: false,
+            },
+        )
+        .await;
+        assert_eq!(removed.breakpoints.len(), 1, "got: {removed:?}");
+        assert!(state.store.breakpoints().is_empty());
+
+        let _ = std::fs::remove_file(&linked);
+        let _ = std::fs::remove_dir_all(&real);
     }
 
     #[tokio::test]
