@@ -19,6 +19,7 @@ use super::{
     AdapterError, AdapterHandle, DebugAdapter, Pending, Result, Spawn, StopContext, discover,
     for_kind, rebind_source, translate,
 };
+use crate::debuggee::Debuggee;
 use lazydap_core::{
     AdapterBreakpoint, Breakpoint, OutputCategory, OutputChunk, PauseReason, SessionState,
 };
@@ -105,10 +106,12 @@ pub async fn launch(
         }
     };
 
-    match handshake(adapter, &mut transport, request, breakpoints).await {
-        Ok(outcome) => {
+    let mut outcome = Outcome::new();
+    match handshake(adapter, &mut transport, request, breakpoints, &mut outcome).await {
+        Ok(()) => {
             let (reader, writer) = transport.split();
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+            let debuggee = started_debuggee(adapter, &outcome);
             Ok(Launched {
                 handle: AdapterHandle::new(
                     writer,
@@ -124,17 +127,7 @@ pub async fn launch(
                 thread_id: outcome.thread_id,
                 breakpoints: outcome.breakpoints,
                 exit_code: outcome.exit_code,
-                // codelldb sends no `process` event, so its pid is scraped out
-                // of console text and comes with no program name — which is
-                // right for codelldb, whose debuggee *is* the program that was
-                // launched (quirk 9).
-                debuggee: outcome.debuggee.or_else(|| {
-                    outcome
-                        .output
-                        .iter()
-                        .find_map(|chunk| adapter.debuggee_pid_in(&chunk.output))
-                        .map(|pid| StartedProcess { pid, program: None })
-                }),
+                debuggee,
                 output: outcome.output,
             })
         }
@@ -143,11 +136,54 @@ pub async fn launch(
             // the transport is not reusable. Take the adapter down with it
             // rather than leaking a process nobody can talk to.
             let _ = transport.shutdown().await;
+            // The adapter may have started the program before whatever went
+            // wrong went wrong — a `setBreakpoints` that was refused, a
+            // `stopped` that never came — and the process it started is now
+            // parentless with nothing left that knows it is a debuggee. Same
+            // rule as an adapter that dies mid-session (D045), applied to the
+            // launch that never finished.
+            if let Some(started) = started_debuggee(adapter, &outcome) {
+                let debuggee = Debuggee {
+                    pid: started.pid,
+                    program: started.program.unwrap_or_else(|| request.program.clone()),
+                };
+                if let Some(reaped) = debuggee.reap().await {
+                    tracing::warn!(
+                        target: "daemon.session",
+                        program = %debuggee.program.display(),
+                        %reaped,
+                        "the launch failed after the debuggee had started",
+                    );
+                }
+            }
             Err(error)
         }
     }
 }
 
+/// The process the launch started, however this adapter says so.
+///
+/// codelldb sends no `process` event, so its pid is scraped out of console text
+/// and comes with no program name — which is right for codelldb, whose debuggee
+/// *is* the program that was launched (quirk 9).
+fn started_debuggee(
+    adapter: &'static dyn DebugAdapter,
+    outcome: &Outcome,
+) -> Option<StartedProcess> {
+    outcome.debuggee.clone().or_else(|| {
+        outcome
+            .output
+            .iter()
+            .find_map(|chunk| adapter.debuggee_pid_in(&chunk.output))
+            .map(|pid| StartedProcess { pid, program: None })
+    })
+}
+
+/// What the handshake learned, filled in as it goes.
+///
+/// Owned by [`launch`] rather than returned, because a launch that fails still
+/// has to answer for what it started: the `process` event and codelldb's
+/// `Launched process N` line both arrive long before the step that goes wrong.
 struct Outcome {
     capabilities: AdapterCapabilities,
     state: SessionState,
@@ -160,12 +196,29 @@ struct Outcome {
     debuggee: Option<StartedProcess>,
 }
 
+impl Outcome {
+    fn new() -> Self {
+        Self {
+            capabilities: AdapterCapabilities::default(),
+            state: SessionState::Running,
+            reason: None,
+            raw_reason: None,
+            thread_id: None,
+            breakpoints: Vec::new(),
+            exit_code: None,
+            output: Vec::new(),
+            debuggee: None,
+        }
+    }
+}
+
 async fn handshake(
     adapter: &'static dyn DebugAdapter,
     transport: &mut DapTransport,
     request: &LaunchRequest,
     breakpoints: &[(PathBuf, Vec<Breakpoint>)],
-) -> Result<Outcome> {
+    outcome: &mut Outcome,
+) -> Result<()> {
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
 
     let capabilities: Capabilities = with_timeout(
@@ -174,6 +227,7 @@ async fn handshake(
         transport.request("initialize", &InitializeArgs::new(adapter.adapter_id())),
     )
     .await??;
+    outcome.capabilities = translate_capabilities(&capabilities);
 
     let launch_seq = transport
         .send_request("launch", &adapter.launch_args(request))
@@ -194,17 +248,6 @@ async fn handshake(
     // components disagreeing about a path cannot loop here.
     let mut rebound: HashSet<usize> = HashSet::new();
     let mut launch_answered = false;
-    let mut outcome = Outcome {
-        capabilities: translate_capabilities(&capabilities),
-        state: SessionState::Running,
-        reason: None,
-        raw_reason: None,
-        thread_id: None,
-        breakpoints: Vec::new(),
-        exit_code: Option::None,
-        output: Vec::new(),
-        debuggee: None,
-    };
 
     loop {
         // Waiting for a `stopped` we asked for is not optional: a caller that
@@ -217,10 +260,15 @@ async fn handshake(
             && breakpoint_seqs.is_empty()
             && (!request.stop_on_entry || outcome.reason.is_some());
         if settled || outcome.state == SessionState::Terminated {
-            return Ok(outcome);
+            return Ok(());
         }
 
-        match with_timeout("adapter message", deadline, transport.read_incoming()).await?? {
+        // Bounded by the launch's own deadline, and by nothing shorter. A
+        // per-message timeout is wrong once `launch` has been sent: delve's
+        // `mode: "debug"` compiles the program first and says nothing at all
+        // while `go build` runs, so a build longer than one message's patience
+        // failed a launch that had twice as long to finish (delve quirk 16).
+        match until_deadline("adapter message", deadline, transport.read_incoming()).await?? {
             Incoming::Event(event) => match event.event.as_str() {
                 // The configuration window. Breakpoints first, then
                 // `configurationDone` — in that order on the wire, because
@@ -282,13 +330,34 @@ async fn handshake(
                     // later, but the ending has already been emitted by then.
                     // Same grace window M6's `--wait` needs, for the same
                     // reason.
-                    drain_for_exit_code(transport, &mut outcome).await;
-                    return Ok(outcome);
+                    drain_for_exit_code(transport, outcome).await;
+                    return Ok(());
                 }
                 _ => {}
             },
             Incoming::Response(response) => {
                 if !response.success {
+                    // One file's breakpoints are not the launch. All three
+                    // adapters answer a `setBreakpoints` they cannot honour
+                    // with `verified: false` rather than a rejection (see the
+                    // quirks files) — but an adapter that does reject one used
+                    // to take the whole launch down with it, so a single stale
+                    // persisted breakpoint could make a project undebuggable.
+                    // Reported unbound instead, which is what an unbindable
+                    // breakpoint looks like everywhere else.
+                    if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
+                        let message = response.message.unwrap_or_default();
+                        tracing::warn!(
+                            target: "daemon.session",
+                            source = %breakpoints[index].0.display(),
+                            %message,
+                            "the adapter refused this file's breakpoints; the launch stands",
+                        );
+                        outcome
+                            .breakpoints
+                            .extend(unbound(&breakpoints[index].1, &message));
+                        continue;
+                    }
                     return Err(AdapterError::Rejected {
                         command: response.command,
                         message: response.message.unwrap_or_default(),
@@ -408,6 +477,23 @@ fn applied_breakpoints(
     }
 }
 
+/// Every breakpoint in a file the adapter would not take, as unbound.
+///
+/// The adapter's own words are kept as the message: "could not find file X" is
+/// the whole answer to why nothing bound there.
+fn unbound(requested: &[Breakpoint], message: &str) -> Vec<AdapterBreakpoint> {
+    requested
+        .iter()
+        .map(|breakpoint| AdapterBreakpoint {
+            id: Some(breakpoint.id),
+            adapter_id: None,
+            verified: false,
+            line: None,
+            message: (!message.is_empty()).then(|| message.to_string()),
+        })
+        .collect()
+}
+
 fn exit_code_of(event: &DapEvent) -> Option<i32> {
     event
         .body
@@ -486,6 +572,25 @@ async fn with_timeout<F: Future>(command: &str, deadline: Instant, future: F) ->
         .map_err(|_| AdapterError::Timeout {
             command: command.to_string(),
             timeout: MESSAGE_TIMEOUT,
+        })
+}
+
+/// Bound a step of the handshake by the overall deadline only.
+///
+/// For everything after `launch` has been sent. Silence there is not evidence
+/// of a wedged adapter: delve compiles the program before it runs it and says
+/// nothing while it does, and the launch has a deadline of its own for exactly
+/// this. Terminal in the same way [`with_timeout`] is.
+async fn until_deadline<F: Future>(
+    command: &str,
+    deadline: Instant,
+    future: F,
+) -> Result<F::Output> {
+    tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| AdapterError::Timeout {
+            command: command.to_string(),
+            timeout: LAUNCH_TIMEOUT,
         })
 }
 
