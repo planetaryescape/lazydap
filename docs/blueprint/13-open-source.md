@@ -62,7 +62,7 @@ lazydap/
 
 1. **No feature lands without a CLI subcommand.** TUI-only PRs rejected.
 2. **No feature lands without `--dry-run` if it mutates state.**
-3. **Tests with real adapters, not mocks** (FakeAdapter exists for unit-style speed; integration tests run real codelldb).
+3. **Tests with real adapters, not mocks** (`AdapterHandle::detached()` stands in where the test is about session bookkeeping; integration tests run real codelldb, debugpy and delve).
 4. **`cargo clippy --workspace --all-targets` must pass.**
 5. **`cargo fmt --check` must pass.**
 6. **JSON schema changes require a `15-decision-log.md` entry.**

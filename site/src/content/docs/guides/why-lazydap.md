@@ -191,7 +191,7 @@ agent reading one screen.
   after the CLI does, because the CLI is where they are defined.
 - **You are debugging in a browser.** No CDP support, and none planned.
 - **Node today.** codelldb, debugpy and delve cover C, C++, Rust, Python and Go; js-debug
-  is next on the roadmap.
+  is on the roadmap, behind `attach`.
 - **You want it hosted.** There is no lazydap cloud. Nothing here phones home.
 
 ## What would prove this wrong

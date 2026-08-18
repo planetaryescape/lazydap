@@ -16,7 +16,7 @@ success, not a failure.
 | `1` | The command failed | Read `error` on stderr and act on it |
 | `2` | The command line was wrong | Fix the arguments |
 | `3` | The daemon could not be started or reached | Usually transient; retry once |
-| `4` | The debug adapter is missing | Install codelldb |
+| `4` | The debug adapter is missing | Install the one this program needs: codelldb for C, C++ and Rust, debugpy for Python, delve for Go |
 
 ## The error object
 
@@ -44,7 +44,7 @@ this table looks short.
 | `SessionNotFound` | No session: nothing launched, or already disconnected | `lazydap launch <program>` |
 | `SessionAlreadyActive` | One program is already being debugged | `lazydap disconnect`, then launch |
 | `BadRequest` | The request made no sense here, commonly stepping a program that already exited. Also what an unreadable protocol frame gets | Read `message`; for a finished program, launch again |
-| `AdapterNotFound` | No codelldb on `PATH` | [Install it](/getting-started/install/); `details.searched` lists where it looked |
+| `AdapterNotFound` | The adapter this program needs is not usable here — no codelldb on `PATH`, no `python3` that can import debugpy, no `dlv` | [Install it](/getting-started/install/); `details.searched` lists where it looked, and `lazydap doctor` names the install command |
 | `DapProtocolError` | The debugger refused. Usually the expression, not lazydap | Read `details.adapter_message` — the debugger's own words |
 | `AdapterCrashed` | The debugger process died | Unrecoverable session; `disconnect` and launch again |
 | `AdapterTimeout` | The debugger did not answer in time | Retry once; if it repeats, `disconnect` |

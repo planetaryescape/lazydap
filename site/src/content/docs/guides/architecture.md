@@ -69,8 +69,8 @@ reverse is the bypass the table forbids.
 
 :::note
 Older copies of `ARCHITECTURE.md` and the blueprint show eleven crates, including a separate
-one per adapter. Those were planned and not built that way: codelldb lives inside the daemon
-at `crates/daemon/src/adapter/`. The seven above are what exists.
+one per adapter. Those were planned and not built that way: all three adapters live inside
+the daemon at `crates/daemon/src/adapter/`. The seven above are what exists.
 :::
 
 ## Requests come in four kinds

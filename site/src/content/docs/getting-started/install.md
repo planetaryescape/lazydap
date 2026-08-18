@@ -87,7 +87,7 @@ in it uses `sudo`.
 Pass a tag to pin a version rather than take the newest:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/planetaryescape/lazydap/main/install.sh | bash -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/planetaryescape/lazydap/main/install.sh | bash -s -- v0.2.4
 ```
 
 ### From source

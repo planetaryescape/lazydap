@@ -7,7 +7,7 @@
 # `brew install` does not need a Rust toolchain and does not spend minutes
 # compiling something CI has already compiled and checksummed.
 class Lazydap < Formula
-  desc "Scriptable, terminal-first debugger for C, C++, and Rust"
+  desc "Scriptable, terminal-first debugger for C, C++, Rust, Python, and Go"
   homepage "https://github.com/planetaryescape/lazydap"
   # Stated rather than scanned out of the URL. `brew audit --strict` calls this
   # redundant, and it is, right up to the first prerelease: the URLs carry the
@@ -46,14 +46,21 @@ class Lazydap < Formula
 
   def caveats
     <<~EOS
-      lazydap drives codelldb and does not bundle it. codelldb has to reach your PATH
-      through a wrapper script, not a symlink: it finds liblldb by walking up from
-      argv[0], so through a symlink that walk starts one directory too high and it
-      dies in dlopen. The four commands are in the README:
+      lazydap drives debug adapters and bundles none of them. Install the one for
+      the language you are debugging:
+
+        C, C++, Rust   codelldb   https://github.com/vadimcn/codelldb/releases
+        Python         debugpy    python3 -m pip install debugpy
+        Go             delve      go install github.com/go-delve/delve/cmd/dlv@latest
+
+      codelldb has to reach your PATH through a wrapper script, not a symlink: it
+      finds liblldb by walking up from argv[0], so through a symlink that walk starts
+      one directory too high and it dies in dlopen. The four commands are in the
+      README:
 
         https://github.com/planetaryescape/lazydap#install
 
-      Then check both halves are where lazydap expects:
+      Then check what you have. One usable adapter is enough for it to pass:
 
         lazydap doctor
     EOS

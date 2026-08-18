@@ -222,9 +222,14 @@ case ":${PATH}:" in
     ;;
 esac
 
-echo "  lazydap drives codelldb and does not bundle it. codelldb has to reach your"
-echo "  PATH through a wrapper script — a symlink breaks its liblldb lookup and it"
-echo "  dies in dlopen. The four commands are in the README:"
+echo "  lazydap drives debug adapters and bundles none of them. Install the one for"
+echo "  the language you are debugging:"
+echo "      C, C++, Rust   codelldb   https://github.com/vadimcn/codelldb/releases"
+echo "      Python         debugpy    python3 -m pip install debugpy"
+echo "      Go             delve      go install github.com/go-delve/delve/cmd/dlv@latest"
+echo
+echo "  codelldb has to reach your PATH through a wrapper script — a symlink breaks"
+echo "  its liblldb lookup and it dies in dlopen. The four commands are in the README:"
 echo "      https://github.com/${REPO}#install"
 echo
-echo "  Then run: lazydap doctor"
+echo "  Then run: lazydap doctor. One usable adapter is enough for it to pass."

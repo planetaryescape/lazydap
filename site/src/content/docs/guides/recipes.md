@@ -283,7 +283,7 @@ Four things make this survive CI rather than only working on your laptop:
 **If it fails.** `set -e` will abort on the first lazydap command that exits non-zero, which
 is what you want everywhere except a check you expect to fail. Exit `3` means no daemon could
 be started — on a fresh runner that usually means the working directory is not what you think,
-since the daemon is per project root. Exit `4` means codelldb is not installed on the runner.
+since the daemon is per project root. Exit `4` means the adapter the program needs is not installed on the runner.
 Both are listed on [errors and exit codes](/reference/errors/).
 
 ## Work out why a breakpoint never stops anything

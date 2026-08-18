@@ -37,7 +37,7 @@ lazydap inherits mxr's architectural decisions. They are battle-tested and the r
 5. **JSON output is a product feature.** Stable schema, pipeable, auto-detected when stdout is not a TTY. `--format table|json|csv|ids`.
 6. **`--dry-run` + `--yes` for every mutation.** Selection logic must match the real mutation path.
 7. **`tracing` from the start.** Structured logs to file in background mode, human-readable to stderr in foreground.
-8. **Tests with real adapters, not mocks.** A `FakeAdapter` exists for fast unit-style tests, but integration tests cross the full daemon ↔ adapter path.
+8. **Tests with real adapters, not mocks.** There is no `FakeAdapter`: the test doubles are `AdapterHandle::detached()` (a handle whose adapter has gone, for session bookkeeping) and the scripted transports in `lazydap-dap`. Everything that is a claim about adapter behaviour crosses the full daemon ↔ adapter path against a real one.
 
 ## Where lazydap diverges from mxr
 

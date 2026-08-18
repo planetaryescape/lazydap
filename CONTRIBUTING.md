@@ -52,7 +52,7 @@ LAZYDAP_REQUIRE_ADAPTERS=1 cargo test -p lazydap-daemon \
 
 Empty and `0` count as unset, so `LAZYDAP_REQUIRE_ADAPTERS= cargo test` is how you switch it back off in a shell that has exported it. CI's `adapters` job installs codelldb, debugpy and dlv and runs exactly that, so "the canonical tests run real codelldb" is now checked rather than trusted. The plain `test` job installs nothing, which keeps the skip path honest. Use the variable locally when you want to know that your run really exercised an adapter.
 
-**What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. A `FakeAdapter` exists for speed where the thing under test genuinely isn't adapter behaviour; anything that is a claim about what an adapter does belongs in `wait_codelldb.rs` against the real one.
+**What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. There is no `FakeAdapter`: where the thing under test genuinely isn't adapter behaviour, use `AdapterHandle::detached()` (`#[cfg(test)]`, every request answers `Gone`) or a scripted transport as `crates/dap/src/transport.rs` does. Anything that is a claim about what an adapter does belongs in `wait_codelldb.rs`, `wait_debugpy.rs` or `wait_delve.rs` against the real one.
 
 ## Sanity-checking a change by hand
 
@@ -74,13 +74,14 @@ gcc -g -O0 examples/c-hello/main.c -o examples/c-hello/build/hello
 
 ## DAP adapters
 
-lazydap wraps external DAP adapter processes. codelldb is the only one wired up today; debugpy and js-debug are on the roadmap, and the install notes are here because you'll want them when that lands.
+lazydap wraps external DAP adapter processes. codelldb, debugpy and delve are wired up; js-debug is on the roadmap, and its install notes are here because you'll want them when that lands. `cargo test --workspace` skips the suite for any adapter this machine does not have, so install the ones whose behaviour you are changing.
 
 | Adapter | Languages | Source |
 |---|---|---|
 | **codelldb** | Rust, C, C++, Swift, anything LLDB can debug | [vadimcn/codelldb](https://github.com/vadimcn/codelldb) |
 | **debugpy** | Python | [microsoft/debugpy](https://github.com/microsoft/debugpy) (PyPI) |
-| **js-debug** | Node.js, Chrome, Edge | [microsoft/vscode-js-debug](https://github.com/microsoft/vscode-js-debug) |
+| **delve** | Go | [go-delve/delve](https://github.com/go-delve/delve) |
+| **js-debug** | Node.js, Chrome, Edge — *not wired up* | [microsoft/vscode-js-debug](https://github.com/microsoft/vscode-js-debug) |
 
 The convention below: third-party prebuilt blobs go in `~/.local/opt/<name>/`, executables get exposed on `PATH` via `~/.local/bin/`. Make sure `~/.local/bin` is on your `PATH`. Nothing in lazydap depends on these locations.
 
@@ -125,14 +126,32 @@ Every codelldb behaviour that has cost this project time is written up in [`docs
 
 ### debugpy (Python)
 
-```bash
-pipx install debugpy
-#    → ~/.local/bin/debugpy-adapter   (the DAP-over-TCP entrypoint)
+lazydap runs debugpy as `<python> -m debugpy.adapter` over the child's stdin and stdout, so
+what has to be installed is the *module*, in the interpreter `python3` resolves to on your
+`PATH` — not the `debugpy-adapter` shim. A `pipx install debugpy` puts the shim on `PATH`
+and the module in an isolated environment `python3` cannot import, which passes a `--help`
+and then fails every launch.
 
-debugpy-adapter --help
+```bash
+python3 -m pip install debugpy
+
+python3 -c 'import debugpy; print(debugpy.__version__)'
 ```
 
-`pip install --user debugpy` works too; you'll need the user-site `bin/` on `PATH`.
+Pin a different interpreter — a virtualenv's, say — with `[adapter.debugpy] command` in
+`~/.config/lazydap/config.toml`. `lazydap doctor` reports which one it found.
+
+### delve (Go)
+
+```bash
+go install github.com/go-delve/delve/cmd/dlv@latest
+#    → ~/go/bin/dlv   (make sure that directory is on your PATH)
+
+dlv version
+```
+
+lazydap runs it as `dlv dap`, and always with `outputMode: "remote"` — without that every
+line the debuggee prints goes to delve's own terminal instead of the DAP stream.
 
 ### js-debug (Node.js / Chrome)
 
@@ -158,12 +177,13 @@ js-debug-dap 0     # port 0 = pick any free port; Ctrl-C to stop
 
 ### Invocation conventions
 
-The three adapters spell the same idea differently:
+No two of them are started the same way:
 
-| Adapter | "Listen on port N" |
+| Adapter | How lazydap starts it |
 |---|---|
 | codelldb | `codelldb --port N` |
-| debugpy-adapter | `debugpy-adapter --port N` |
+| debugpy | `python3 -m debugpy.adapter` — stdio, no port at all |
+| dlv | `dlv dap --listen=127.0.0.1:N` |
 | js-debug-dap | `js-debug-dap N` (positional) |
 
 That variance is intrinsic to the ecosystem. lazydap's per-adapter config carries the right invocation; don't normalise it away in your own scripts either.
@@ -172,7 +192,8 @@ That variance is intrinsic to the ecosystem. lazydap's per-adapter config carrie
 
 ```bash
 rm ~/.local/bin/codelldb && rm -rf ~/.local/opt/codelldb
-pipx uninstall debugpy
+python3 -m pip uninstall debugpy
+rm -f ~/go/bin/dlv
 rm ~/.local/bin/js-debug-dap && rm -rf ~/.local/opt/js-debug
 ```
 
