@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.4] — 2026-08-18
+
 ### Fixed
 
 **One adapter process leaked per session that ended on its own.** codelldb, debugpy and delve all hold their DAP socket open after they report the program terminated, waiting to be disconnected from — and the daemon, which only ever read from that socket, kept the adapter alive with it. Three `launch` + `continue --wait` cycles left three codelldb processes running, each with its own copy of LLDB, until `lazydap shutdown`. The daemon now disconnects an adapter as soon as its session ends and pulls the plug if it will not go, so an agent can loop launch-and-continue without a closing `lazydap disconnect`.
