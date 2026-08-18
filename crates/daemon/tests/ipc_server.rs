@@ -617,6 +617,37 @@ async fn a_reply_that_cannot_be_framed_is_refused_rather_than_hung_up_on() {
     assert_eq!(reply.id, 5);
 }
 
+/// An event too large to frame is dropped, and the subscription survives it.
+///
+/// The reply case above can answer the request that caused it; an event has no
+/// request behind it, so there is nothing to refuse — only the choice between
+/// losing that one event and losing the whole stream. A subscriber already
+/// resynchronises after a `Lagged`, so losing one is a cost it is built for;
+/// losing the connection sends the TUI into its reconnect ladder.
+#[tokio::test]
+async fn an_event_that_cannot_be_framed_does_not_take_the_subscription_with_it() {
+    let daemon = TestDaemon::start().await;
+    let mut subscriber = daemon
+        .subscriber(&[EventKind::Output, EventKind::Stopped])
+        .await;
+    subscriber.reply().await;
+
+    let session_id = SessionId::new();
+    daemon.emit(Event::Output {
+        session_id,
+        chunk: OutputChunk::new(
+            OutputCategory::Stdout,
+            "x".repeat(lazydap_protocol::MAX_FRAME_BYTES + 1),
+        ),
+    });
+    daemon.emit(stopped(session_id));
+
+    match subscriber.reply().await {
+        IpcPayload::Event(Event::Stopped { session_id: id, .. }) => assert_eq!(id, session_id),
+        other => unreachable!("the oversized output should have been dropped, got: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn shutdown_is_acknowledged_and_tells_the_daemon_to_stop() {
     let daemon = TestDaemon::start().await;

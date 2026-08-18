@@ -191,9 +191,26 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
                 event = next_event(subscription.as_mut()) => {
                     match event {
                         Some(event) => {
+                            let kind = event.kind();
                             if let Err(error) = connection.send(IpcMessage::event(event)).await {
-                                tracing::debug!(target: "daemon.ipc", %error, "subscriber went away");
-                                break;
+                                if !is_frame_error(&error) {
+                                    tracing::debug!(target: "daemon.ipc", %error, "subscriber went away");
+                                    break;
+                                }
+                                // Nothing reached the wire, so the socket is
+                                // fine — and an event, unlike a reply, has no
+                                // request to refuse in its place. Dropping
+                                // this one is the lesser loss: a subscriber
+                                // already has to resynchronise after a
+                                // `Lagged`, whereas hanging up over one event
+                                // it was never going to receive costs it every
+                                // later event as well.
+                                tracing::warn!(
+                                    target: "daemon.ipc",
+                                    event = ?kind,
+                                    %error,
+                                    "an event could not be framed; dropping it",
+                                );
                             }
                         }
                         // The broadcast closed, which only happens as the daemon

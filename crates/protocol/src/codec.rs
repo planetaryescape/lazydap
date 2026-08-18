@@ -101,7 +101,13 @@ impl Encoder<IpcMessage> for IpcCodec {
     fn encode(&mut self, item: IpcMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let json = serde_json::to_vec(&item)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.inner.encode(json.into(), dst)
+        let bytes = json.len();
+        // "frame size too big" on its own leaves the reader guessing by how
+        // much. This is the only place that knows, and a log line saying it is
+        // the difference between "raise the cap" and "ask for less".
+        self.inner
+            .encode(json.into(), dst)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{e} ({bytes} bytes)")))
     }
 }
 
