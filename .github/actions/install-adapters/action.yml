@@ -1,0 +1,108 @@
+name: Install DAP adapters
+description: >
+  Puts codelldb, debugpy and dlv on PATH so the real-adapter suites in
+  crates/daemon/tests/ run instead of skipping themselves.
+
+# Pinned, not `latest`. These versions are what the suites' assertions were
+# written against — a quirk that goes away upstream should turn up as a
+# deliberate bump with the quirk entry retired, not as a Tuesday where CI went
+# red on its own.
+inputs:
+  codelldb-version:
+    description: codelldb release tag, without the leading `v`.
+    default: '1.12.2'
+  debugpy-version:
+    description: debugpy version on PyPI.
+    default: '1.8.21'
+  delve-version:
+    description: delve module version, without the leading `v`.
+    default: '1.27.0'
+
+runs:
+  using: composite
+  steps:
+    # 55 MB of vsix per run otherwise, and the contents are immutable for a
+    # given tag, so the key needs nothing but the version.
+    - name: Cache codelldb
+      id: codelldb-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.local/opt/codelldb
+        key: codelldb-linux-x64-${{ inputs.codelldb-version }}
+
+    - name: Download codelldb
+      if: steps.codelldb-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL -o /tmp/codelldb.vsix \
+          "https://github.com/vadimcn/codelldb/releases/download/v${{ inputs.codelldb-version }}/codelldb-linux-x64.vsix"
+        mkdir -p ~/.local/opt/codelldb
+        unzip -q -o /tmp/codelldb.vsix -d ~/.local/opt/codelldb
+
+    - name: Put codelldb on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        # A wrapper script, never a symlink: codelldb finds liblldb by walking
+        # up from argv[0], so through a symlink on PATH it looks one directory
+        # too high and dies in dlopen (quirk 1, docs/issues/0001).
+        mkdir -p ~/.local/bin
+        cat > ~/.local/bin/codelldb <<'WRAPPER'
+        #!/usr/bin/env bash
+        exec "$HOME/.local/opt/codelldb/extension/adapter/codelldb" "$@"
+        WRAPPER
+        chmod +x ~/.local/bin/codelldb
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        # `--help` is the version that exists (quirk 4), and running it here
+        # turns a broken bundle into a failure with a name rather than two
+        # dozen adapter timeouts.
+        ~/.local/bin/codelldb --help > /dev/null
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    # Into the interpreter setup-python just made `python3`, which is the one
+    # the daemon's discovery will find and run `-m debugpy.adapter` under.
+    - name: Install debugpy
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --disable-pip-version-check "debugpy==${{ inputs.debugpy-version }}"
+        python3 -c 'import debugpy; print(debugpy.__version__)'
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        # There is no go.sum in this repository — the Go fixtures depend on
+        # nothing — and setup-go's cache has no key to build without one.
+        cache: false
+
+    - name: Cache dlv
+      id: dlv-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/go/bin/dlv
+        key: dlv-${{ inputs.delve-version }}-${{ runner.os }}
+
+    - name: Install dlv
+      if: steps.dlv-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: go install "github.com/go-delve/delve/cmd/dlv@v${{ inputs.delve-version }}"
+
+    - name: Put dlv on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        "$(go env GOPATH)/bin/dlv" version
+
+    # Yama's default scope of 1 lets a tracer follow its own descendants, which
+    # is all a launch needs; a runner image shipping scope 2 or 3 would block
+    # even PTRACE_TRACEME and every adapter here would fail at once. Cheap
+    # insurance, and `|| true` because a runner that refuses the write is
+    # telling us the setting is not ours to change.
+    - name: Allow ptrace
+      shell: bash
+      run: sudo sysctl -w kernel.yama.ptrace_scope=0 || true

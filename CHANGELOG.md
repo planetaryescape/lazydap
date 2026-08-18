@@ -124,6 +124,8 @@ Only codelldb advertises DAP's `supportTerminateDebuggee`, and only codelldb hon
 
 **`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
 
+**CI runs the debugger against real adapters.** codelldb, debugpy and dlv are installed in the pipeline and the suites that drive them fail rather than skip when one is missing, on every pull request and again on the tagged commit a release is built from. They had been skipping themselves in CI since the day they were written, so "tested against three real adapters" rested on a maintainer running them by hand.
+
 ### Fixed
 
 **A stale `variables_reference` could return another *session's* data.** Handles were numbered per session, so one minted in a session that has since ended was a live handle in the next one — and because inspection commands resolve against whichever session is current, a reference remembered across a `disconnect` came back full of a different program's variables under exit 0. Handles are now numbered by the daemon and never reused, and one from an ended session is refused with `StaleHandle` saying so.

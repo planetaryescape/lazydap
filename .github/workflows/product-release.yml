@@ -47,9 +47,14 @@ jobs:
 
       - run: cargo check --workspace --all-targets
 
-      # codelldb is not installed here, so the adapter integration tests skip
-      # themselves rather than fail. That is the same bargain CI makes.
+      # The real adapters, so the suites that need one run rather than skip.
+      # A release is the last place to accept "the tests were quiet"; see the
+      # `adapters` job in ci.yml for what the variable does.
+      - uses: ./.github/actions/install-adapters
+
       - run: cargo test --workspace --all-targets
+        env:
+          LAZYDAP_REQUIRE_ADAPTERS: '1'
 
       - name: Skill matches its sources
         run: |

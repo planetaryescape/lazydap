@@ -2230,3 +2230,37 @@ exist in `/tmp` on the machine running them.
 call per frame of every stack trace and would change what `lazydap stack` prints, which is a
 JSON output shape and somebody else's contract. The mismatch is the TUI's, because the TUI is
 the only client that matches a frame against a breakpoint.
+
+---
+
+## D-WP7-1 — the real-adapter suites are required in CI, and a skip there is a failure
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** non-negotiable #7 says the canonical tests run a real codelldb. CI installed no
+adapter, so `wait_codelldb.rs`, `wait_debugpy.rs` and `wait_delve.rs` printed a skip line and
+the build went green — 46 tests, the only ones that assert what an adapter actually does,
+proving nothing on every pull request since they were written. The same held for the `gates`
+job a release is cut from, where a comment said so out loud and called it "the same bargain
+CI makes".
+
+**Decision:** the suites keep skipping when their adapter is absent, because a contributor
+without codelldb should still get a green `cargo test` — but `LAZYDAP_REQUIRE_ADAPTERS` turns
+that skip into a failure, and CI sets it. `.github/actions/install-adapters` installs all
+three at pinned versions and both workflows use it: a new `adapters` job in `ci.yml` runs the
+three suites, and the release's `gates` job runs the whole workspace with the variable set.
+
+**Why the variable rather than deleting the skip.** The skip is what makes the suites usable
+on a machine that has one adapter and not the others, which is the normal state of a laptop.
+Deleting it would trade a silent CI for a hostile checkout. Requiring the adapters where they
+are known to be installed is the same information without that cost.
+
+**Why the plain `test` job installs nothing.** It is the only thing that exercises the skip
+path. A CI where every job has an adapter cannot tell you that a contributor without one
+still gets a green run.
+
+**Why the versions are pinned** (codelldb 1.12.2, debugpy 1.8.21, delve 1.27.0). The
+assertions in these suites are claims about specific adapter behaviour — the quirk files are
+full of them. Tracking `latest` would turn an upstream fix into a red build on a morning
+nobody changed anything, and the quirk it retired would go unnoticed. A bump is a commit,
+with the quirk entry it settles.
