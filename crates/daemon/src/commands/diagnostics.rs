@@ -147,11 +147,27 @@ fn adapter_checks(instance: &Instance) -> Vec<DoctorCheck> {
                 Err(error) => DoctorCheck {
                     name,
                     ok: false,
-                    detail: format!("{error} — {}", install_hint(kind)),
+                    detail: detail_for(kind, error),
                 },
             }
         })
         .collect()
+}
+
+/// Why an adapter is not usable, and — when the answer is "it is not here" —
+/// how to get it.
+///
+/// The hint is only for a binary nobody could find. A pin at a path that is
+/// not executable, or an interpreter without debugpy in it, is a *different*
+/// problem, and both already say what to do; telling somebody to install
+/// codelldb when they have one and mistyped its path sends them the wrong way.
+fn detail_for(kind: AdapterKind, error: crate::adapter::AdapterError) -> String {
+    match error {
+        crate::adapter::AdapterError::NotFound { .. } => {
+            format!("{error} — {}", install_hint(kind))
+        }
+        error => error.to_string(),
+    }
 }
 
 /// Where to get an adapter this machine does not have.
@@ -214,9 +230,21 @@ async fn daemon_check(instance: &Instance) -> DoctorCheck {
         detail: one_line(&detail),
     };
 
+    // The socket path is added here rather than left to the error: an
+    // auto-spawn failure can bottom out in a bare `Permission denied (os error
+    // 13)`, and "denied on what" is the whole question a person runs `doctor`
+    // to answer.
+    let unreachable = |error: CliError| {
+        failed(format!(
+            "no daemon at {}: {:#}",
+            instance.socket.display(),
+            error.source,
+        ))
+    };
+
     let mut client = match ensure_daemon_running(instance).await {
         Ok(client) => client,
-        Err(error) => return failed(format!("{:#}", error.source)),
+        Err(error) => return unreachable(error),
     };
     // Both checks are answered above, in the process whose config and `PATH`
     // the answers are about; what is left is the daemon describing itself.
@@ -231,7 +259,7 @@ async fn daemon_check(instance: &Instance) -> DoctorCheck {
             .find(|check| check.name == name)
             .unwrap_or_else(|| failed("the daemon reported nothing about itself".to_string())),
         Ok(other) => failed(unexpected(other).to_string()),
-        Err(error) => failed(format!("{:#}", error.source)),
+        Err(error) => unreachable(error),
     }
 }
 
@@ -286,7 +314,7 @@ fn note(report: &DoctorReport) -> Option<String> {
 
     (!missing.is_empty()).then(|| {
         format!(
-            "not installed: {}. lazydap does not need them all — each one adds the \
+            "not usable here: {}. lazydap does not need them all — each one adds the \
              languages it debugs.",
             missing.join(", "),
         )
@@ -591,9 +619,13 @@ pub async fn logs(
         })
         .collect();
 
-    View::list(serde_json::json!({ "lines": selected }), &["line"], rows).print(format)?;
+    let wrote = View::list(serde_json::json!({ "lines": selected }), &["line"], rows)
+        .print_checked(format)?;
 
     match follow {
+        // Nothing is reading any more, and waiting for a line to discover that
+        // means waiting forever on a daemon that has gone quiet.
+        _ if wrote == Wrote::ReaderGone => Ok(()),
         Some(follow) => follow_log(&instance.log, level.as_deref(), follow).await,
         None => Ok(()),
     }
@@ -669,6 +701,14 @@ fn matches_level(line: &str, level: Option<&str>) -> bool {
 }
 
 /// Print lines as the daemon appends them, until the caller gives up.
+///
+/// A reader that goes away *while* this is waiting is only noticed on the next
+/// line, because a pipe has nothing to say until somebody writes to it and
+/// `poll`ing for the hangup would want libc. `tail -f` has the same property
+/// for the same reason: `lazydap logs --follow | head -1` sits there until the
+/// daemon logs something. A reader that is already gone when the first page is
+/// printed *is* caught — see the `Wrote` check in [`logs`] — which is the case
+/// that used to panic.
 async fn follow_log(path: &Path, level: Option<&str>, format: FollowFormat) -> Result<()> {
     use std::io::{BufRead, BufReader};
 

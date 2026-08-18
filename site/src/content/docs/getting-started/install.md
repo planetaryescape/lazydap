@@ -130,7 +130,7 @@ $ lazydap doctor --format json
       "ok": true
     },
     {
-      "detail": "instance lazydap-demo-13cc8efcde46, pid 53846, protocol v7",
+      "detail": "instance lazydap-demo-13cc8efcde46, pid 53846, protocol v9",
       "name": "daemon",
       "ok": true
     }

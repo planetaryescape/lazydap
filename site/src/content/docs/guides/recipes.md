@@ -363,7 +363,7 @@ $ lazydap doctor --format json
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
     { "detail": "/Users/you/go/bin/dlv", "name": "adapter.delve", "ok": true },
     { "detail": "/Users/you/project/.lazydap/state.toml (1 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance cookbook-pin2, pid 54121, protocol v7", "name": "daemon", "ok": true }
+    { "detail": "instance cookbook-pin2, pid 54121, protocol v9", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -376,26 +376,25 @@ working debugpy or delve.
 `LAZYDAP_CONFIG_PATH` points at a different file, which is the tidy way to try a pin without
 editing your real config.
 
-**If it fails.** A pin at a path that is not executable is named directly rather than falling
-back to `PATH`, so a typo cannot silently give you a different debugger:
-
-```console
-$ lazydap doctor --format json
-{"details":{},"error":"DaemonInternalError","message":"1 check(s) failed"}
-```
-
-The same run in `table` form says which check failed and why:
+**If the pin is wrong.** A pin at a path that is not executable is named directly rather than
+falling back to `PATH`, so a typo cannot silently give you a different debugger:
 
 ```text
-CHECK             STATUS  DETAIL
-config.file       ok      /Users/you/project/bad-config.toml (read)
-adapter.codelldb  FAILED  codelldb is pinned to /nope/codelldb by lazydap's config, and that is not an executable
-adapter.debugpy   ok      /opt/homebrew/bin/python3
-adapter.delve     ok      /Users/you/go/bin/dlv
-state.file        ok      /Users/you/project/.lazydap/state.toml (1 breakpoints)
-daemon            ok      instance cookbook-pin2, pid 53986, protocol v7
-error: 1 check(s) failed
+CHECK             STATUS   DETAIL
+config.file       ok       /Users/you/project/bad-config.toml (read)
+adapter.codelldb  missing  codelldb is pinned to /nope/codelldb by lazydap's config, and that is not an executable
+adapter.debugpy   ok       /opt/homebrew/bin/python3
+adapter.delve     ok       /Users/you/go/bin/dlv
+state.file        ok       /Users/you/project/.lazydap/state.toml (1 breakpoints)
+daemon            ok       instance cookbook-pin2, pid 53986, protocol v9
+
+not usable here: codelldb. lazydap does not need them all — each one adds the languages it debugs.
 ```
+
+The command still exits `0`, because debugpy and delve are usable and `ok` means lazydap can
+debug *something* here. Read the `adapter.codelldb` row, not the exit code, when the pin is
+what you are checking — `lazydap doctor --format json` gives you it as
+`checks[].ok` per adapter.
 
 The config file is per user, never per project — project state lives in `.lazydap/state.toml`.
 Unknown keys are accepted and skipped, so only `[adapter.<name>] command` and

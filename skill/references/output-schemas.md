@@ -349,7 +349,7 @@ Reading it does not consume it.
 ```
 
 ```json
-{ "lazydap": "0.1.0", "protocol": 2 }
+{ "lazydap": "0.2.0", "protocol": 9 }
 ```
 
 ```json

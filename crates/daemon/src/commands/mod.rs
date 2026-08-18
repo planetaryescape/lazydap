@@ -83,20 +83,32 @@ pub fn wait_mode(args: &WaitArgs, config: &Config) -> Result<WaitMode> {
 /// exported `LAZYDAP_TIMEOUT=5m` believes every `--wait` in that shell is
 /// bounded by five minutes, and nothing ever tells them otherwise.
 fn env_timeout() -> Result<Option<u64>> {
-    let Ok(raw) = std::env::var(TIMEOUT_ENV) else {
+    let Some(raw) = std::env::var_os(TIMEOUT_ENV) else {
         return Ok(None);
     };
+    // `var_os`, not `var`: a value that is not UTF-8 is still a value somebody
+    // set, and `var` reports it as `NotUnicode` — which reads exactly like
+    // "unset" if you only match on `Ok`, and would put this back to silently
+    // waiting 30 seconds.
+    let refuse = |shown: String| {
+        CliError::usage_with_details(
+            format!("`{TIMEOUT_ENV}={shown}` is not a number of seconds"),
+            serde_json::json!({ "variable": TIMEOUT_ENV, "value": shown }),
+        )
+    };
+    let raw = raw
+        .to_str()
+        .ok_or_else(|| refuse(raw.to_string_lossy().into_owned()))?;
+
     // An empty or blank value is how a shell unsets a variable it cannot
     // remove (`LAZYDAP_TIMEOUT= lazydap ...`), so it means "nothing set".
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    raw.trim().parse().map(Some).map_err(|error| {
-        CliError::usage_with_details(
-            format!("`{TIMEOUT_ENV}={raw}` is not a number of seconds: {error}"),
-            serde_json::json!({ "variable": TIMEOUT_ENV, "value": raw }),
-        )
-    })
+    raw.trim()
+        .parse()
+        .map(Some)
+        .map_err(|_| refuse(raw.to_string()))
 }
 
 /// How long the client should be prepared to wait for the daemon's answer, or

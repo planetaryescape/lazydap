@@ -37,6 +37,16 @@ The `error` name and the exit code are consistent with each other: every
 `UsageError` exits `2` and every `DaemonUnreachable` exits `3`, whether the
 mistake was caught by the argument parser or by lazydap itself.
 
+**`lazydap doctor` is the exception, on purpose.** It is the command you run to
+find out *why* nothing works, so it reports an unreachable daemon as a failed
+`daemon` check on stdout and exits `1` — a failed check — rather than exiting
+`3` with nothing printed. The checks above it have usually already named the
+reason, and `doctor --check-state` starts no daemon at all.
+
+Read the report on stdout, not the error on stderr: a failed run summarises
+itself as `{"error":"DaemonInternalError","message":"N check(s) failed"}`, and
+the `checks` array is where the reason is.
+
 ## The errors you will actually hit
 
 | `error` | Means | Do this |

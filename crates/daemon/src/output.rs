@@ -140,11 +140,21 @@ impl View {
     }
 
     pub fn print(&self, format: OutputFormat) -> Result<()> {
+        self.print_checked(format).map(|_| ())
+    }
+
+    /// The same, for a caller that has more to print afterwards.
+    ///
+    /// A command that keeps writing — `logs --follow` — has to know the reader
+    /// has gone, because the next thing it does is wait. Discarding the answer
+    /// here turned a `| head -1` into a poll loop that only noticed on a write
+    /// that an idle daemon never triggers.
+    pub fn print_checked(&self, format: OutputFormat) -> Result<Wrote> {
         match self.render(format)? {
             // A list with nothing in it prints nothing, not a blank line:
             // `lazydap watch list --format ids | wc -l` should say 0.
-            None => Ok(()),
-            Some(body) => print_line(&body).map(|_| ()),
+            None => Ok(Wrote::Line),
+            Some(body) => print_line(&body),
         }
     }
 
@@ -400,6 +410,17 @@ mod tests {
         assert_eq!(
             listing().render(OutputFormat::Ids).expect("render"),
             Some("1\n2".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_view_that_prints_nothing_still_reports_a_live_reader() {
+        // `print_checked` is what `logs --follow` branches on; an empty first
+        // page must not read as "the reader has gone" and skip the follow.
+        let empty = View::list(serde_json::json!({ "lines": [] }), &["line"], Vec::new());
+        assert_eq!(
+            empty.print_checked(OutputFormat::Ids).expect("print"),
+            Wrote::Line,
         );
     }
 

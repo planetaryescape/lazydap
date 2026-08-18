@@ -265,7 +265,7 @@ and at least one `adapter.*` check did. A missing adapter has its own `"ok": fal
 not make the run fail on its own.
 
 ```json
-{ "lazydap": "0.1.0", "protocol": 6 }
+{ "lazydap": "0.2.0", "protocol": 9 }
 ```
 
 The two versions move independently. The protocol one is what a daemon from an older build

@@ -466,14 +466,16 @@ fn expand(raw: &str, root: &Path, unresolved: &mut Vec<String>) -> String {
         // — `${workspaceFolder/app` — or a string that happens to contain a
         // brace, like `cost ${100`. Every variable VS Code defines starts with
         // a letter, so that is where the line goes: recorded as unresolved
-        // when it reads as a name, left alone when it does not. Either way the
-        // text passes through exactly as written, because deleting the part
-        // nobody understood is how you debug the wrong binary. Before this it
-        // was always the second reading, and `launches list` called
-        // `${workspaceFolder/app` runnable right up until the launch failed.
+        // when it reads as a name, left alone when it does not. Leading
+        // whitespace is skipped first, because `${ workspaceFolder/app` is the
+        // same typo with a space in it. Either way the text passes through
+        // exactly as written, because deleting the part nobody understood is
+        // how you debug the wrong binary. Before this it was always the second
+        // reading, and `launches list` called `${workspaceFolder/app` runnable
+        // right up until the launch failed.
         let Some(end) = after.find('}') else {
             let tail = rest[start..].to_string();
-            if after.starts_with(|c: char| c.is_ascii_alphabetic()) && !unresolved.contains(&tail) {
+            if names_a_variable(after) && !unresolved.contains(&tail) {
                 unresolved.push(tail.clone());
             }
             out.push_str(&tail);
@@ -496,6 +498,17 @@ fn expand(raw: &str, root: &Path, unresolved: &mut Vec<String>) -> String {
 
     out.push_str(rest);
     out
+}
+
+/// Whether what follows a `${` reads as the start of a variable name.
+///
+/// The one thing separating a mistyped `${workspaceFolder/app` from a price
+/// written `cost ${100`: every variable VS Code defines starts with a letter,
+/// and none starts with a digit.
+fn names_a_variable(after: &str) -> bool {
+    after
+        .trim_start()
+        .starts_with(|c: char| c.is_ascii_alphabetic())
 }
 
 /// The variables lazydap can answer for. Everything else is somebody else's:
@@ -1329,6 +1342,26 @@ mod tests {
             "the text is still left exactly as written",
         );
         assert_eq!(unresolved, vec!["${workspaceFolder/app"]);
+    }
+
+    #[test]
+    fn a_space_before_the_name_is_still_a_mistyped_variable() {
+        let mut unresolved = Vec::new();
+        assert_eq!(
+            expand("${ workspaceFolder/app", Path::new(ROOT), &mut unresolved),
+            "${ workspaceFolder/app",
+        );
+        assert_eq!(unresolved, vec!["${ workspaceFolder/app"]);
+    }
+
+    #[test]
+    fn a_digit_after_the_brace_is_a_price_not_a_variable() {
+        // The line the heuristic draws: no VS Code variable starts with one.
+        for text in ["cost ${100", "cost ${ 100"] {
+            let mut unresolved = Vec::new();
+            assert_eq!(expand(text, Path::new(ROOT), &mut unresolved), text);
+            assert!(unresolved.is_empty(), "{text}: {unresolved:?}");
+        }
     }
 
     #[test]

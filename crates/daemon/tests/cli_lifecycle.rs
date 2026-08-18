@@ -708,6 +708,48 @@ fn a_closed_pipe_ends_the_command_quietly_rather_than_panicking() {
 }
 
 #[test]
+fn following_a_log_nobody_is_reading_ends_rather_than_waiting_for_a_line() {
+    // The first regression this fix caused: the tail print noticed the closed
+    // pipe and the answer was thrown away, so `follow_log` went on polling
+    // every 200 ms for a line an idle daemon never writes. A hang is worse for
+    // a script than the panic it replaced.
+    let sandbox = Sandbox::new("flwp");
+    sandbox.run_in_project(&["status"]);
+
+    let script = format!("{LAZYDAP} logs --follow --format table | true");
+    let output = Command::new("timeout")
+        .args(["6", "sh", "-c", &script])
+        .current_dir(sandbox.project())
+        .env("LAZYDAP_INSTANCE", &sandbox.instance)
+        .env("LAZYDAP_RUNTIME_DIR", sandbox.root.join("r"))
+        .env("LAZYDAP_DATA_DIR", sandbox.root.join("d"))
+        .output()
+        .expect("run the pipeline");
+
+    assert_ne!(
+        output.status.code(),
+        Some(124),
+        "`timeout` killed it: --follow waited for a reader that had gone",
+    );
+    assert_eq!(output.status.code(), Some(0), "and it ended cleanly");
+}
+
+#[test]
+fn a_format_meant_for_the_debuggee_is_not_read_as_lazydaps_own() {
+    // Everything after a bare `--` belongs to the program being debugged.
+    // Scanning past it made `-- --format table` turn lazydap's own error
+    // reporting to prose for a caller who never asked.
+    let sandbox = Sandbox::new("dashes");
+
+    let output = sandbox.run(&["launch", "./x", "--nosuch", "--", "--format", "table"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let error: serde_json::Value =
+        serde_json::from_str(&stderr).unwrap_or_else(|error| unreachable!("{error}: {stderr}"));
+    assert_eq!(error["error"], "UsageError");
+}
+
+#[test]
 fn every_usage_error_is_labelled_the_same_way() {
     // `--format ids` on a result that is not a list said `BadRequest` while
     // every other usage mistake said `UsageError`, so a script had to know
@@ -758,6 +800,25 @@ fn a_timeout_variable_nothing_can_read_is_reported_rather_than_ignored() {
     // five minutes.
     let sandbox = Sandbox::new("tmo");
 
+    for value in ["5m", "  ", "0x10"] {
+        let output =
+            sandbox.run_in_project_with_env(&[("LAZYDAP_TIMEOUT", value)], &["continue", "--wait"]);
+        let expected = if value.trim().is_empty() {
+            // Blank is how a shell unsets a variable it cannot remove, so it
+            // means "nothing set" and the command gets as far as the daemon.
+            Some(1)
+        } else {
+            Some(2)
+        };
+        assert_eq!(
+            output.status.code(),
+            expected,
+            "`LAZYDAP_TIMEOUT={value}`: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    let sandbox = Sandbox::new("tmo2");
     let output =
         sandbox.run_in_project_with_env(&[("LAZYDAP_TIMEOUT", "5m")], &["continue", "--wait"]);
     assert_eq!(output.status.code(), Some(2), "usage errors exit 2");

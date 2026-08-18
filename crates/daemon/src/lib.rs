@@ -369,13 +369,23 @@ fn wants_machine_output(args: &[String]) -> bool {
 /// Read out of the raw arguments because there is no parsed `Cli` to consult:
 /// parsing is what failed. `--format` takes a value, so a bare trailing
 /// `--format` names nothing and is left to the guess.
+///
+/// Everything after a bare `--` belongs to the debuggee, so it is not read at
+/// all: `lazydap launch ./x -- --format table` passes `--format table` to the
+/// program being debugged, and lazydap's own output is still whatever the
+/// caller — or the tty — said.
 fn explicit_format(args: &[String]) -> Option<OutputFormat> {
-    let named = args
+    let lazydaps = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
+
+    let named = lazydaps
         .iter()
         .enumerate()
         .find_map(|(index, arg)| match arg.split_once('=') {
             Some(("--format", value)) => Some(value.to_string()),
-            _ if arg == "--format" => args.get(index + 1).cloned(),
+            _ if arg == "--format" => lazydaps.get(index + 1).cloned(),
             _ => None,
         })?;
 
