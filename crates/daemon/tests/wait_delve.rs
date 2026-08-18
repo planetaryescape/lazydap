@@ -134,9 +134,12 @@ struct Sandbox {
     /// crash left behind. The file-leak check subtracts these so it flags only
     /// what *this* session created, never pre-existing clutter.
     preexisting_artifacts: std::collections::HashSet<PathBuf>,
-    /// This sandbox's daemon, once it has one. What the process-leak check
-    /// keys on; see [`Sandbox::strays`] for why it is read at launch.
+    /// This sandbox's daemon, once it has one. What both leak checks key on;
+    /// see [`Sandbox::record_daemon_pid`] for why it is read at launch.
     daemon_pid: std::cell::Cell<Option<u64>>,
+    /// Whether anything has been launched here. Only so [`Sandbox::strays`]
+    /// can tell "nothing ran" from "a launch went unrecorded".
+    launched: std::cell::Cell<bool>,
 }
 
 impl Sandbox {
@@ -162,10 +165,14 @@ impl Sandbox {
             instance,
             preexisting_artifacts: artifact_files(),
             daemon_pid: std::cell::Cell::new(None),
+            launched: std::cell::Cell::new(false),
         }
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        if args.contains(&"launch") {
+            self.launched.set(true);
+        }
         Command::new(LAZYDAP)
             .current_dir(&self.project)
             .env("LAZYDAP_INSTANCE", &self.instance)
@@ -186,31 +193,47 @@ impl Sandbox {
             String::from_utf8_lossy(&output.stderr),
         );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        match serde_json::from_str(&stdout) {
+        let value = match serde_json::from_str(&stdout) {
             Ok(value) => value,
             Err(error) => unreachable!(
                 "`lazydap {}` printed something that is not JSON ({error}): {stdout}",
                 args.join(" "),
             ),
+        };
+        // Here rather than in `launch`, because two tests need argument
+        // combinations `launch` does not offer and send their own — and a
+        // session whose daemon went unrecorded is a session whose orphans the
+        // stray check cannot see.
+        if args.contains(&"launch") {
+            self.record_daemon_pid();
         }
+        value
+    }
+
+    /// Note the daemon while it is certainly alive.
+    ///
+    /// `Drop` shuts it down before it checks for strays, and asking then would
+    /// spawn a *fresh* daemon and learn the wrong pid. The recursion stops at
+    /// one level: these arguments carry no `launch`.
+    fn record_daemon_pid(&self) {
+        if self.daemon_pid.get().is_some() {
+            return;
+        }
+        let pid = self.json(&["--format", "json", "status"])["daemon_pid"].as_u64();
+        assert!(pid.is_some(), "a running daemon reports its pid");
+        self.daemon_pid.set(pid);
     }
 
     /// Launch a fixture. No `--adapter`: which one to use is read off the
     /// `.go`, and a test that passed it explicitly would not be testing that.
     fn launch(&self, program: &Path) -> Value {
-        let launched = self.json(&[
+        self.json(&[
             "--format",
             "json",
             "launch",
             &program.to_string_lossy(),
             "--stop-on-entry",
-        ]);
-        // Read now, while the daemon that minted the name is certainly alive.
-        // `Drop` shuts it down before it checks for strays, and asking then
-        // would spawn a *fresh* daemon and learn the wrong pid.
-        self.daemon_pid
-            .set(self.json(&["--format", "json", "status"])["daemon_pid"].as_u64());
-        launched
+        ])
     }
 
     fn breakpoint(&self, source: &str, line: u32) -> Value {
@@ -282,8 +305,17 @@ impl Sandbox {
     fn strays(&self) -> Vec<String> {
         let fixtures = repo_root().join("examples/go-fixtures");
         let mut patterns = vec![fixtures.display().to_string()];
-        if let Some(pid) = self.daemon_pid.get() {
-            patterns.push(format!("lazydap-delve-{pid}-"));
+        match self.daemon_pid.get() {
+            Some(pid) => patterns.push(format!("lazydap-delve-{pid}-")),
+            // A launch that recorded no pid would narrow this check to
+            // nothing and say so to nobody, which is exactly the gap the pid
+            // was added to close. Not while already unwinding, for the reason
+            // `Drop` gives above.
+            None => assert!(
+                !self.launched.get() || std::thread::panicking(),
+                "a session was launched without recording its daemon pid, so \
+                 the process check cannot see this session at all",
+            ),
         }
 
         let mut strays: Vec<String> = patterns
@@ -317,9 +349,23 @@ impl Sandbox {
 
     /// The `lazydap-delve-` files that have appeared since this sandbox started
     /// — the ones *this* session is responsible for.
+    ///
+    /// Both halves are needed. The baseline subtraction drops debris that was
+    /// already there; the pid drops a neighbouring checkout's file appearing
+    /// *during* this test, which subtraction cannot.
     fn new_artifacts(&self) -> Vec<PathBuf> {
+        let ours = self
+            .daemon_pid
+            .get()
+            .map(|pid| format!("lazydap-delve-{pid}-"));
         artifact_files()
             .difference(&self.preexisting_artifacts)
+            .filter(
+                |path| match (&ours, path.file_name().and_then(|name| name.to_str())) {
+                    (Some(prefix), Some(name)) => name.starts_with(prefix),
+                    _ => true,
+                },
+            )
             .cloned()
             .collect()
     }
