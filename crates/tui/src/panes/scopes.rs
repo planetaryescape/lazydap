@@ -39,6 +39,15 @@ pub type NodePath = Vec<usize>;
 pub struct ScopesView {
     /// Top level: one per scope (Locals, Arguments, Globals).
     nodes: Vec<Node>,
+    /// The visible rows of [`Self::nodes`], rebuilt whenever the tree changes
+    /// and never by a read.
+    ///
+    /// Every read used to walk the tree and allocate a `Row` and a `String`
+    /// per node — and a draw did it three times, ten times a second. That is
+    /// nothing for a tree of tens of rows and several million allocations a
+    /// second for the 100,000-element array this pane deliberately does not
+    /// truncate (D080).
+    rows: Vec<Row>,
     /// Index into the *visible* rows, which is what `j` and `k` move through.
     /// Collapsing a node above the selection can leave this past the end, so
     /// every read of it clamps.
@@ -57,6 +66,10 @@ pub struct ScopesView {
     generation: u64,
     viewport_height: usize,
     top: usize,
+    /// How many times the rows have been rebuilt, so a test can say that a
+    /// read did not.
+    #[cfg(test)]
+    rebuilds: usize,
 }
 
 /// One row's worth of tree: a scope or a variable.
@@ -174,6 +187,7 @@ impl ScopesView {
         self.top = 0;
         self.stale = false;
         self.generation = generation;
+        self.rebuild();
     }
 
     /// Which answer built the tree that is on screen right now.
@@ -195,26 +209,34 @@ impl ScopesView {
     }
 
     /// Every visible row, depth-first, skipping the children of collapsed
-    /// nodes. Built on demand: the tree is tens of rows, and a cached copy
-    /// would be one more thing that can disagree with the tree.
-    pub fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        collect(&self.nodes, &mut Vec::new(), &mut rows);
-        rows
+    /// nodes.
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// Take the tree's visible rows again. Every mutation ends with this, and
+    /// nothing else may call it: a read that rebuilt would put the cost back.
+    fn rebuild(&mut self) {
+        self.rows.clear();
+        collect(&self.nodes, &mut Vec::new(), &mut self.rows);
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
     }
 
     pub(crate) fn selected_index(&self) -> usize {
-        self.selected.min(self.rows().len().saturating_sub(1))
+        self.selected.min(self.rows.len().saturating_sub(1))
     }
 
     pub fn selected_path(&self) -> Option<NodePath> {
-        let rows = self.rows();
-        rows.get(self.selected.min(rows.len().saturating_sub(1)))
+        self.rows
+            .get(self.selected_index())
             .map(|row| row.path.clone())
     }
 
     pub fn move_selection(&mut self, delta: i32) {
-        let count = self.rows().len();
+        let count = self.rows.len();
         if count == 0 {
             return;
         }
@@ -245,6 +267,7 @@ impl ScopesView {
     pub fn set_expanded(&mut self, path: &[usize], expanded: bool) {
         if let Some(node) = self.node_at_mut(path) {
             node.expanded = expanded;
+            self.rebuild();
         }
     }
 
@@ -252,6 +275,7 @@ impl ScopesView {
     pub fn mark_pending(&mut self, path: &[usize]) {
         if let Some(node) = self.node_at_mut(path) {
             node.pending = true;
+            self.rebuild();
         }
     }
 
@@ -268,6 +292,7 @@ impl ScopesView {
         node.loaded = true;
         node.pending = false;
         node.expanded = true;
+        self.rebuild();
         true
     }
 
@@ -276,6 +301,7 @@ impl ScopesView {
     pub fn abandon_pending(&mut self, path: &[usize]) {
         if let Some(node) = self.node_at_mut(path) {
             node.pending = false;
+            self.rebuild();
         }
     }
 
@@ -318,14 +344,16 @@ impl ScopesView {
         self.viewport_height = usize::from(inner.height);
         self.scroll_to_selection();
 
-        let rows = self.rows();
         let selected = self.selected_index();
+        let rows = self.rows();
         let lines: Vec<Line> = if rows.is_empty() {
             vec![Line::from(Span::styled(
                 "no scopes",
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
+            // Built once when the tree changed; only the window the pane can
+            // show is turned into text.
             rows.iter()
                 .enumerate()
                 .skip(self.top)
@@ -555,6 +583,57 @@ mod tests {
         assert_eq!(screen[1], "│▾ Locals                    │");
         assert_eq!(screen[2], "│    x = 5 : int             │");
         assert_eq!(screen[3], "│▸ Globals                   │");
+    }
+
+    #[test]
+    fn reads_do_not_rebuild_the_row_list() {
+        // A draw asked for the rows twice and the selection asked again, so
+        // one tick allocated a `Row` and a `String` per visible node three
+        // times over — at ten ticks a second, on a tree this pane
+        // deliberately does not truncate (D080).
+        let mut view = locals();
+        view.populate(
+            &[0],
+            (0..50)
+                .map(|index| variable(&format!("v{index}"), "0", "int", 0))
+                .collect(),
+        );
+        let built = view.rebuilds;
+
+        draw(&mut view, 30, 8);
+        view.move_selection(10);
+        assert_eq!(view.selected_path(), Some(vec![0, 9]));
+        assert_eq!(view.rows().len(), 52);
+        draw(&mut view, 30, 8);
+
+        assert_eq!(
+            view.rebuilds, built,
+            "nothing changed, so nothing was rebuilt"
+        );
+
+        view.set_expanded(&[0], false);
+        assert_eq!(view.rebuilds, built + 1, "and a change does rebuild them");
+        assert_eq!(view.rows().len(), 2);
+    }
+
+    #[test]
+    fn the_pane_draws_the_window_it_is_scrolled_to_and_nothing_past_it() {
+        let mut view = ScopesView::default();
+        view.replace(vec![scope("Locals", 1000)], 1);
+        view.populate(
+            &[0],
+            (0..20)
+                .map(|index| variable(&format!("v{index}"), "0", "int", 0))
+                .collect(),
+        );
+
+        // Height 5 is three rows of text between the borders.
+        let screen = draw(&mut view, 30, 5);
+
+        assert!(screen[1].contains("Locals"), "{screen:?}");
+        assert!(screen[2].contains("v0"), "{screen:?}");
+        assert!(screen[3].contains("v1"), "{screen:?}");
+        assert!(!screen.concat().contains("v2"), "{screen:?}");
     }
 
     #[test]
