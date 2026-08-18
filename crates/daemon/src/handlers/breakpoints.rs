@@ -239,6 +239,11 @@ async fn apply(state: &Arc<DaemonState>, sources: &[PathBuf]) -> Result<bool> {
             .set_breakpoints(source, &enabled)
             .await
             .map_err(AdapterError::into_ipc)?;
+        // Usually already done: the pump records the same pairing as the
+        // answer passes it, which is what stops a `breakpoint` event arriving
+        // between the two from being reported under an id nobody can match
+        // (D-WP7-2). Kept because it costs a map insert and does not depend on
+        // the pump having decoded the body.
         session.record_breakpoints(&applied);
 
         tracing::debug!(

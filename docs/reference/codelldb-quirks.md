@@ -34,6 +34,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 24 | [`threads` on a running process answers with a thread whose id is `0`](#24-threads-on-a-running-process-answers-with-a-thread-whose-id-is-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 25 | [It keeps its socket — and its process — after `terminated`, until it is disconnected from](#25-it-keeps-its-socket--and-its-process--after-terminated-until-it-is-disconnected-from) | Defect campaign WP1 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 |
 | 26 | [Detaching from a running debuggee takes five seconds, and happens before the answer](#26-detaching-from-a-running-debuggee-takes-five-seconds-and-happens-before-the-answer) | Defect campaign WP1 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 |
+| 27 | [Two `breakpoint` events per `setBreakpoints` on macOS, one on Linux](#27-two-breakpoint-events-per-setbreakpoints-on-macos-one-on-linux) | Defect campaign WP7 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 + Ubuntu 24.04 arm64 |
 
 Quirks 11 to 20 are all about **reading values** — the summary strings in `value`, and what
 `eval` will and will not do. They were found in one sitting against a Rust fixture holding one
@@ -1565,6 +1566,58 @@ might acknowledge first and detach afterwards (D095).
 
 - D095 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
 - Quirk 25 — the same adapter not exiting when it is done
+
+---
+
+## 27. Two `breakpoint` events per `setBreakpoints` on macOS, one on Linux
+
+### Symptom
+
+One `setBreakpoints` for one breakpoint produces, on **macOS**, the response and then *two*
+`breakpoint` events carrying the same body — the second about 20 ms after the first, once the
+debuggee's modules have loaded and LLDB has re-resolved the location. On **Linux** the second
+event never comes.
+
+macOS, from a real session (`--wait` on `exits.c:6`):
+
+```
+07.439635  <-- response  setBreakpoints  {"breakpoints":[{"id":1,"line":6,"verified":true}]}
+07.439660  <-- event     breakpoint      {"breakpoint":{"id":1,...},"reason":"changed"}
+07.460397  <-- event     breakpoint      {"breakpoint":{"id":1,...},"reason":"changed"}   ← only on macOS
+```
+
+Linux stops after the first event. The adapter's own debug log shows why: macOS emits
+`locations removed` and then `locations resolved` as the process maps its modules, and each
+`breakpoint-changed` becomes a DAP event.
+
+### Root cause
+
+Platform-specific LLDB behaviour, not a DAP-level choice. Nothing in the protocol promises
+how many `breakpoint` events an adapter sends, or that it sends any.
+
+### Why it mattered
+
+It hid a real lazydap bug for weeks. The first event arrives **microseconds after the
+response** — well inside the window where lazydap had not yet recorded which adapter
+breakpoint id belonged to which of its own — so that update went out with `id: null`. On
+macOS the second event, arriving after the mapping existed, coalesced over the bad one and
+the `--wait` blob looked correct. On Linux there was nothing to coalesce over, and
+`crates/daemon/tests/wait_codelldb.rs`'s
+`continuing_to_a_breakpoint_reports_where_and_why_it_stopped` failed on CI while passing on
+every developer machine. See D-WP7-2.
+
+### Fix or workaround
+
+Nothing to fix in the adapter. Do not write code that depends on a second event arriving —
+and, generally, do not let an ordering bug be corrected by a repeat message: test the first
+one. lazydap now records the id mapping in the pump as the `setBreakpoints` response goes
+past, so the first event is already correlatable.
+
+### Cross-references
+
+- D-WP7-2 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
+- Quirk 23 — the other `setBreakpoints` answer that needs correcting a moment later
+- `crates/daemon/src/adapter/pump.rs::record_breakpoint_ids`
 
 ---
 

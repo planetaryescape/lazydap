@@ -8,7 +8,13 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+**CI runs the debugger against real adapters.** codelldb, debugpy and dlv are installed in the pipeline and the suites that drive them fail rather than skip when one is missing, on every pull request and again on the tagged commit a release is built from. They had been skipping themselves in CI since the day they were written, so "tested against three real adapters" rested on a maintainer running them by hand.
+
+### Fixed
+
+**A breakpoint update could arrive with no id to match it against.** codelldb answers `setBreakpoints` and then, microseconds later, sends a `breakpoint` event about the same breakpoint. lazydap recorded which adapter breakpoint id belonged to which of its own *after* that answer came back to the caller — by which time the daemon's read pump had already dispatched the event — so the update went out with `id: null`, and `--wait`'s `breakpoint_updates` named a breakpoint no client could find in `break --list`. The mapping is now recorded as the answer goes past the pump, before anything that followed it on the wire is dispatched. On macOS codelldb happens to send a second event 20 ms later, which papered over this; on Linux it does not.
 
 ## [0.2.5] — 2026-08-18
 
@@ -123,8 +129,6 @@ Only codelldb advertises DAP's `supportTerminateDebuggee`, and only codelldb hon
 **Protocol v5 → v7.** v6 added the `delve` adapter — a new `AdapterKind` variant, which an older daemon cannot decode at all. v7 changed four things about what the daemon reports: `threads` may omit a thread's `name`, the `--wait` blob and the `Stopped` event gained `adapter_thread_id`, `capabilities` gained `supports_variable_paging`, and a variable gained `evaluate_name`.
 
 **`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
-
-**CI runs the debugger against real adapters.** codelldb, debugpy and dlv are installed in the pipeline and the suites that drive them fail rather than skip when one is missing, on every pull request and again on the tagged commit a release is built from. They had been skipping themselves in CI since the day they were written, so "tested against three real adapters" rested on a maintainer running them by hand.
 
 ### Fixed
 

@@ -175,6 +175,15 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The pump owns delivery; request callers own the waiting end.
 pub(crate) type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<DapResponse<serde_json::Value>>>>>;
 
+/// What each in-flight `setBreakpoints` asked for, keyed by its request seq.
+///
+/// Shared with the pump, which is what lets it map the adapter's breakpoint
+/// ids to ours as the answer goes past rather than after the caller that sent
+/// it has been scheduled again (D-WP7-2). A `std` mutex on purpose: it is held
+/// for a single map operation, never across an await, so an async one would
+/// buy nothing and cost a suspension point in the read loop.
+pub(crate) type BreakpointRequests = Arc<std::sync::Mutex<HashMap<i64, Vec<Breakpoint>>>>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     #[error("no {adapter} binary found on PATH")]
@@ -332,6 +341,8 @@ pub struct AdapterHandle {
     /// exactly the wrong place for the thing that breaks the queue.
     execution: Mutex<()>,
     pending: Pending,
+    /// See [`BreakpointRequests`]. Written here, read and cleared by the pump.
+    breakpoint_requests: BreakpointRequests,
     /// Which adapter is on the other end, for the two answers that have to be
     /// read in its own dialect: [`DebugAdapter::is_eval_error`] and
     /// [`DebugAdapter::normalise_stop`].
@@ -359,6 +370,7 @@ impl AdapterHandle {
     pub(crate) fn new(
         writer: DapWriter,
         pending: Pending,
+        breakpoint_requests: BreakpointRequests,
         adapter: &'static dyn DebugAdapter,
         capabilities: AdapterCapabilities,
         support_terminate_debuggee: bool,
@@ -367,6 +379,7 @@ impl AdapterHandle {
             writer: Mutex::new(Some(writer)),
             execution: Mutex::new(()),
             pending,
+            breakpoint_requests,
             adapter,
             capabilities,
             support_terminate_debuggee,
@@ -384,6 +397,7 @@ impl AdapterHandle {
             writer: Mutex::new(None),
             execution: Mutex::new(()),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            breakpoint_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             // Arbitrary, and safe to be: every method that consults these
             // sends a request first, and a detached handle answers `Gone`
             // before it gets that far.
@@ -403,6 +417,18 @@ impl AdapterHandle {
     /// Send one request and wait for its response, typed both ways.
     async fn call<A: Serialize, R: DeserializeOwned>(&self, command: &str, args: &A) -> Result<R> {
         let body = self.request(command, args).await?;
+        decode(command, body)
+    }
+
+    /// [`call`](Self::call), leaving a note about the request. See
+    /// [`request_registering`](Self::request_registering).
+    async fn call_registering<A: Serialize, R: DeserializeOwned>(
+        &self,
+        command: &str,
+        args: &A,
+        register: impl FnOnce(i64),
+    ) -> Result<R> {
+        let body = self.request_registering(command, args, register).await?;
         decode(command, body)
     }
 
@@ -442,6 +468,23 @@ impl AdapterHandle {
     /// request needs one, and for how long, is the caller's decision. See the
     /// field comment on `execution`.
     async fn request<A: Serialize>(&self, command: &str, args: &A) -> Result<serde_json::Value> {
+        self.request_registering(command, args, |_| {}).await
+    }
+
+    /// [`request`](Self::request), with a note left about the request itself
+    /// under the seq that will carry its answer.
+    ///
+    /// `register` runs after the seq is minted and before the request is
+    /// written, so a note it leaves is on record before the adapter can have
+    /// seen the question — let alone answered it. That ordering is the whole
+    /// value: the pump reads the answer, and whatever the adapter sent after
+    /// it, before the caller waiting here is scheduled again.
+    async fn request_registering<A: Serialize>(
+        &self,
+        command: &str,
+        args: &A,
+        register: impl FnOnce(i64),
+    ) -> Result<serde_json::Value> {
         let receiver = {
             let mut writer = self.writer.lock().await;
             let writer = writer.as_mut().ok_or(AdapterError::Gone)?;
@@ -457,11 +500,13 @@ impl AdapterHandle {
             let seq = writer.next_seq();
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().await.insert(seq, sender);
+            register(seq);
 
             if let Err(error) = writer.send_request_with_seq(seq, command, args).await {
                 // Nothing will ever answer a request that was never sent, and
                 // the entry would sit in the map until the adapter died.
                 self.pending.lock().await.remove(&seq);
+                self.forget_request(seq);
                 return Err(error.into());
             }
             receiver
@@ -698,13 +743,23 @@ impl AdapterHandle {
         self.send_breakpoints(&rebound, breakpoints).await
     }
 
+    /// One `setBreakpoints`, with what it asked for left where the pump can
+    /// find it.
+    ///
+    /// The registration is the point. Which adapter id belongs to which of
+    /// *our* breakpoints is only knowable by pairing this request with its
+    /// answer — and the answer is read by the pump, which goes straight on to
+    /// dispatch whatever followed it on the wire, including the `breakpoint`
+    /// event codelldb sends microseconds later. Leaving the pairing here, for
+    /// the pump to apply as the answer passes, is what stops that event being
+    /// reported under an id no caller can match (D-WP7-2).
     async fn send_breakpoints(
         &self,
         source: &Path,
         breakpoints: &[Breakpoint],
     ) -> Result<Vec<AdapterBreakpoint>> {
         let response: SetBreakpointsResponse = self
-            .call(
+            .call_registering(
                 "setBreakpoints",
                 &SetBreakpointsArgs {
                     source: Source {
@@ -719,6 +774,9 @@ impl AdapterHandle {
                         .collect(),
                     source_modified: None,
                 },
+                |seq| {
+                    self.breakpoint_requests().insert(seq, breakpoints.to_vec());
+                },
             )
             .await?;
 
@@ -726,6 +784,25 @@ impl AdapterHandle {
             breakpoints,
             response.breakpoints,
         ))
+    }
+
+    /// The in-flight `setBreakpoints` map, with a poisoned lock treated as
+    /// usable — the same rule the session's own state keeps, and for the same
+    /// reason: a panic elsewhere leaves this map stale, not incoherent.
+    fn breakpoint_requests(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Vec<Breakpoint>>> {
+        self.breakpoint_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Drop every note left under `seq` by a
+    /// [`register`](Self::request_registering) that turned out to describe a
+    /// request nobody sent.
+    ///
+    /// Kept as one method so the generic request path does not have to know
+    /// what kinds of note exist; today there is one.
+    fn forget_request(&self, seq: i64) {
+        self.breakpoint_requests().remove(&seq);
     }
 
     /// Answer a reverse request with "no".

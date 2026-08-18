@@ -16,8 +16,8 @@
 //! from — reaches this module through [`DebugAdapter`](super::DebugAdapter).
 
 use super::{
-    AdapterError, AdapterHandle, DebugAdapter, Pending, Result, Spawn, StopContext, discover,
-    for_kind, rebind_source, translate,
+    AdapterError, AdapterHandle, BreakpointRequests, DebugAdapter, Pending, Result, Spawn,
+    StopContext, discover, for_kind, rebind_source, translate,
 };
 use crate::debuggee::Debuggee;
 use lazydap_core::{
@@ -75,6 +75,7 @@ pub struct Launched {
 pub struct PumpStart {
     pub(super) reader: DapReader,
     pub(super) pending: Pending,
+    pub(super) breakpoint_requests: BreakpointRequests,
 }
 
 /// Start `request.program` under the adapter it names and wait for it to
@@ -111,16 +112,23 @@ pub async fn launch(
         Ok(()) => {
             let (reader, writer) = transport.split();
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+            let breakpoint_requests: BreakpointRequests =
+                Arc::new(std::sync::Mutex::new(HashMap::new()));
             let debuggee = started_debuggee(adapter, &outcome);
             Ok(Launched {
                 handle: AdapterHandle::new(
                     writer,
                     Arc::clone(&pending),
+                    Arc::clone(&breakpoint_requests),
                     adapter,
                     outcome.capabilities,
                     outcome.support_terminate_debuggee,
                 ),
-                pump: PumpStart { reader, pending },
+                pump: PumpStart {
+                    reader,
+                    pending,
+                    breakpoint_requests,
+                },
                 capabilities: outcome.capabilities,
                 state: outcome.state,
                 reason: outcome.reason,
@@ -471,7 +479,7 @@ fn set_breakpoints_args(
 /// A launch that succeeded should not be thrown away because the adapter
 /// described its breakpoints oddly: the program is running, and unverified
 /// breakpoints are visible in `break --list` either way.
-fn applied_breakpoints(
+pub(super) fn applied_breakpoints(
     requested: &[Breakpoint],
     body: Option<serde_json::Value>,
 ) -> Vec<AdapterBreakpoint> {

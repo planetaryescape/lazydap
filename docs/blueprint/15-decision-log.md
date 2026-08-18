@@ -2264,3 +2264,48 @@ assertions in these suites are claims about specific adapter behaviour — the q
 full of them. Tracking `latest` would turn an upstream fix into a red build on a morning
 nobody changed anything, and the quirk it retired would go unnoticed. A bump is a commit,
 with the quirk entry it settles.
+
+---
+
+## D-WP7-2 — the adapter's breakpoint ids are mapped to ours in the pump, as the answer goes past
+
+**Status:** decided (2026-08-18, defect campaign WP7).
+
+**Why:** a `breakpoint` event that followed its own `setBreakpoints` answer was reported with
+`id: null` — an update naming a breakpoint no client could match against `break --list`, and
+one the session's own record dropped on the floor. The window is small and structural: the
+pump owns the socket, so it hands the answer to the waiting caller and then goes straight on
+to dispatch whatever the adapter sent next. codelldb sends the event about 30 µs after the
+answer; the caller recorded the mapping about 30 µs after *that*.
+
+**Decision:** whoever sends a `setBreakpoints` registers what it asked for, keyed by the
+request seq, before the request is written. The pump applies that pairing to the answer as it
+passes, before the waiter is woken and therefore before anything that followed the answer is
+dispatched. `AdapterHandle::request_registering` is the general shape — a note left under the
+seq that will carry the reply — and `record_breakpoint_ids` in the pump is its only consumer
+today.
+
+**Why not record it in the caller and accept the race.** Because the race is not rare and not
+tolerable: it fires on *every* first `setBreakpoints` of a session. What made it look rare is
+that codelldb on macOS sends a **second** `breakpoint` event about 20 ms later, once modules
+have loaded, and `--wait` coalesces updates by adapter id — so the good update overwrote the
+bad one and the blob looked right. On Linux there is no second event (quirk 27). The
+integration test that covers this passed on every developer machine for weeks and failed the
+first time CI ran it on Linux.
+
+**Why the registration is before the write, not around it.** The seq is minted before the
+request goes out (WP1's `next_seq`), so the note is on record before the adapter can have
+seen the question. That is a stronger guarantee than holding a lock across the write, and it
+does not put the pump behind a lock it can only release by reading.
+
+**What is left where it was.** The launch path does not go through the pump at all: the
+handshake reads its own `setBreakpoints` answers, and `handlers::session::launch` records
+them into the session *before* `spawn_pump`, so no event can be dispatched ahead of the
+mapping. `handlers::breakpoints::apply` still records what the caller received; it is the
+same pairing, it costs a map insert, and it does not depend on the pump having decoded the
+body.
+
+**A drop that remains, deliberately.** An update whose adapter id maps to nothing is still
+dropped rather than invented into the map. After this change that means only what it always
+should have: a breakpoint lazydap never set — the adapter's own, or one from an earlier
+session.

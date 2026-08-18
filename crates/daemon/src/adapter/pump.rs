@@ -8,15 +8,16 @@
 //! construction, and everything else — request waiters, event fan-out — is
 //! reached through channels.
 
-use super::handshake::{PumpStart, output_chunk, started_process};
-use super::{Pending, StopContext};
+use super::handshake::{PumpStart, applied_breakpoints, output_chunk, started_process};
+use super::{BreakpointRequests, Pending, StopContext};
 use crate::state::{Outstanding, OutstandingStep, Session};
 use lazydap_core::{
-    AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
-    ThreadUpdateKind,
+    AdapterBreakpoint, Breakpoint, BreakpointId, EndReason, PauseReason, SessionState,
+    ThreadUpdate, ThreadUpdateKind,
 };
-use lazydap_dap::{DapEvent, DapReader, Incoming};
+use lazydap_dap::{DapEvent, DapReader, DapResponse, Incoming};
 use lazydap_protocol::Event;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -38,7 +39,12 @@ const WIND_DOWN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Start pumping. The task ends when the adapter does.
 pub fn spawn_pump(start: PumpStart, session: Arc<Session>) {
-    tokio::spawn(pump(start.reader, start.pending, session));
+    tokio::spawn(pump(
+        start.reader,
+        start.pending,
+        start.breakpoint_requests,
+        session,
+    ));
 }
 
 /// Read until the adapter has nothing left to say, then make sure it is gone.
@@ -48,8 +54,18 @@ pub fn spawn_pump(start: PumpStart, session: Arc<Session>) {
 /// process left running with nobody holding its socket. `tokio::spawn` turns a
 /// panic into a `JoinError` here instead of into a silent leak — the pump's own
 /// `JoinHandle` is dropped, so nothing else would ever notice.
-async fn pump(reader: DapReader, pending: Pending, session: Arc<Session>) {
-    let reading = tokio::spawn(run(reader, Arc::clone(&pending), Arc::clone(&session)));
+async fn pump(
+    reader: DapReader,
+    pending: Pending,
+    breakpoint_requests: BreakpointRequests,
+    session: Arc<Session>,
+) {
+    let reading = tokio::spawn(run(
+        reader,
+        Arc::clone(&pending),
+        Arc::clone(&breakpoint_requests),
+        Arc::clone(&session),
+    ));
     if let Err(error) = reading.await {
         finish(&session, format!("the session pump stopped: {error}")).await;
     }
@@ -63,11 +79,19 @@ async fn pump(reader: DapReader, pending: Pending, session: Arc<Session>) {
     // wakes their waiters with `AdapterError::Gone` rather than leaving them
     // to time out one by one.
     pending.lock().await.clear();
+    // Nothing will answer those requests either, so nothing will ever come to
+    // claim what they asked for.
+    lock(&breakpoint_requests).clear();
 
     tracing::debug!(target: "daemon.session", session_id = %session.id, "pump stopped");
 }
 
-async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
+async fn run(
+    mut reader: DapReader,
+    pending: Pending,
+    breakpoint_requests: BreakpointRequests,
+    session: Arc<Session>,
+) {
     // A debuggee quick enough to finish during its own launch has already
     // ended, and the `terminated` that says so was read by the handshake. There
     // is nothing left to wait for, so the wind-down starts here rather than
@@ -96,6 +120,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
 
         match incoming {
             Ok(Incoming::Response(response)) => {
+                record_breakpoint_ids(&session, &breakpoint_requests, &response);
                 let waiter = pending.lock().await.remove(&response.request_seq);
                 match waiter {
                     Some(sender) => {
@@ -434,6 +459,40 @@ fn adapter_breakpoint(body: &serde_json::Value) -> AdapterBreakpoint {
     .without_settled_message()
 }
 
+/// Map the adapter's breakpoint ids to ours, as its answer goes past.
+///
+/// Here rather than in the caller that sent the request, and that is the fix
+/// rather than an implementation detail. This task owns the socket, so it
+/// dispatches everything that followed the answer — including the `breakpoint`
+/// event codelldb sends microseconds later — before the caller awaiting the
+/// answer is scheduled again. Recorded from the caller, the mapping arrived
+/// after the event that needed it, and the update went out with a `null` id no
+/// caller could match against `break --list` (D-WP7-2).
+///
+/// Called for every response, not only successful ones: an entry left behind
+/// by a request the adapter rejected is an entry nothing else will ever
+/// remove.
+fn record_breakpoint_ids(
+    session: &Session,
+    requests: &BreakpointRequests,
+    response: &DapResponse<serde_json::Value>,
+) {
+    let Some(requested) = lock(requests).remove(&response.request_seq) else {
+        return;
+    };
+    if !response.success {
+        return;
+    }
+    session.record_breakpoints(&applied_breakpoints(&requested, response.body.clone()));
+}
+
+/// The in-flight `setBreakpoints` map, with a poisoned lock treated as usable.
+fn lock(requests: &BreakpointRequests) -> std::sync::MutexGuard<'_, HashMap<i64, Vec<Breakpoint>>> {
+    requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The read side died. Make sure clients hear about it (D022).
 ///
 /// Adapters do not reliably say goodbye — a crashed one just closes the
@@ -498,6 +557,142 @@ mod tests {
             event_tx,
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ))
+    }
+
+    /// A session whose events can be read back, for the two tests below.
+    fn watched_session() -> (
+        Arc<Session>,
+        tokio::sync::broadcast::Receiver<crate::state::SeqEvent>,
+    ) {
+        let (event_tx, events) = tokio::sync::broadcast::channel(64);
+        let session = Arc::new(Session::new(
+            SessionId::new(),
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            AdapterHandle::detached(),
+            event_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ));
+        (session, events)
+    }
+
+    /// Exactly what codelldb sends, in the order it sends it, taken off the
+    /// wire in `docs/reference/codelldb-quirks.md` quirk 10.
+    fn set_breakpoints_response(seq: i64) -> DapResponse<serde_json::Value> {
+        DapResponse {
+            seq: 15,
+            request_seq: seq,
+            message_type: "response".to_string(),
+            command: "setBreakpoints".to_string(),
+            success: true,
+            message: None,
+            body: Some(serde_json::json!({
+                "breakpoints": [
+                    {"id": 1, "line": 6, "message": "Resolved locations: 1", "verified": true}
+                ]
+            })),
+        }
+    }
+
+    fn breakpoint_event() -> DapEvent {
+        DapEvent {
+            seq: 16,
+            message_type: "event".to_string(),
+            event: "breakpoint".to_string(),
+            body: Some(serde_json::json!({
+                "breakpoint": {
+                    "id": 1, "line": 6, "message": "Resolved locations: 1", "verified": true
+                },
+                "reason": "changed"
+            })),
+        }
+    }
+
+    fn ours(line: u32) -> Breakpoint {
+        Breakpoint {
+            id: BreakpointId(1),
+            source: PathBuf::from("/tmp/exits.c"),
+            line,
+            column: None,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+            enabled: true,
+        }
+    }
+
+    fn updated_id(
+        events: &mut tokio::sync::broadcast::Receiver<crate::state::SeqEvent>,
+    ) -> Option<BreakpointId> {
+        loop {
+            match events.try_recv().expect("an event was emitted").event {
+                Event::BreakpointUpdated { breakpoint, .. } => return breakpoint.id,
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn a_breakpoint_event_that_follows_its_own_answer_carries_our_id() {
+        // The failure this exists for, reproduced in the order the wire had
+        // it: codelldb answers `setBreakpoints` and sends the `breakpoint`
+        // event about the same breakpoint microseconds later. Both are read
+        // here, in this task, before the caller that sent the request runs
+        // again — so if the mapping were recorded there, this update would go
+        // out with `id: null` and no caller could match it against
+        // `break --list`. On macOS a second event 20ms later coalesced over
+        // the bad one and hid this; on Linux there is no second event.
+        let (session, mut events) = watched_session();
+        let requests: BreakpointRequests = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        lock(&requests).insert(4, vec![ours(6)]);
+
+        record_breakpoint_ids(&session, &requests, &set_breakpoints_response(4));
+        handle_event(&session, breakpoint_event());
+
+        assert_eq!(
+            updated_id(&mut events),
+            Some(BreakpointId(1)),
+            "the update has to name the breakpoint `break --list` gave the caller",
+        );
+        assert!(
+            lock(&requests).is_empty(),
+            "and the request is no longer in flight",
+        );
+    }
+
+    #[test]
+    fn an_answer_nobody_registered_leaves_the_id_unmapped() {
+        // The same two messages with the registration missing, which is what
+        // the old code amounted to. Here so the test above is known to be
+        // testing the ordering rather than passing for its own reasons.
+        let (session, mut events) = watched_session();
+        let requests: BreakpointRequests = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        record_breakpoint_ids(&session, &requests, &set_breakpoints_response(4));
+        handle_event(&session, breakpoint_event());
+
+        assert_eq!(updated_id(&mut events), None);
+    }
+
+    #[test]
+    fn a_rejected_answer_takes_its_request_out_of_flight_without_recording_anything() {
+        let (session, mut events) = watched_session();
+        let requests: BreakpointRequests = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        lock(&requests).insert(4, vec![ours(6)]);
+
+        let mut rejected = set_breakpoints_response(4);
+        rejected.success = false;
+        rejected.body = None;
+        record_breakpoint_ids(&session, &requests, &rejected);
+        handle_event(&session, breakpoint_event());
+
+        assert!(lock(&requests).is_empty(), "nothing is still in flight");
+        assert_eq!(
+            updated_id(&mut events),
+            None,
+            "and a refused request maps nothing",
+        );
     }
 
     #[test]

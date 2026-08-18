@@ -1162,6 +1162,12 @@ impl BreakpointMap {
     ///
     /// An update for a breakpoint we never set — the adapter's own, or one
     /// from a previous session — is dropped rather than invented into the map.
+    /// That is now the *only* thing this drops: an id that was merely still in
+    /// flight used to land here too, because the mapping was recorded by the
+    /// caller awaiting the `setBreakpoints` answer and the event beat it. The
+    /// pump records the mapping as the answer goes past, so by the time any
+    /// event that follows it is dispatched, the id is either ours or nobody's
+    /// (D-WP7-2).
     fn update(&mut self, update: &AdapterBreakpoint) {
         let Some(adapter_id) = update.adapter_id else {
             return;
