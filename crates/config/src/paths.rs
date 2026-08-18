@@ -23,11 +23,71 @@ pub const DATA_DIR_ENV: &str = "LAZYDAP_DATA_DIR";
 /// explicit `.lazydap/` anywhere above the working directory beats a nearer
 /// `.git/` — which is what makes it usable as an override in a monorepo or a
 /// submodule.
-const ROOT_MARKERS: [&[&str]; 3] = [
-    &[".lazydap"],
-    &[".git"],
-    &["Cargo.toml", "package.json", "pyproject.toml"],
+const ROOT_MARKERS: [&[Marker]; 3] = [
+    &[Marker {
+        name: ".lazydap",
+        shape: Shape::Directory,
+        at_home: true,
+    }],
+    &[Marker {
+        name: ".git",
+        shape: Shape::Either,
+        at_home: false,
+    }],
+    &[
+        Marker {
+            name: "Cargo.toml",
+            shape: Shape::Either,
+            at_home: false,
+        },
+        Marker {
+            name: "package.json",
+            shape: Shape::Either,
+            at_home: false,
+        },
+        Marker {
+            name: "pyproject.toml",
+            shape: Shape::Either,
+            at_home: false,
+        },
+    ],
 ];
+
+/// One thing whose presence in a directory makes it a project root.
+struct Marker {
+    name: &'static str,
+    shape: Shape,
+    /// Whether finding it in the *home directory* counts.
+    ///
+    /// For everything but `.lazydap/` it does not. Plenty of people keep their
+    /// dotfiles in a git repository, or a stray `Cargo.toml` in `~`, and
+    /// letting either mark `$HOME` as a project makes every unmarked directory
+    /// beneath it — which is most of them — share one root, one daemon and one
+    /// `~/.lazydap/state.toml`. Asking for `$HOME` explicitly with a
+    /// `.lazydap/` directory still works.
+    at_home: bool,
+}
+
+/// What has to be at the marker's path for it to count.
+enum Shape {
+    /// A directory and nothing else. A *file* called `.lazydap` is not
+    /// lazydap's state directory, and treating it as one puts the project root
+    /// somewhere the state file can never be written.
+    Directory,
+    /// A file or a directory: `.git` is a plain file in a worktree or a
+    /// submodule, and the manifests are files.
+    Either,
+}
+
+impl Marker {
+    fn found_in(&self, dir: &Path) -> bool {
+        let path = dir.join(self.name);
+        match self.shape {
+            Shape::Directory => path.is_dir(),
+            Shape::Either => path.exists(),
+        }
+    }
+}
 
 /// Longest socket path we will attempt to bind.
 ///
@@ -69,9 +129,17 @@ pub type Result<T> = std::result::Result<T, PathsError>;
 
 /// The project root for `start`, per O01/D024: `.lazydap/`, then `.git/`, then
 /// a language manifest, then `start` itself.
+///
+/// The walk never climbs past the home directory. See [`Marker::at_home`].
 pub fn project_root(start: &Path) -> PathBuf {
+    project_root_below(start, dirs::home_dir().as_deref())
+}
+
+/// [`project_root`] with the ceiling passed in, so it can be tested without
+/// moving the real `$HOME`.
+fn project_root_below(start: &Path, home: Option<&Path>) -> PathBuf {
     for markers in ROOT_MARKERS {
-        if let Some(root) = nearest_ancestor_containing(start, markers) {
+        if let Some(root) = nearest_ancestor_containing(start, markers, home) {
             return root;
         }
     }
@@ -176,12 +244,30 @@ pub fn log_path(instance: &str) -> Result<PathBuf> {
     Ok(data_dir()?.join(format!("lazydap-{instance}.log")))
 }
 
-/// Nearest ancestor of `start` (inclusive) that contains any of `markers`.
-fn nearest_ancestor_containing(start: &Path, markers: &[&str]) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|dir| markers.iter().any(|marker| dir.join(marker).exists()))
-        .map(Path::to_path_buf)
+/// Nearest ancestor of `start` (inclusive) that contains any of `markers`,
+/// stopping at the home directory.
+///
+/// Nothing above `$HOME` is ever a project root: `~/Documents` and
+/// `~/code/whatever` have nothing in common but the user they belong to, and
+/// the first marker found above home would make them one project.
+fn nearest_ancestor_containing(
+    start: &Path,
+    markers: &[Marker],
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let at_home = home == Some(dir);
+        if markers
+            .iter()
+            .any(|marker| (!at_home || marker.at_home) && marker.found_in(dir))
+        {
+            return Some(dir.to_path_buf());
+        }
+        if at_home {
+            return None;
+        }
+    }
+    None
 }
 
 /// Create `dir` owner-only, and refuse to use anything that is not already a
@@ -394,6 +480,67 @@ mod tests {
         let nested = temp.mkdirs("nothing/here");
 
         assert_eq!(project_root(&nested), nested);
+    }
+
+    #[test]
+    fn a_file_called_lazydap_is_not_a_project_root() {
+        // `.lazydap` is a directory with a state file in it. A file of that
+        // name is somebody's note, and stopping the walk there would name a
+        // root the state file can never be written under.
+        let temp = TempDir::new("lazydapfile");
+        temp.mkdirs(".git");
+        let nested = temp.mkdirs("src/inner");
+        temp.touch("src/.lazydap");
+
+        assert_eq!(project_root(&nested), temp.path());
+    }
+
+    #[test]
+    fn a_git_repository_of_dotfiles_does_not_make_home_everyone_s_project() {
+        // The reported shape: `~/.git` from a dotfiles repository, and an
+        // unmarked directory below it. Sharing one root means sharing one
+        // daemon and one `~/.lazydap/state.toml` across everything the user
+        // does.
+        let temp = TempDir::new("dotfiles");
+        let home = temp.mkdirs("home");
+        fs::create_dir_all(home.join(".git")).expect("create dotfiles repo");
+        let scratch = temp.mkdirs("home/scratch/notes");
+
+        assert_eq!(project_root_below(&scratch, Some(&home)), scratch);
+    }
+
+    #[test]
+    fn home_is_a_project_root_when_it_is_asked_for_by_name() {
+        let temp = TempDir::new("homelazydap");
+        let home = temp.mkdirs("home");
+        fs::create_dir_all(home.join(".lazydap")).expect("create the marker");
+        let nested = temp.mkdirs("home/scratch");
+
+        assert_eq!(project_root_below(&nested, Some(&home)), home);
+    }
+
+    #[test]
+    fn the_walk_never_climbs_above_home() {
+        let temp = TempDir::new("ceiling");
+        // A marker *above* the home directory, which nothing under home may
+        // adopt: two projects that share only `/Users` are not one project.
+        temp.touch("Cargo.toml");
+        let home = temp.mkdirs("home");
+        let nested = temp.mkdirs("home/code/thing");
+
+        assert_eq!(project_root_below(&nested, Some(&home)), nested);
+        assert_eq!(project_root_below(&home, Some(&home)), home);
+    }
+
+    #[test]
+    fn a_marked_project_under_home_is_still_found() {
+        let temp = TempDir::new("underhome");
+        let home = temp.mkdirs("home");
+        let project = temp.mkdirs("home/code/thing");
+        temp.touch("home/code/thing/Cargo.toml");
+        let nested = temp.mkdirs("home/code/thing/src/deep");
+
+        assert_eq!(project_root_below(&nested, Some(&home)), project);
     }
 
     #[test]
