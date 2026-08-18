@@ -345,7 +345,10 @@ mod tests {
     }
 
     async fn report(state: &Arc<DaemonState>, request: Request) -> BreakpointReport {
-        match crate::handlers::dispatch(state, request).await.expect("ok") {
+        match crate::handlers::dispatch(state, request, None)
+            .await
+            .expect("ok")
+        {
             Response::Breakpoints(report) => report,
             other => unreachable!("expected a breakpoint report, got: {other:?}"),
         }

@@ -14,6 +14,7 @@ mod session;
 mod watches;
 
 use crate::state::{DaemonState, Session};
+use crate::wait::Abandoned;
 use lazydap_core::{SessionId, SessionState};
 use lazydap_protocol::{
     DoctorCheck, DoctorReport, ErrorCode, IpcError, LAZYDAP_PROTOCOL_VERSION, Request, Response,
@@ -22,7 +23,16 @@ use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, IpcError>;
 
-pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Response> {
+/// `abandoned` resolves when the client that sent the request hangs up, and is
+/// `None` for a caller with no connection behind it. Only the requests that
+/// block — a `--wait` — take it, and only the wait loop itself honours it: a
+/// half-sent DAP request or a half-applied mutation must never be what gets
+/// abandoned (D-WP3-5).
+pub async fn dispatch(
+    state: &Arc<DaemonState>,
+    request: Request,
+    abandoned: Option<Abandoned>,
+) -> Result<Response> {
     match request {
         // --- Diagnostics ---
         Request::Ping => Ok(Response::Pong {
@@ -59,10 +69,13 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             session::execute(
                 state,
                 session_id,
-                session::Movement::Continue,
-                thread_id,
-                wait,
-                all_threads,
+                session::Execution {
+                    movement: session::Movement::Continue,
+                    thread_id,
+                    wait,
+                    all_threads,
+                },
+                abandoned,
             )
             .await
         }
@@ -75,10 +88,13 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             session::execute(
                 state,
                 session_id,
-                session::Movement::Step(kind),
-                thread_id,
-                wait,
-                false,
+                session::Execution {
+                    movement: session::Movement::Step(kind),
+                    thread_id,
+                    wait,
+                    all_threads: false,
+                },
+                abandoned,
             )
             .await
         }
@@ -90,10 +106,13 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Result<Resp
             session::execute(
                 state,
                 session_id,
-                session::Movement::Pause,
-                thread_id,
-                wait,
-                false,
+                session::Execution {
+                    movement: session::Movement::Pause,
+                    thread_id,
+                    wait,
+                    all_threads: false,
+                },
+                abandoned,
             )
             .await
         }
@@ -269,19 +288,28 @@ fn find_session(state: &Arc<DaemonState>, session_id: SessionId) -> Result<Arc<S
 fn live_session(state: &Arc<DaemonState>, session_id: SessionId) -> Result<Arc<Session>> {
     let session = find_session(state, session_id)?;
     if !session.state().is_live() {
-        return Err(IpcError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "session {session_id} has {}; run `lazydap launch` to start another",
-                past_tense(session.state()),
-            ),
-        )
-        .with_details(serde_json::json!({
-            "session_id": session_id.to_string(),
-            "state": session.state(),
-        })));
+        return Err(session_finished(session_id, session.state()));
     }
     Ok(session)
+}
+
+/// The refusal a request gets for a session whose program has finished.
+///
+/// Shared with `session::execute`, which learns the same fact later: a program
+/// can finish between this check and the moment the execution permit is
+/// granted, and a caller must not be able to tell the two apart (D-WP3-2).
+pub(super) fn session_finished(session_id: SessionId, state: SessionState) -> IpcError {
+    IpcError::new(
+        ErrorCode::BadRequest,
+        format!(
+            "session {session_id} has {}; run `lazydap launch` to start another",
+            past_tense(state),
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": session_id.to_string(),
+        "state": state,
+    }))
 }
 
 /// The session a request names, refusing one whose program is running.
@@ -339,7 +367,7 @@ mod tests {
     #[tokio::test]
     async fn ping_answers_with_this_build_s_protocol_version() {
         let state = state();
-        let response = dispatch(&state, Request::Ping).await.expect("pong");
+        let response = dispatch(&state, Request::Ping, None).await.expect("pong");
 
         match response {
             Response::Pong {
@@ -355,7 +383,9 @@ mod tests {
     #[tokio::test]
     async fn status_reports_no_session_before_anything_is_launched() {
         let state = state();
-        let response = dispatch(&state, Request::Status).await.expect("status");
+        let response = dispatch(&state, Request::Status, None)
+            .await
+            .expect("status");
 
         match response {
             Response::Status(report) => {
@@ -374,7 +404,7 @@ mod tests {
         // something plausible is what stops a future caller from wiring it up
         // in the one place that cannot deliver on it.
         let state = state();
-        let error = dispatch(&state, Request::Subscribe { channels: vec![] })
+        let error = dispatch(&state, Request::Subscribe { channels: vec![] }, None)
             .await
             .expect_err("the dispatcher has no connection to subscribe");
 
@@ -391,6 +421,7 @@ mod tests {
                 terminate: true,
                 dry_run: false,
             },
+            None,
         )
         .await
         .expect_err("there is no session to disconnect");
@@ -403,7 +434,9 @@ mod tests {
         let state = state();
         assert!(!state.shutdown_requested());
 
-        let response = dispatch(&state, Request::Shutdown).await.expect("ack");
+        let response = dispatch(&state, Request::Shutdown, None)
+            .await
+            .expect("ack");
 
         assert!(matches!(response, Response::ShuttingDown { .. }));
         assert!(state.shutdown_requested(), "the accept loop must be told");
@@ -416,7 +449,10 @@ mod tests {
         // cannot carry flags. `lazydap shutdown --dry-run` is answered from a
         // `Status` call on the client instead, and mutates nothing.
         let state = state();
-        let report = match dispatch(&state, Request::Status).await.expect("status") {
+        let report = match dispatch(&state, Request::Status, None)
+            .await
+            .expect("status")
+        {
             Response::Status(report) => report,
             other => unreachable!("expected a status report, got: {other:?}"),
         };
@@ -431,7 +467,10 @@ mod tests {
     #[tokio::test]
     async fn version_answers_without_needing_a_session_or_an_adapter() {
         let state = state();
-        match dispatch(&state, Request::Version).await.expect("version") {
+        match dispatch(&state, Request::Version, None)
+            .await
+            .expect("version")
+        {
             Response::Version { lazydap, protocol } => {
                 assert_eq!(protocol, LAZYDAP_PROTOCOL_VERSION);
                 assert!(!lazydap.is_empty());
@@ -449,6 +488,7 @@ mod tests {
                 check_adapters: false,
                 check_state: true,
             },
+            None,
         )
         .await
         .expect("doctor")
@@ -477,6 +517,7 @@ mod tests {
                 wait: lazydap_protocol::WaitMode::NoWait,
                 all_threads: false,
             },
+            None,
         )
         .await
         .expect_err("nothing to continue");
@@ -493,6 +534,7 @@ mod tests {
                 session_id: SessionId::new(),
                 frame_id: None,
             },
+            None,
         )
         .await
         .expect_err("nothing to inspect");

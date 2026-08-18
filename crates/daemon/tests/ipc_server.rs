@@ -30,6 +30,10 @@ struct TestDaemon {
 
 impl TestDaemon {
     async fn start() -> Self {
+        Self::named("lazydap-test".to_string()).await
+    }
+
+    async fn named(instance: String) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "lazydap-ipc-{}-{}",
@@ -43,7 +47,7 @@ impl TestDaemon {
         // The test directory doubles as the project root, so nothing here
         // writes a `.lazydap/` into the repository the tests run from.
         let store = lazydap_store::ProjectStore::load(&dir).expect("load the store");
-        let state = DaemonState::new("lazydap-test".to_string(), store);
+        let state = DaemonState::new(instance, store);
 
         let accept_state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -402,6 +406,107 @@ async fn a_frame_the_daemon_cannot_read_is_answered_before_it_hangs_up() {
         IpcPayload::Error(error) => assert_eq!(error.code, ErrorCode::BadRequest),
         other => unreachable!("expected a bad-request error, got: {other:?}"),
     }
+}
+
+/// Two requests written before either is answered are both answered, in order.
+///
+/// The daemon now reads ahead while a request is in flight, so it can notice a
+/// client hanging up on a `--wait` and stop holding the session's execution
+/// permit for it (D-WP3-5). Reading ahead must not cost anybody a request: the
+/// frame it finds waits its turn rather than being dropped, which would hang
+/// the client on a reply that never comes.
+#[tokio::test]
+async fn a_request_read_while_another_is_in_flight_still_gets_its_answer() {
+    let daemon = TestDaemon::start().await;
+    let mut connection = daemon.raw().await;
+
+    for id in [1, 2, 3] {
+        connection
+            .send(IpcMessage::request(id, Request::Status))
+            .await
+            .expect("send");
+    }
+
+    for id in [1, 2, 3] {
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), connection.recv())
+            .await
+            .expect("the daemon should answer every request it read")
+            .expect("recv")
+            .expect("a frame");
+        assert_eq!(
+            reply.id, id,
+            "answers come back in the order they were asked"
+        );
+        assert!(matches!(
+            reply.payload,
+            IpcPayload::Response(Response::Status(_))
+        ));
+    }
+}
+
+/// A client that vanishes mid-request does not take the daemon with it.
+#[tokio::test]
+async fn a_client_that_hangs_up_leaves_the_daemon_serving_everybody_else() {
+    let daemon = TestDaemon::start().await;
+
+    let mut leaving = daemon.raw().await;
+    leaving
+        .send(IpcMessage::request(1, Request::Status))
+        .await
+        .expect("send");
+    drop(leaving);
+
+    let mut staying = daemon.client().await;
+    assert!(matches!(
+        staying.request(Request::Status).await.expect("status"),
+        Response::Status(_)
+    ));
+}
+
+/// A reply too large to frame is an answer, not a hang-up.
+///
+/// It never reaches the wire — the codec refuses to build the frame — so the
+/// socket is fine and the request can still be refused in words. Breaking the
+/// connection instead is what a client reported as "the daemon closed the
+/// connection before answering", exit 3: an unreachable daemon, for a request
+/// the daemon understood perfectly and simply could not fit (D-WP3-4).
+///
+/// The instance name is the cheapest reply that can be made too big; the
+/// requests that reach this in practice are `variables --max 0` on a huge
+/// container and `output` on a session that printed a lot.
+#[tokio::test]
+async fn a_reply_that_cannot_be_framed_is_refused_rather_than_hung_up_on() {
+    let daemon = TestDaemon::named("x".repeat(lazydap_protocol::MAX_FRAME_BYTES + 1)).await;
+    let mut connection = daemon.raw().await;
+
+    connection
+        .send(IpcMessage::request(4, Request::Status))
+        .await
+        .expect("send");
+
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), connection.recv())
+        .await
+        .expect("the daemon must answer rather than go quiet")
+        .expect("recv")
+        .expect("a frame, not a closed connection");
+
+    assert_eq!(reply.id, 4, "answered in context, on the request's own id");
+    match reply.payload {
+        IpcPayload::Error(error) => {
+            assert_eq!(error.code, ErrorCode::BadRequest, "got: {error}");
+            assert!(error.message.contains("16 MiB"), "got: {}", error.message);
+        }
+        other => unreachable!("expected a refusal, got: {other:?}"),
+    }
+
+    // And the connection is still usable, which is the whole point of not
+    // hanging up: a client can narrow its request and ask again.
+    connection
+        .send(IpcMessage::request(5, Request::Version))
+        .await
+        .expect("send");
+    let reply = connection.recv().await.expect("recv").expect("a frame");
+    assert_eq!(reply.id, 5);
 }
 
 #[tokio::test]

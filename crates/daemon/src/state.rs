@@ -342,6 +342,9 @@ pub enum RunClaim {
     /// Do not ask, and do not touch the state: the program is already doing
     /// what was requested.
     AlreadyRunning,
+    /// The program finished before the claim was made. Ask for nothing, write
+    /// nothing, and refuse (D-WP3-2).
+    Finished(SessionState),
 }
 
 /// Identifies one request the program was asked to perform.
@@ -759,8 +762,27 @@ impl Session {
     /// is sent, and — importantly — no state is written, so a stop the pump
     /// records a moment later stands (D055). `step` passes `false`: "step" has
     /// no reading that means "wait for whatever happens next".
+    ///
+    /// A session whose program has *finished* is refused outright. The caller
+    /// checked that it was live, but the check and this claim are separated by
+    /// a thread resolution and by the wait for the execution permit — long
+    /// enough for another client's `continue --wait --timeout 0` to run the
+    /// program to its exit. Stamping `Running` over that left a dead session
+    /// looking live: `restore_state` never fired, `reap_finished` never reaped
+    /// it, and every later `launch` was refused with `SessionAlreadyActive`
+    /// until somebody ran `disconnect` (D-WP3-2).
     pub fn claim_run(&self, resume_only: bool) -> RunClaim {
         let mut state = write(&self.state);
+
+        if !state.is_live() {
+            tracing::debug!(
+                target: "daemon.session",
+                session_id = %self.id,
+                state = state.as_str(),
+                "the program finished before this request could claim it",
+            );
+            return RunClaim::Finished(*state);
+        }
 
         if resume_only && *state == SessionState::Running {
             tracing::debug!(
@@ -845,6 +867,22 @@ impl Session {
     /// marking its backlog delivered would lose those events for good.
     pub fn undelivered(&self) -> (Vec<Event>, u64, u64) {
         lock(&self.events).undelivered()
+    }
+
+    /// Everything the buffer still holds after `seq`, oldest first.
+    ///
+    /// Two readers want this, and both want it indexed by their own position
+    /// rather than by what any wait has committed: a `--wait` that fell behind
+    /// the broadcast, for which this is the only remaining record of what it
+    /// missed (D-WP3-1), and one that has to tell a stop it caused from the
+    /// stop the program was already sitting at (D-WP3-3).
+    pub fn events_since(&self, seq: u64) -> Vec<SeqEvent> {
+        lock(&self.events).since(seq)
+    }
+
+    /// The newest event this session has recorded. A position to come back to.
+    pub fn event_watermark(&self) -> u64 {
+        lock(&self.events).watermark()
     }
 
     /// Record that everything up to `seq` has been reported to a caller.
@@ -988,7 +1026,21 @@ impl EventBuffer {
         // The watermark is the newest event that exists, not merely the newest
         // one still in the buffer: anything dropped is gone, and re-reporting
         // it later is impossible either way.
-        (undelivered, self.next_seq - 1, self.undelivered_loss)
+        (undelivered, self.watermark(), self.undelivered_loss)
+    }
+
+    /// The newest sequence number handed out, whether or not that event is
+    /// still in the ring.
+    fn watermark(&self) -> u64 {
+        self.next_seq - 1
+    }
+
+    fn since(&self, seq: u64) -> Vec<SeqEvent> {
+        self.events
+            .iter()
+            .filter(|sequenced| sequenced.seq > seq)
+            .cloned()
+            .collect()
     }
 
     /// Everything up to `seq` has reached a caller — including the loss, which
@@ -1526,6 +1578,69 @@ mod tests {
             "the pump moved it on; the restore must decline",
         );
         assert_eq!(session.state(), SessionState::Exited);
+    }
+
+    #[test]
+    fn a_finished_program_is_not_something_a_queued_request_may_resume() {
+        // Two clients, one program. A `continue --wait --timeout 0` runs it to
+        // its exit while a `step` from somebody else is still queued for the
+        // execution permit; the `step` then reached this with a check that had
+        // passed seconds earlier. Stamping `Running` over `Exited` left a dead
+        // session looking live: nothing restored the state, `reap_finished`
+        // never reaped it, and every later `launch` was refused with
+        // `SessionAlreadyActive` until somebody ran `disconnect` (D-WP3-2).
+        let session = ended_session();
+        session.set_state(SessionState::Running);
+        session.end_once(EndReason::Exited { exit_code: Some(0) });
+
+        assert_eq!(
+            session.claim_run(false),
+            RunClaim::Finished(SessionState::Exited),
+        );
+        assert_eq!(
+            session.state(),
+            SessionState::Exited,
+            "and the refusal writes nothing",
+        );
+    }
+
+    #[test]
+    fn a_continue_is_refused_by_a_finished_program_too() {
+        // `resume_only` is about a program that is *running*, and a finished
+        // one is not running. Reading the ending first is what stops the
+        // already-running short circuit from quietly answering for it.
+        let session = ended_session();
+        session.end_once(EndReason::AdapterDied {
+            detail: "eof".to_string(),
+        });
+
+        assert_eq!(
+            session.claim_run(true),
+            RunClaim::Finished(SessionState::AdapterDied),
+        );
+    }
+
+    #[test]
+    fn an_event_the_reader_has_already_seen_is_not_handed_back() {
+        // What a `--wait` reads to catch up after falling behind the
+        // broadcast: strictly newer than its own position, oldest first
+        // (D-WP3-1).
+        let session = ended_session();
+        session.emit(output_event(session.id, "first"));
+        let mark = session.event_watermark();
+        session.emit(output_event(session.id, "second"));
+        session.emit(output_event(session.id, "third"));
+
+        let since: Vec<u64> = session
+            .events_since(mark)
+            .into_iter()
+            .map(|sequenced| sequenced.seq)
+            .collect();
+        assert_eq!(since, vec![mark + 1, mark + 2], "got: {since:?}");
+        assert!(
+            session.events_since(session.event_watermark()).is_empty(),
+            "nothing is newer than the newest",
+        );
     }
 
     #[test]

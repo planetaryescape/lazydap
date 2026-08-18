@@ -15,7 +15,7 @@ mod codec;
 mod connection;
 mod types;
 
-pub use codec::IpcCodec;
+pub use codec::{IpcCodec, MAX_FRAME_BYTES, is_unframeable};
 pub use connection::IpcConnection;
 pub use types::{
     AdapterCapabilities, BreakpointAction, BreakpointReport, DoctorCheck, DoctorReport, ErrorCode,

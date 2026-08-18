@@ -9,7 +9,31 @@ const LENGTH_FIELD_BYTES: usize = 4;
 /// Refuse to buffer a frame larger than this. A client that claims a 4 GiB
 /// message is either broken or hostile; either way the daemon should not
 /// allocate for it.
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+///
+/// It caps what can be *sent* as well, which is the half a caller notices:
+/// `variables --max 0` on a container with a million elements has an answer
+/// that does not fit down this socket. Public so the sender can say so.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether a failure means the message could never have become a frame, as
+/// opposed to the socket going away.
+///
+/// The distinction is worth a function because the two want opposite
+/// reactions. A frame that cannot be encoded — too large, or holding
+/// something `serde_json` refuses — never reaches the wire at all, so the
+/// request that produced it can still be answered, with an error saying why.
+/// Treating that as a dead peer is what made an over-sized reply look like
+/// "the daemon closed the connection before answering" (D-WP3-4).
+///
+/// Both kinds come out of [`IpcCodec`] itself: `InvalidInput` from the length
+/// prefix refusing an over-long body, `InvalidData` from serialisation. A
+/// Unix-socket write produces neither.
+pub fn is_unframeable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+    )
+}
 
 /// Tokio codec that frames [`IpcMessage`]s on the daemon socket.
 ///
@@ -146,6 +170,31 @@ mod tests {
             .decode(&mut buffer)
             .expect_err("malformed JSON must not decode");
         assert_eq!(err.kind(), ErrorKind::InvalidData, "got: {err}");
+    }
+
+    #[test]
+    fn a_reply_too_large_to_frame_is_told_apart_from_a_dead_socket() {
+        // What the daemon branches on to answer the request rather than hang
+        // up on it (D-WP3-4).
+        let oversized = IpcCodec::new()
+            .encode(
+                IpcMessage::response(
+                    1,
+                    Response::Pong {
+                        version: crate::LAZYDAP_PROTOCOL_VERSION,
+                        instance: "x".repeat(MAX_FRAME_BYTES + 1),
+                        uptime_ms: 0,
+                    },
+                ),
+                &mut BytesMut::new(),
+            )
+            .expect_err("a body past the cap must not encode");
+
+        assert!(is_unframeable(&oversized), "got: {oversized:?}");
+        assert!(
+            !is_unframeable(&std::io::Error::from(ErrorKind::BrokenPipe)),
+            "a peer that went away is not an encoding failure",
+        );
     }
 
     #[test]

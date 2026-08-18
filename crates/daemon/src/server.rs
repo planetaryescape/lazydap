@@ -4,13 +4,14 @@ use crate::error::{CliError, Result};
 use crate::handlers;
 use crate::instance::Instance;
 use crate::state::{DaemonState, SeqEvent};
+use crate::wait::Abandoned;
 use lazydap_core::EndReason;
 use lazydap_protocol::{
     ErrorCode, Event, EventKind, IpcConnection, IpcError, IpcMessage, IpcPayload,
-    LAZYDAP_PROTOCOL_VERSION, Request, Response,
+    LAZYDAP_PROTOCOL_VERSION, MAX_FRAME_BYTES, Request, Response, is_unframeable,
 };
 use lazydap_store::ProjectStore;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -154,9 +155,12 @@ async fn accept_loop(listener: &UnixListener, state: &Arc<DaemonState>) -> Resul
 
 /// Read requests from one client until it hangs up or the daemon stops.
 ///
-/// Requests on a connection are handled one at a time. A CLI client sends one
-/// and waits, so concurrency here would buy nothing; separate clients already
-/// get separate tasks.
+/// Requests on a connection are handled one at a time and in the order they
+/// arrived. A CLI client sends one and waits, so concurrency here would buy
+/// nothing; separate clients already get separate tasks. The socket *is* read
+/// while a request is in flight — that is how a client hanging up on a
+/// `--wait` gets noticed (see [`answer`]) — so anything that turns out to be
+/// another request waits its turn in `queued` rather than being dropped.
 ///
 /// A client that has sent [`Request::Subscribe`] also gets events pushed at it
 /// between replies, on the same connection. Sends happen in the *body* of a
@@ -166,29 +170,38 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
     let mut connection = IpcConnection::new(stream);
     let mut shutdown = state.shutdown_receiver();
     let mut subscription: Option<Subscription> = None;
+    // Requests read while an earlier one was still being answered. They are
+    // still handled one at a time and in order — this is only where one waits
+    // its turn, so that watching for a hang-up during a `--wait` cannot
+    // swallow a frame that turned out to be a request after all.
+    let mut queued: VecDeque<IpcMessage> = VecDeque::new();
 
     loop {
         if state.shutdown_requested() {
             break;
         }
 
-        let incoming = tokio::select! {
-            biased;
-            _ = shutdown.changed() => break,
-            incoming = connection.recv() => incoming,
-            event = next_event(subscription.as_mut()) => {
-                match event {
-                    Some(event) => {
-                        if let Err(error) = connection.send(IpcMessage::event(event)).await {
-                            tracing::debug!(target: "daemon.ipc", %error, "subscriber went away");
-                            break;
+        let incoming = if let Some(message) = queued.pop_front() {
+            Ok(Some(message))
+        } else {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                incoming = connection.recv() => incoming,
+                event = next_event(subscription.as_mut()) => {
+                    match event {
+                        Some(event) => {
+                            if let Err(error) = connection.send(IpcMessage::event(event)).await {
+                                tracing::debug!(target: "daemon.ipc", %error, "subscriber went away");
+                                break;
+                            }
                         }
+                        // The broadcast closed, which only happens as the daemon
+                        // goes away. Stop pushing; the shutdown arm ends the loop.
+                        None => subscription = None,
                     }
-                    // The broadcast closed, which only happens as the daemon
-                    // goes away. Stop pushing; the shutdown arm ends the loop.
-                    None => subscription = None,
+                    continue;
                 }
-                continue;
             }
         };
 
@@ -215,13 +228,91 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
         // than the daemon, so it is answered here instead of in `dispatch`.
         let reply = match subscribe_request(&message) {
             Some(channels) => subscribe(&state, &mut subscription, channels, message.id),
-            None => handle_message(&state, message).await,
+            None => answer(&state, message, &mut connection, &mut queued).await,
         };
+        let id = reply.id;
         if let Err(error) = connection.send(reply).await {
+            if is_unframeable(&error) {
+                // Nothing reached the wire — the frame was never built — so
+                // the socket is fine and the request can still be answered.
+                // Hanging up instead is what a client read as "the daemon
+                // closed the connection before answering" and reported as an
+                // unreachable daemon (D-WP3-4).
+                tracing::warn!(
+                    target: "daemon.ipc",
+                    request_id = id,
+                    %error,
+                    "a reply could not be framed",
+                );
+                if connection.send(too_large(id)).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             tracing::debug!(target: "daemon.ipc", %error, "client went away mid-reply");
             break;
         }
     }
+}
+
+/// Answer one request, giving up on it if the client that asked goes away.
+///
+/// `--wait` is the reason this is not a plain `await`. A `continue --wait
+/// --timeout 0` against a program that never stops blocks for as long as its
+/// caller lets it, and it holds the session's execution permit for all of it —
+/// so a Ctrl-C left every later `continue` and `step`, from every client,
+/// queued behind a request nobody was waiting for.
+///
+/// What is raced is the *read*, never the handler's own work. `recv` is
+/// cancellation-safe, so losing that branch costs no bytes, and the hang-up it
+/// detects only reaches the wait loop (see [`handlers::dispatch`]). A DAP
+/// request half-written to an adapter, or a mutation half-applied, is never
+/// what gets abandoned: those run to completion and are answered into a socket
+/// that is no longer read, which is what the reply's send failure then ends
+/// the connection on (D-WP3-5).
+async fn answer(
+    state: &Arc<DaemonState>,
+    message: IpcMessage,
+    connection: &mut IpcConnection<UnixStream>,
+    queued: &mut VecDeque<IpcMessage>,
+) -> IpcMessage {
+    let (hangup, abandoned) = tokio::sync::oneshot::channel();
+    let mut handled = std::pin::pin!(handle_message(state, message, abandoned));
+
+    loop {
+        tokio::select! {
+            biased;
+            reply = &mut handled => return reply,
+            read = connection.recv() => match read {
+                Ok(Some(message)) => queued.push_back(message),
+                _ => {
+                    drop(hangup);
+                    return handled.await;
+                }
+            },
+        }
+    }
+}
+
+/// The refusal for an answer too big to put on the socket.
+///
+/// `BadRequest` because it is the caller's knob that decides: the request that
+/// reaches this is one asking for everything of something unbounded, and
+/// narrowing it is both possible and the documented way to read a large
+/// container.
+fn too_large(id: u64) -> IpcMessage {
+    IpcMessage::error(
+        id,
+        IpcError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "the answer is larger than the {} MiB a single frame carries; \
+                 ask for less of it (`--max`, `--start`/`--count`, `--since`)",
+                MAX_FRAME_BYTES / (1024 * 1024),
+            ),
+        )
+        .with_details(serde_json::json!({ "max_frame_bytes": MAX_FRAME_BYTES })),
+    )
 }
 
 /// What one client is watching.
@@ -307,7 +398,11 @@ async fn next_event(subscription: Option<&mut Subscription>) -> Option<Event> {
     }
 }
 
-async fn handle_message(state: &Arc<DaemonState>, message: IpcMessage) -> IpcMessage {
+async fn handle_message(
+    state: &Arc<DaemonState>,
+    message: IpcMessage,
+    abandoned: Abandoned,
+) -> IpcMessage {
     let id = message.id;
 
     let request = match message.payload {
@@ -348,7 +443,7 @@ async fn handle_message(state: &Arc<DaemonState>, message: IpcMessage) -> IpcMes
         );
     }
 
-    match handlers::dispatch(state, request).await {
+    match handlers::dispatch(state, request, Some(abandoned)).await {
         Ok(response) => IpcMessage::response(id, response),
         Err(error) => {
             tracing::warn!(target: "daemon.ipc", request_id = id, %error, "request failed");

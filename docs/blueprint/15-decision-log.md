@@ -1876,3 +1876,130 @@ next `lazydap launch`. The exit code stays non-zero, because the adapter really 
 `not_found` derived from a selection taken earlier let two clients removing the same id both
 report success: the loser removed nothing and answered with an empty `not_found` under exit 0.
 `ProjectStore::remove` and `ProjectStore::toggle` return both halves of the answer together.
+
+---
+
+## D-WP3-1 — a `--wait` that falls behind reconciles against the session, it does not wait out its timeout
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** the broadcast a wait subscribes to drops the oldest events for a subscriber that
+cannot keep up (`EVENT_CHANNEL_CAPACITY`, 1024). D072 made the wait *declare* that loss, which
+was right and not enough: if the dropped range held the `stopped` or the `terminated`, the wait
+went on waiting for something that had already happened and returned `timeout` — while
+`lazydap status` reported `paused`. A caller cannot detect that from the blob, which makes it
+worse than a slow answer.
+
+The session's own ring buffer is a second, independent record of the same events, and it does
+not lose them at the same moment the channel does. On a `Lagged`, the wait now reads that
+buffer forward from its own position and takes the first event that settles it. Everything
+behind that event stays in the buffer, undelivered, and belongs to whatever asks next. The
+declared loss is unchanged: a gap is still a gap even when the outcome was recovered from the
+other side of it.
+
+The arithmetic that made a wait fall behind in the first place is also gone. The output cap
+re-summed every chunk already kept for every chunk that arrived — quadratic, and about a
+billion operations for one megabyte of output arriving in small pieces. The total is carried.
+
+**Measured, honestly:** `floods.c` — 1500 lines of a kilobyte each — produces about 1510
+`output` events against codelldb, which is more than the channel holds, and the wait still
+kept up both before and after the fix (three baseline runs: `paused`, 1001 chunks,
+`dropped_events: 0`). The lag needs many *small* chunks, which codelldb's pty reads do not
+produce for that fixture. The guarantee is carried by the unit tests in `wait.rs`, where the
+lag is a certainty rather than a race.
+
+---
+
+## D-WP3-2 — a program that has finished cannot be resumed, however far the request already got
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** `execute` checks that the session is live, resolves a thread against the adapter, and
+then queues for the session's execution permit. Another client's `continue --wait --timeout 0`
+can run the program to its exit across all of that. The queued request then reached
+`claim_run` with a check that had passed seconds earlier, stamped `Running` over `Exited`, and
+sent a step to a dead adapter. When the adapter acknowledged it, nothing restored the state:
+`restore_state` only runs on the error path. The session then looked live forever —
+`reap_finished` skips a `Running` one — and every later `launch` was refused with
+`SessionAlreadyActive` until a human ran `disconnect`.
+
+`claim_run` now reads the ending first and refuses, under the same lock that would have
+written the state, so there is no window between noticing and declining. The refusal is the
+one `live_session` gives, produced by the same function, because a caller must not be able to
+tell from the error whether it lost this race.
+
+---
+
+## D-WP3-3 — a `continue` that sends nothing still answers for what happened after it decided
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** D055 established that a `continue` on an already-running program sends nothing. Two
+consequences of that were wrong.
+
+**The stop it was waiting for could fall in the gap.** The subscription is taken after the
+decision, and D072's rule — a `--wait` never adopts a stop from its backlog, because that stop
+is where the run began — meant a stop landing in between belonged to nobody. The wait ran to
+its timeout. It now adopts one, but only one that the session recorded *after* the request
+took its mark, which is what tells this run's stop from the one the program was already
+sitting at. The mark is the session's event sequence rather than its stop generation: a
+generation changes for any state write, including another client's resume, and cannot tell a
+new stop from a stale one still sitting undelivered in the buffer.
+
+**It installed a marker for a request it never made.** `continue` clears both outstanding
+slots, which is correct for a `continue` that resumes — a step still recorded is finished and a
+pause that never landed is stale. For one that sends nothing it cleared a `pause` whose
+`SIGSTOP` was still in flight, so that stop arrived with nothing to explain it and was reported
+as `"reason": "exception"` — D064's bug, re-opened from the one path that had no business
+touching the markers at all. It no longer touches them.
+
+---
+
+## D-WP3-4 — a reply that cannot be framed is an error, not a hang-up
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** the socket's codec refuses frames over 16 MiB in both directions. A reply past that —
+`variables --max 0` on a very large container, `output` on a session that printed a great deal
+— failed to encode, and the daemon treated that exactly as it treats a dead peer: log, break,
+close the connection. The client saw the socket close before its answer and reported exit 3,
+an unreachable daemon, for a request the daemon had understood and simply could not fit.
+
+An encoding failure and a write failure want opposite reactions, and they are distinguishable:
+a frame that cannot be built never reaches the wire, so the socket is untouched and the request
+can still be answered. It is answered with `BadRequest`, naming the limit and the flags that
+narrow the question, and the connection stays open — the client's next act is to ask for less,
+which it cannot do down a socket that has been closed.
+
+`BadRequest` rather than a new code: the caller's own knob decides this, the existing code
+already covers "the request made no sense here", and a new `ErrorCode` variant is a wire change
+that would need a protocol bump to buy nothing a message cannot say.
+
+---
+
+## D-WP3-5 — a client hanging up ends its `--wait`, and nothing else
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** a `--wait` holds the session's execution permit for its whole duration, on purpose:
+that is what serialises execution requests (D021, non-negotiable #6). It also means a
+`continue --wait --timeout 0` against a program that never stops holds the queue until its
+caller gives up — and a caller that has already been Ctrl-C'd never does. Every later
+`continue` and `step`, from every client, then blocked until its own client-side deadline and
+reported the daemon as unreachable. Measured: 20.0s and
+`{"error":"DaemonInternalError","message":"the daemon did not answer within 20s"}` before,
+5.0s and an honest `timeout` blob after.
+
+The connection task now races the handler against a read of its own socket, and passes the
+hang-up down to the wait loop — and to nothing else. The distinction is the whole design:
+`recv` is cancellation-safe, so losing that race costs no bytes, but a DAP request half-written
+to an adapter or a mutation half-applied to the store is not something that may be abandoned.
+Only the loop that is doing nothing but waiting takes any notice; every other handler runs to
+completion and is answered into a socket nobody is reading.
+
+Reading ahead has one obligation: a frame that turns out to be another request waits its turn
+rather than being dropped, or a client that pipelines would hang on a reply that never comes.
+
+An abandoned wait commits nothing — it does not mark its events delivered — because the output
+it saw is still nobody's, and the next caller has to be able to report it.
+

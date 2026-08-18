@@ -125,7 +125,10 @@ mod tests {
     }
 
     async fn report(state: &Arc<DaemonState>, request: Request) -> WatchReport {
-        match crate::handlers::dispatch(state, request).await.expect("ok") {
+        match crate::handlers::dispatch(state, request, None)
+            .await
+            .expect("ok")
+        {
             Response::Watches(report) => report,
             other => unreachable!("expected a watch report, got: {other:?}"),
         }

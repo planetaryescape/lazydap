@@ -23,8 +23,17 @@ use lazydap_core::{EndReason, WaitOutcome};
 use lazydap_protocol::{Event, FrameLocals, StableState};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
+
+/// Resolves when the client that asked for a wait has gone away.
+///
+/// A `--wait` holds the session's execution permit for as long as it runs, so
+/// one whose caller has hung up would keep every other client's `continue`
+/// queued behind a request nobody is waiting for. The daemon hands the wait
+/// this end of a channel it drops when the connection closes (D-WP3-5).
+pub type Abandoned = tokio::sync::oneshot::Receiver<()>;
 
 /// The default a caller gets by saying nothing. Long enough for normal
 /// debugging, short enough that a wedged session does not lock up an agent.
@@ -63,6 +72,9 @@ pub struct WaitOptions {
     pub timeout: Option<Duration>,
     /// Wait for every thread to stop rather than returning on the first.
     pub all_threads: bool,
+    /// Ends the wait when the client that asked for it hangs up. `None` for a
+    /// caller with no connection behind it, such as a test.
+    pub abandoned: Option<Abandoned>,
 }
 
 /// A wait that has already subscribed and is safe to send a request behind.
@@ -72,11 +84,20 @@ pub struct WaitOptions {
 /// subscribes on the way.
 pub struct Wait {
     session: Arc<Session>,
-    events: tokio::sync::broadcast::Receiver<SeqEvent>,
+    events: Receiver<SeqEvent>,
     /// Live events at or below this were already taken from the buffer.
     watermark: u64,
     started: Instant,
     blob: StableState,
+    /// What `captured_output` currently weighs.
+    ///
+    /// Carried rather than recomputed: re-summing every chunk on every chunk
+    /// is quadratic in the number of them, and a debuggee that prints a
+    /// megabyte in small pieces made the wait task slow enough to fall behind
+    /// the broadcast and lose the very stop it was waiting for (D-WP3-1).
+    captured_bytes: usize,
+    /// An outcome settled before the event loop ran.
+    preempted: Option<WaitOutcome>,
 }
 
 impl Wait {
@@ -100,6 +121,8 @@ impl Wait {
             watermark,
             started: Instant::now(),
             blob: StableState::new(WaitOutcome::Timeout),
+            captured_bytes: 0,
+            preempted: None,
         };
         // Events that fell out of the session buffer before this wait could
         // read them. A debuggee chatty enough to overrun the buffer between two
@@ -124,11 +147,60 @@ impl Wait {
         self.blob.output_truncated = true;
     }
 
+    /// Take a stop or ending the session recorded after `since` as the answer.
+    ///
+    /// For the one caller that sends nothing: a `continue` on a program that
+    /// is already running. Between deciding not to send and subscribing, the
+    /// program can reach the very stop the caller is waiting for — the
+    /// subscription is too late to see it and [`Self::absorb_backlog`]
+    /// deliberately will not fold a stop in, so the wait ran to its timeout
+    /// while `status` said `paused`.
+    ///
+    /// `since` is where the session's event history stood before the decision,
+    /// and it is what makes this safe rather than the bug the backlog rule
+    /// exists to prevent: a stop at or below it is the one the program was
+    /// already sitting at, and reporting *that* would answer every `continue`
+    /// with the reason the previous one stopped for (D-WP3-3).
+    pub fn adopt_ending_since(&mut self, since: u64, all_threads: bool) {
+        let Some(event) = self
+            .session
+            .events_since(since)
+            .into_iter()
+            .rev()
+            .find(|sequenced| {
+                matches!(
+                    sequenced.event,
+                    Event::Stopped { .. } | Event::SessionEnded { .. }
+                )
+            })
+            .map(|sequenced| sequenced.event)
+        else {
+            return;
+        };
+        self.preempted = self.consider(&event, all_threads);
+    }
+
     /// Block until the program settles, and describe what happened.
-    pub async fn collect(mut self, options: WaitOptions) -> StableState {
+    pub async fn collect(mut self, mut options: WaitOptions) -> StableState {
         let deadline = options.timeout.map(|timeout| self.started + timeout);
 
-        let outcome = self.run(deadline, options.all_threads).await;
+        let outcome = match self.preempted {
+            Some(outcome) => Some(outcome),
+            None => {
+                self.run(deadline, options.all_threads, options.abandoned.as_mut())
+                    .await
+            }
+        };
+        let Some(outcome) = outcome else {
+            // The client hung up. Nothing is committed on the way out: the
+            // events this wait consumed are still nobody's, so the next wait —
+            // from whatever client comes along — still reports them. The blob
+            // is built only because the signature promises one; the connection
+            // it would go to is already gone (D-WP3-5).
+            self.blob.state = WaitOutcome::Timeout;
+            self.blob.elapsed_ms = self.started.elapsed().as_millis() as u64;
+            return self.blob;
+        };
         self.blob.state = outcome;
 
         if outcome == WaitOutcome::Paused {
@@ -152,33 +224,51 @@ impl Wait {
         self.blob
     }
 
-    /// Read events until one of them ends the wait.
-    async fn run(&mut self, deadline: Option<Instant>, all_threads: bool) -> WaitOutcome {
+    /// Read events until one of them ends the wait, or nobody is left to tell.
+    ///
+    /// `None` means the client hung up: no outcome, and nothing to report.
+    async fn run(
+        &mut self,
+        deadline: Option<Instant>,
+        all_threads: bool,
+        mut abandoned: Option<&mut Abandoned>,
+    ) -> Option<WaitOutcome> {
         loop {
-            let received = match deadline {
-                Some(deadline) => match tokio::time::timeout_at(deadline, self.events.recv()).await
-                {
-                    Ok(received) => received,
-                    // The program is still running. We do not pause it: an
-                    // automatic pause on timeout would be a side effect nobody
-                    // asked for, and can mask the very hang being diagnosed.
-                    Err(_) => return WaitOutcome::Timeout,
+            // `recv` is cancellation-safe — a losing branch has received
+            // nothing — so racing the hang-up against it costs no events.
+            let received = match abandoned.as_deref_mut() {
+                Some(gone) => tokio::select! {
+                    biased;
+                    _ = gone => return None,
+                    received = next(&mut self.events, deadline) => received,
                 },
-                None => self.events.recv().await,
+                None => next(&mut self.events, deadline).await,
+            };
+            // The program is still running. We do not pause it: an automatic
+            // pause on timeout would be a side effect nobody asked for, and
+            // can mask the very hang being diagnosed.
+            let Some(received) = received else {
+                return Some(WaitOutcome::Timeout);
             };
 
             let sequenced = match received {
                 Ok(sequenced) => sequenced,
                 // Slower than the daemon: some events are gone for good. Say
-                // so rather than presenting a gap as the whole story.
+                // so rather than presenting a gap as the whole story — and
+                // then find out what the gap contained, because the buffer
+                // outlives the broadcast's backlog and the dropped range can
+                // hold the stop this wait exists to return (D-WP3-1).
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(target: "daemon.session", missed, "a wait fell behind its events");
                     self.record_loss(missed);
+                    if let Some(outcome) = self.reconcile(all_threads) {
+                        return Some(outcome);
+                    }
                     continue;
                 }
                 // The session's sender is gone, which only happens once
                 // everything holding it has been dropped.
-                Err(RecvError::Closed) => return WaitOutcome::AdapterDied,
+                Err(RecvError::Closed) => return Some(WaitOutcome::AdapterDied),
             };
 
             if sequenced.seq <= self.watermark
@@ -189,9 +279,35 @@ impl Wait {
             self.watermark = sequenced.seq;
 
             if let Some(outcome) = self.consider(&sequenced.event, all_threads) {
-                return outcome;
+                return Some(outcome);
             }
         }
+    }
+
+    /// Catch up from the session's own buffer after falling behind.
+    ///
+    /// The broadcast drops the oldest events for a slow subscriber; the
+    /// session's ring buffer does not lose them at the same moment, and it is
+    /// the only remaining record of what happened. Reading it forward from the
+    /// watermark is what stops a `--wait` reporting `timeout` for a program
+    /// that has already stopped or exited — the wait blocked while `status`
+    /// said `paused`, which is worse than a slow answer because the caller
+    /// cannot tell it is wrong.
+    ///
+    /// Stops at the first event that settles the wait: everything behind it is
+    /// still in the buffer, still undelivered, and belongs to whatever comes
+    /// next rather than to this blob.
+    fn reconcile(&mut self, all_threads: bool) -> Option<WaitOutcome> {
+        for sequenced in self.session.events_since(self.watermark) {
+            if sequenced.event.session_id() != Some(self.session.id) {
+                continue;
+            }
+            self.watermark = sequenced.seq;
+            if let Some(outcome) = self.consider(&sequenced.event, all_threads) {
+                return Some(outcome);
+            }
+        }
+        None
     }
 
     /// Fold one event in, and say whether it ended the wait.
@@ -252,15 +368,10 @@ impl Wait {
             // retained output a strict prefix of what the program printed,
             // which is the only shape that claim is true of (D070).
             Event::Output { chunk, .. } if !self.blob.output_truncated => {
-                let buffered: usize = self
-                    .blob
-                    .captured_output
-                    .iter()
-                    .map(|chunk| chunk.output.len())
-                    .sum();
-                if buffered + chunk.output.len() > OUTPUT_CAP_BYTES {
+                if self.captured_bytes + chunk.output.len() > OUTPUT_CAP_BYTES {
                     self.blob.output_truncated = true;
                 } else {
+                    self.captured_bytes += chunk.output.len();
                     self.blob.captured_output.push(chunk.clone());
                 }
             }
@@ -584,6 +695,20 @@ impl Wait {
     }
 }
 
+/// The next event, or `None` when the deadline passed first.
+///
+/// Free rather than a method so it can be one arm of a `select!` while the
+/// wait's own state stays borrowable.
+async fn next(
+    events: &mut Receiver<SeqEvent>,
+    deadline: Option<Instant>,
+) -> Option<Result<SeqEvent, RecvError>> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, events.recv()).await.ok(),
+        None => Some(events.recv().await),
+    }
+}
+
 /// What a search of the fetched window settled.
 #[derive(Debug, PartialEq)]
 enum Search {
@@ -711,6 +836,7 @@ mod tests {
         WaitOptions {
             timeout: Some(Duration::from_millis(timeout_ms)),
             all_threads: false,
+            abandoned: None,
         }
     }
 
@@ -759,6 +885,8 @@ mod tests {
             watermark: 0,
             started: Instant::now(),
             blob: StableState::new(WaitOutcome::Timeout),
+            captured_bytes: 0,
+            preempted: None,
         };
 
         // Emitted after the subscription: it is both broadcast and buffered.
@@ -927,6 +1055,7 @@ mod tests {
             .collect(WaitOptions {
                 timeout: Some(Duration::from_millis(2_000)),
                 all_threads: true,
+                abandoned: None,
             })
             .await;
 
@@ -1151,6 +1280,148 @@ mod tests {
 
         assert_eq!(blob.dropped_events, 0, "the gap belonged to the first wait");
         assert!(!blob.output_truncated);
+    }
+
+    #[tokio::test]
+    async fn the_carried_total_fills_the_cap_to_the_byte() {
+        // The total is carried rather than re-summed, because re-summing every
+        // chunk on every chunk is quadratic and a debuggee printing a megabyte
+        // in small pieces made the wait slow enough to fall behind its own
+        // events (D-WP3-1). Carrying it has to be exact: fifty of these fit
+        // the cap precisely, and the fifty-first is what trips it.
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        let chunk = "y".repeat(20_000);
+        for _ in 0..60 {
+            session.emit(output(&session, &chunk));
+        }
+        session.emit(stopped(&session, 1, true));
+
+        let blob = wait.collect(options(5_000)).await;
+        let captured: usize = blob
+            .captured_output
+            .iter()
+            .map(|chunk| chunk.output.len())
+            .sum();
+        assert_eq!(captured, OUTPUT_CAP_BYTES, "got: {captured}");
+        assert_eq!(blob.captured_output.len(), 50);
+        assert!(blob.output_truncated);
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_fell_out_of_the_broadcast_still_ends_the_wait() {
+        // The failure this exists for: the wait falls behind, the dropped
+        // range holds the `stopped`, and the blob comes back `timeout` while
+        // `lazydap status` says `paused` — a lie the caller cannot detect.
+        // The session's own buffer still has the stop, and reading it is the
+        // difference between an answer and a wedged agent (D-WP3-1).
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        session.emit(stopped(&session, 1, true));
+        // Enough to push the stop out of the broadcast channel, which the test
+        // session sizes at 64. Nothing polls the receiver until `collect`, so
+        // the lag is a certainty rather than a race.
+        for line in 0..300 {
+            session.emit(output(&session, &format!("line {line}\n")));
+        }
+
+        let blob = wait.collect(options(2_000)).await;
+        assert_eq!(blob.state, WaitOutcome::Paused, "got: {:?}", blob.state);
+        assert_eq!(blob.reason, Some(PauseReason::Breakpoint));
+        assert!(
+            blob.dropped_events > 0,
+            "and the gap is still declared: {}",
+            blob.dropped_events,
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ending_that_fell_out_of_the_broadcast_still_ends_the_wait() {
+        let session = session();
+        let wait = Wait::begin(&session);
+
+        session.set_exit_code(Some(0));
+        session.end_once(EndReason::Exited { exit_code: Some(0) });
+        for line in 0..300 {
+            session.emit(output(&session, &format!("line {line}\n")));
+        }
+
+        let blob = wait.collect(options(2_000)).await;
+        assert_eq!(blob.state, WaitOutcome::Exited, "got: {:?}", blob.state);
+        assert_eq!(blob.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_stop_reached_before_the_subscription_is_this_run_s_answer() {
+        // The already-running `continue`: nothing is sent, so the only record
+        // of a stop reached between that decision and the subscription is the
+        // session's buffer (D-WP3-3).
+        let session = session();
+        let before = session.event_watermark();
+        session.emit(stopped(&session, 7, true));
+
+        let mut wait = Wait::begin(&session);
+        wait.adopt_ending_since(before, false);
+
+        let blob = wait.collect(options(60_000)).await;
+        assert_eq!(blob.state, WaitOutcome::Paused);
+        assert_eq!(blob.thread_id, Some(7));
+    }
+
+    #[tokio::test]
+    async fn the_stop_a_run_began_at_is_not_the_stop_it_ended_at() {
+        // The other half of the rule, and the reason `absorb_backlog` will not
+        // fold a stop in on its own: the program was sitting at a stop nobody
+        // had reported, and answering this `continue` with *that* would say
+        // every run stopped for the reason the previous one did (D-WP3-3).
+        let session = session();
+        session.emit(stopped(&session, 7, true));
+        let before = session.event_watermark();
+
+        let mut wait = Wait::begin(&session);
+        wait.adopt_ending_since(before, false);
+
+        let blob = wait.collect(options(60)).await;
+        assert_eq!(
+            blob.state,
+            WaitOutcome::Timeout,
+            "a stop at or below the mark belongs to the previous run",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_whose_client_hung_up_ends_at_once_and_commits_nothing() {
+        // `continue --wait --timeout 0` holds the session's execution permit
+        // for as long as it runs, so a Ctrl-C used to leave every later
+        // `continue` from every client queued behind a caller that was not
+        // there. Nothing is marked delivered on the way out: the output this
+        // wait saw is still nobody's (D-WP3-5).
+        let session = session();
+        let wait = Wait::begin(&session);
+        session.emit(output(&session, "printed before the hang-up\n"));
+
+        let (hangup, abandoned) = tokio::sync::oneshot::channel::<()>();
+        drop(hangup);
+        let blob = wait
+            .collect(WaitOptions {
+                timeout: None,
+                all_threads: false,
+                abandoned: Some(abandoned),
+            })
+            .await;
+        assert_eq!(blob.state, WaitOutcome::Timeout);
+
+        let next = Wait::begin(&session);
+        session.emit(stopped(&session, 1, true));
+        let next = next.collect(options(2_000)).await;
+        assert_eq!(
+            next.captured_output.len(),
+            1,
+            "the abandoned wait must not have consumed anybody's output: {:?}",
+            next.captured_output,
+        );
     }
 
     #[tokio::test]

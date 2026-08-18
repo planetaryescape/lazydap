@@ -1,9 +1,9 @@
 //! The adapter's lifecycle, and everything that makes the program move.
 
-use super::{Result, find_session, live_session};
+use super::{Result, find_session, live_session, session_finished};
 use crate::adapter;
 use crate::state::{DaemonState, MarkerId, RunClaim, Session};
-use crate::wait::{DEFAULT_TIMEOUT, Wait, WaitOptions};
+use crate::wait::{Abandoned, DEFAULT_TIMEOUT, Wait, WaitOptions};
 use lazydap_core::{EndReason, SessionId, SessionState, StepKind};
 use lazydap_protocol::{ErrorCode, Event, IpcError, Response, WaitMode};
 use std::sync::Arc;
@@ -16,6 +16,20 @@ pub enum Movement {
     Step(StepKind),
     /// Not a movement so much as a request to stop moving.
     Pause,
+}
+
+/// What one execution request asks for.
+///
+/// The four together rather than four parameters: `continue`, `step` and
+/// `pause` differ only in these, and passing them positionally meant two of
+/// the three call sites spelling `all_threads` as a bare `false`.
+pub struct Execution {
+    pub movement: Movement,
+    /// `None` means whichever thread stopped last.
+    pub thread_id: Option<i64>,
+    pub wait: WaitMode,
+    /// Wait for *every* thread to stop rather than returning on the first.
+    pub all_threads: bool,
 }
 
 impl Movement {
@@ -238,11 +252,16 @@ pub async fn disconnect(
 pub async fn execute(
     state: &Arc<DaemonState>,
     session_id: SessionId,
-    movement: Movement,
-    thread_id: Option<i64>,
-    wait: WaitMode,
-    all_threads: bool,
+    execution: Execution,
+    abandoned: Option<Abandoned>,
 ) -> Result<Response> {
+    let Execution {
+        movement,
+        thread_id,
+        wait,
+        all_threads,
+    } = execution;
+
     let session = live_session(state, session_id)?;
     refuse_pointless_pause(&session, movement)?;
     let thread_id = resolve_thread(&session, thread_id).await?;
@@ -252,6 +271,11 @@ pub async fn execute(
         Movement::Pause => None,
         _ => Some(session.adapter().execution_permit().await),
     };
+
+    // Where the session's event history stood before the claim below. Read
+    // only by the already-running path, and only to tell a stop this request
+    // is entitled to report from the one the program was already sitting at.
+    let before_claim = session.event_watermark();
 
     // Step 2. `continue` on a program that is already running is a request to
     // do the thing it is already doing. codelldb answers it anyway and nothing
@@ -268,17 +292,41 @@ pub async fn execute(
         Movement::Pause => None,
         _ => Some(session.claim_run(matches!(movement, Movement::Continue))),
     };
+    // The program finished while this request queued for the permit, so there
+    // is nothing left to move. Refused in the words `live_session` would have
+    // used had it looked a moment later (D-WP3-2).
+    if let Some(RunClaim::Finished(state)) = claim {
+        return Err(session_finished(session_id, state));
+    }
+    let already_running = matches!(claim, Some(RunClaim::AlreadyRunning));
 
     // Step 3. After the permit, so nothing observed here belongs to an earlier
     // run; before the send, so nothing this run causes is missed.
-    let waiting = wait.is_waiting().then(|| Wait::begin(&session));
+    let mut waiting = wait.is_waiting().then(|| Wait::begin(&session));
+
+    // Nothing was sent, so the program has been running since before this
+    // request — and a stop it reached between the claim above and the
+    // subscription a line ago is this run's answer. The subscription is too
+    // late to have seen it and the session's buffer is the only place it is
+    // (D-WP3-3).
+    if already_running && let Some(waiting) = waiting.as_mut() {
+        waiting.adopt_ending_since(before_claim, all_threads);
+    }
 
     // Step 4. The marker goes up *before* the send: an adapter can emit the
     // `stopped` event this request causes before it acknowledges the request
     // itself, and the pump reads the marker as the stop arrives.
-    let marker = expect(&session, movement, thread_id);
+    //
+    // Not when nothing is being sent, though. A `continue` on a program that
+    // is already running clears both slots, and clearing the pause slot of a
+    // `pause --wait` whose SIGSTOP is still in flight leaves that stop to be
+    // reported as a genuine exception — D064's bug, re-opened from the one
+    // path that installs a marker for a request it never makes (D-WP3-3).
+    let marker = (!already_running)
+        .then(|| expect(&session, movement, thread_id))
+        .flatten();
 
-    if !matches!(claim, Some(RunClaim::AlreadyRunning))
+    if !already_running
         && let Err(error) = send(&session, permit.as_ref(), movement, thread_id).await
     {
         // Take our own marker back down. A rejected `pause --thread 999` that
@@ -306,7 +354,6 @@ pub async fn execute(
         // answers `threads` with id `0`, which is not a thread at all. Saying
         // "running, thread 0" to that was two inventions in one line: a resume
         // that did not happen and a thread that does not exist (D076).
-        let already_running = matches!(claim, Some(RunClaim::AlreadyRunning));
         return Ok(Response::Continued {
             session_id,
             thread_id: (!already_running).then_some(thread_id),
@@ -318,6 +365,7 @@ pub async fn execute(
         .collect(WaitOptions {
             timeout: resolve_timeout(wait),
             all_threads,
+            abandoned,
         })
         .await;
 
