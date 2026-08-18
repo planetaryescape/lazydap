@@ -91,7 +91,7 @@ pub async fn doctor(
     Ok(())
 }
 
-/// Whether `lazydap doctor` passes (D-WP5-1).
+/// Whether `lazydap doctor` passes (D093).
 ///
 /// `ok` means "lazydap can debug something here", not "this machine has every
 /// adapter lazydap ships". The adapters are a menu of languages, and a Mac
@@ -417,7 +417,7 @@ mod doctor_tests {
 
     #[test]
     fn one_missing_adapter_does_not_fail_the_verdict() {
-        // D-WP5-1. A Mac with codelldb and no Go toolchain is a working
+        // D093. A Mac with codelldb and no Go toolchain is a working
         // lazydap, and `doctor` is the last line of the README, of install.sh
         // and of the Homebrew formula.
         assert!(verdict(&[

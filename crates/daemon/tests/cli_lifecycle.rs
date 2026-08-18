@@ -832,7 +832,7 @@ fn a_timeout_variable_nothing_can_read_is_reported_rather_than_ignored() {
 #[test]
 fn doctor_does_not_fail_just_because_one_adapter_is_missing() {
     // `ok` means lazydap can debug something here, not that this machine has
-    // every adapter lazydap ships (D-WP5-1). Exit 1 on a healthy install is
+    // every adapter lazydap ships (D093). Exit 1 on a healthy install is
     // the last line of the README, of install.sh and of the Homebrew formula.
     let sandbox = Sandbox::new("doca");
     let bin = sandbox.root.join("bin");

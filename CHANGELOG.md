@@ -8,7 +8,33 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+**`lazydap doctor` passes when at least one adapter is usable.** It exited `1` if *any* adapter was missing, so a Mac with codelldb and no Go toolchain failed the check that the README, `install.sh` and the Homebrew formula all end with. A missing adapter is now reported per adapter as `missing`, with where to get it, and only fails the run when it was the last one. Everything else — the config file, the state file, the daemon — still has to pass (`D093`).
+
+**`lazydap doctor` reports the adapters your shell would use.** Discovery now runs in the process you typed the command in, against its config and its `PATH`, the same way a launch resolves one (D050). The daemon answered from whatever environment it inherited whenever it started, which may have been days ago in another directory.
+
+### Fixed
+
+**`lazydap launch ./app --cwd sub` looked for the program inside `sub`.** `--cwd` says where the *debuggee* should run; the program on the command line is the one your shell can see. Resolving it against `--cwd` failed with `cannot debug ./app: No such file` for a binary plainly there — and when `sub/app` happened to exist too, debugged that one instead without saying so.
+
+**`lazydap logs --follow` mixed raw log lines into `--format json`.** It printed the JSON object, then appended bare lines under it, which no parser survives. `--follow` now takes `--format table` or `--format jsonl` — under `jsonl` each line arrives as the same `{"line": ...}` object `lazydap logs` already prints — and refuses any other format with a usage error before printing anything.
+
+**Piping lazydap into `head` crashed it.** `lazydap break --list --format jsonl | head -1` exited 101 with a `Broken pipe` panic across stderr. A reader closing the pipe is how `head` works, not a failure: every write to stdout now ends the command quietly with exit 0.
+
+**One usage error called itself something else.** `--format ids` on a result that is not a list reported `"error": "BadRequest"` while every other usage mistake reported `"error": "UsageError"`, so a script had to know both. Usage messages also no longer carry a `BadRequest:` prefix under a `UsageError` label — one name per mistake.
+
+**`--format table` is honoured for the errors clap raises.** `lazydap --format table nosuch | cat` answered a request for prose with JSON on stderr, because the format was guessed from the pipe even though the caller had said. An explicit format now wins in both directions.
+
+**A `LAZYDAP_TIMEOUT` nothing can read is reported.** `LAZYDAP_TIMEOUT=5m` was silently ignored and every `--wait` in that shell quietly used 30 seconds. It is now a usage error, refused before a daemon is started. An explicit `--timeout` still wins, so the variable is only consulted when it is going to be used.
+
+**A broken `.vscode/launch.json` no longer hides the project's own launch configurations.** VS Code owns that file, and a stray comma in it failed `launches list` and `launches run` outright — including for configurations that came from `.lazydap/state.toml` and had nothing to do with it. The file-level failure is now a warning next to the list, the same way an unreadable single configuration inside it already was.
+
+**An unterminated `${` in a launch configuration is reported instead of run.** `"program": "${workspaceFolder/app"` was passed through verbatim and listed as runnable, so the launch failed on a path with a `${` in the middle of it. It now joins the other variables nothing could expand, and `launches list` shows the typo as the reason.
+
+**`lazydap doctor --check-state` no longer needs a daemon.** It reads `.lazydap/state.toml` itself and reports a parse error with its line and column — which matters because a state file the daemon refuses to start on is exactly the case the check exists for. A plain `lazydap doctor` also reports a daemon that will not start as a failed check rather than aborting, so one command names the reason.
+
+**Every `PathsError` said `InvalidProjectRoot`.** A socket path over the length limit, a runtime directory owned by somebody else, a missing home directory — all of them are about the directories lazydap keeps its own socket, lock, pid and log in, and none is about the project root. They now report `DaemonUnreachable` and exit `3`, which is the retryable code a script should see.
 
 ## [0.2.2] — 2026-08-18
 
@@ -34,10 +60,6 @@ Nothing yet.
 
 **Setting a breakpoint on a location that already has one now edits it.** `lazydap break x.c:10 --condition 'i > 5'` on a line you had already broken on updates that breakpoint in place, keeping its id, and reports `"action": "updated"` — or `"unchanged"` when you asked for exactly what was already there. The whole request wins, including the parts you left out: no `--condition` means no condition, the same as it does on the first call — and that covers `enabled` too, so a bare re-set re-enables a breakpoint you had disabled with `--toggle`. Pass `--disabled` to keep it off.
 
-**`lazydap doctor` passes when at least one adapter is usable.** It exited `1` if *any* adapter was missing, so a Mac with codelldb and no Go toolchain failed the check that the README, `install.sh` and the Homebrew formula all end with. A missing adapter is now reported per adapter as `missing`, with where to get it, and only fails the run when it was the last one. Everything else — the config file, the state file, the daemon — still has to pass (`D-WP5-1`).
-
-**`lazydap doctor` reports the adapters your shell would use.** Discovery now runs in the process you typed the command in, against its config and its `PATH`, the same way a launch resolves one (D050). The daemon answered from whatever environment it inherited whenever it started, which may have been days ago in another directory.
-
 ### Fixed
 
 **`lazydap break FILE:LINE --condition ...` silently dropped every modifier when the line already had a breakpoint.** The command answered `"action": "added"` with `enabled: true` and no condition, exit 0, and the debugger went on using the old unconditional breakpoint — so a script that narrowed a breakpoint it had set earlier debugged against something else entirely. Setting a location now edits what is there and reports `updated` or `unchanged`, and `--dry-run` previews the same decision.
@@ -45,26 +67,6 @@ Nothing yet.
 **A breakpoint the adapter refused was recorded without telling anybody.** The store was changed and the change announced only after the adapter had accepted it, so a `setBreakpoints` that failed — usually an adapter that had just died — left the caller with an error, the project with the change, and a TUI drawing the list from before it. The announcement now goes out before the adapter is told, and the error says the change is recorded and will apply at the next launch, naming the ids.
 
 **Two clients removing or toggling the same breakpoint could both report success.** `not_found` was worked out from a selection taken before the lock the mutation ran under, so the loser of the race answered with no breakpoints, no missing ids and exit 0 — success, for work it did not do. Selection and mutation now happen under one lock, as they already did for watches.
-
-**`lazydap launch ./app --cwd sub` looked for the program inside `sub`.** `--cwd` says where the *debuggee* should run; the program on the command line is the one your shell can see. Resolving it against `--cwd` failed with `cannot debug ./app: No such file` for a binary plainly there — and when `sub/app` happened to exist too, debugged that one instead without saying so.
-
-**`lazydap logs --follow` mixed raw log lines into `--format json`.** It printed the JSON object, then appended bare lines under it, which no parser survives. `--follow` now takes `--format table` or `--format jsonl` — under `jsonl` each line arrives as the same `{"line": ...}` object `lazydap logs` already prints — and refuses any other format with a usage error before printing anything.
-
-**Piping lazydap into `head` crashed it.** `lazydap break --list --format jsonl | head -1` exited 101 with a `Broken pipe` panic across stderr. A reader closing the pipe is how `head` works, not a failure: every write to stdout now ends the command quietly with exit 0.
-
-**One usage error called itself something else.** `--format ids` on a result that is not a list reported `"error": "BadRequest"` while every other usage mistake reported `"error": "UsageError"`, so a script had to know both. Usage messages also no longer carry a `BadRequest:` prefix under a `UsageError` label — one name per mistake.
-
-**`--format table` is honoured for the errors clap raises.** `lazydap --format table nosuch | cat` answered a request for prose with JSON on stderr, because the format was guessed from the pipe even though the caller had said. An explicit format now wins in both directions.
-
-**A `LAZYDAP_TIMEOUT` nothing can read is reported.** `LAZYDAP_TIMEOUT=5m` was silently ignored and every `--wait` in that shell quietly used 30 seconds. It is now a usage error, refused before a daemon is started. An explicit `--timeout` still wins, so the variable is only consulted when it is going to be used.
-
-**A broken `.vscode/launch.json` no longer hides the project's own launch configurations.** VS Code owns that file, and a stray comma in it failed `launches list` and `launches run` outright — including for configurations that came from `.lazydap/state.toml` and had nothing to do with it. The file-level failure is now a warning next to the list, the same way an unreadable single configuration inside it already was.
-
-**An unterminated `${` in a launch configuration is reported instead of run.** `"program": "${workspaceFolder/app"` was passed through verbatim and listed as runnable, so the launch failed on a path with a `${` in the middle of it. It now joins the other variables nothing could expand, and `launches list` shows the typo as the reason.
-
-**`lazydap doctor --check-state` no longer needs a daemon.** It reads `.lazydap/state.toml` itself and reports a parse error with its line and column — which matters because a state file the daemon refuses to start on is exactly the case the check exists for. A plain `lazydap doctor` also reports a daemon that will not start as a failed check rather than aborting, so one command names the reason.
-
-**Every `PathsError` said `InvalidProjectRoot`.** A socket path over the length limit, a runtime directory owned by somebody else, a missing home directory — all of them are about the directories lazydap keeps its own socket, lock, pid and log in, and none is about the project root. They now report `DaemonUnreachable` and exit `3`, which is the retryable code a script should see.
 
 ## [0.2.0] — 2026-08-18
 

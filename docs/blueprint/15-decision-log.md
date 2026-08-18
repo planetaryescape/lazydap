@@ -2025,7 +2025,7 @@ it saw is still nobody's, and the next caller has to be able to report it.
 
 ---
 
-## D-WP5-1 — `lazydap doctor` passes when lazydap can debug *something*, not when the machine has every adapter
+## D093 — `lazydap doctor` passes when lazydap can debug *something*, not when the machine has every adapter
 
 **Status:** decided (2026-08-18, defect campaign WP5).
 
