@@ -25,7 +25,8 @@
 //! What is defended today: each write goes to a temporary file named per
 //! process before being renamed into place, so concurrent writers cannot
 //! interleave bytes — the loser's update is lost, but the file is never
-//! corrupt. External edits are noticed by mtime and merged on the way past.
+//! corrupt. External edits are noticed by comparing the file's bytes with the
+//! ones we last wrote, and merged on the way past.
 //!
 //! What is not: there is no interprocess lock, so a lost update is possible.
 //! Recorded as a follow-up on M6 rather than built now — file locking that is
@@ -38,10 +39,11 @@ use lazydap_core::{
     Breakpoint, BreakpointId, BreakpointSelector, LaunchConfig, NewBreakpoint, NewWatch, Watch,
     WatchId, WatchSelector,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::sync::Notify;
 
 /// How long to wait for a burst of mutations to finish before writing.
@@ -134,9 +136,11 @@ struct State {
     /// written back untouched; dropping them would mean adding one breakpoint
     /// deletes a colleague's configuration.
     unknown: toml::Table,
-    /// What the file looked like when we last read or wrote it, so an edit
-    /// made behind our back is noticed rather than silently overwritten.
-    seen_mtime: Option<SystemTime>,
+    /// The file's exact text as we last read or wrote it, so an edit made
+    /// behind our back is noticed — and so we can tell what that edit *did*,
+    /// which is what separates a hand-added breakpoint from a hand-removed
+    /// one.
+    seen_text: Option<String>,
 }
 
 impl ProjectStore {
@@ -148,7 +152,7 @@ impl ProjectStore {
     pub fn load(root: impl Into<PathBuf>) -> Result<Arc<Self>> {
         let root = root.into();
         let path = root.join(STATE_DIR).join(STATE_FILE);
-        let (document, seen_mtime) = file::read(&path)?;
+        let (document, seen_text) = file::read(&path)?;
         let contents = document.into_memory(&root);
 
         tracing::debug!(
@@ -168,7 +172,7 @@ impl ProjectStore {
                 watches: contents.watches,
                 next_watch_id: contents.next_watch_id,
                 unknown: contents.unknown,
-                seen_mtime,
+                seen_text,
             }),
             dirty: AtomicBool::new(false),
             changed: Notify::new(),
@@ -421,14 +425,14 @@ impl ProjectStore {
             },
             &self.root,
         );
-        let mtime = file::write(&self.path, &document)?;
+        let written = file::write(&self.path, &document)?;
 
         // Cleared only now. Clearing it up front would mean a transient
         // failure — a full disk, a directory that vanished — leaves the store
         // believing it is clean: the flusher never retries, the flush on
         // shutdown is a no-op, and the breakpoint is simply gone.
         self.dirty.store(false, Ordering::SeqCst);
-        state.seen_mtime = mtime;
+        state.seen_text = Some(written);
 
         tracing::debug!(
             target: "daemon.store",
@@ -467,31 +471,57 @@ impl ProjectStore {
         self.changed.notify_one();
     }
 
-    /// Fold in breakpoints and watches somebody added by editing the file
-    /// themselves.
+    /// Fold in edits somebody made to the file themselves.
     ///
     /// The file is documented as hand-editable (D006), so an edit that lands
-    /// between our load and our write must not be silently reverted. Entries
-    /// only in the file are adopted; an id in both keeps *our* version,
-    /// because ours is what the live adapter has already been told about — a
-    /// file that loses a tie is one `lazydap break` away from being right
-    /// again, whereas an adapter disagreeing with the file is invisible.
+    /// between our load and our write must not be silently reverted — and
+    /// "reverted" covers a deletion as much as an addition. Both are decided
+    /// against a *baseline*: the text of the file as we last read or wrote it.
+    /// An id in the file but not in the baseline was added by hand and is
+    /// adopted; an id in the baseline but not in the file was deleted by hand
+    /// and goes. An id in both keeps *our* version, because ours is what the
+    /// live adapter has already been told about — a file that loses a tie is
+    /// one `lazydap break` away from being right again, whereas an adapter
+    /// disagreeing with the file is invisible.
+    ///
+    /// A hand-deleted breakpoint is *not* withdrawn from a running adapter;
+    /// it stops existing for the next launch. Editing the file under a live
+    /// session was never a way to change what the debuggee is doing (D-WP2-1).
     fn adopt_external_edits(&self, state: &mut State) -> Result<()> {
-        let (document, mtime) = file::read(&self.path)?;
-        if mtime == state.seen_mtime {
+        let (document, text) = file::read(&self.path)?;
+        if text == state.seen_text {
             return Ok(());
         }
 
+        // Whatever we last saw. A baseline that will not parse can only come
+        // from bytes we ourselves wrote, so it is not a case to design for —
+        // and treating it as empty degrades to the old adopt-only rule rather
+        // than to deleting anything.
+        let baseline = state
+            .seen_text
+            .as_deref()
+            .and_then(|text| toml::from_str::<file::Document>(text).ok())
+            .unwrap_or_default()
+            .into_memory(&self.root);
         let contents = document.into_memory(&self.root);
         // The file is the authority on the parts we do not model: a newer
         // lazydap may have written launch configs since we loaded.
         state.unknown = contents.unknown;
 
-        let known: Vec<BreakpointId> = state
+        let in_file: HashSet<BreakpointId> = contents.breakpoints.iter().map(|b| b.id).collect();
+        let deleted: HashSet<BreakpointId> = baseline
             .breakpoints
             .iter()
             .map(|breakpoint| breakpoint.id)
+            .filter(|id| !in_file.contains(id))
             .collect();
+        let before = state.breakpoints.len();
+        state
+            .breakpoints
+            .retain(|breakpoint| !deleted.contains(&breakpoint.id));
+        let dropped = before - state.breakpoints.len();
+
+        let known: HashSet<BreakpointId> = state.breakpoints.iter().map(|b| b.id).collect();
         let mut adopted = 0;
         for breakpoint in contents.breakpoints {
             if !known.contains(&breakpoint.id) {
@@ -506,7 +536,18 @@ impl ProjectStore {
         // is the other half of `lazydap watch add` being documented as
         // hand-editable, and one that vanished on the next write would make the
         // file look like a cache rather than the record it is.
-        let known: Vec<WatchId> = state.watches.iter().map(|watch| watch.id).collect();
+        let in_file: HashSet<WatchId> = contents.watches.iter().map(|watch| watch.id).collect();
+        let deleted: HashSet<WatchId> = baseline
+            .watches
+            .iter()
+            .map(|watch| watch.id)
+            .filter(|id| !in_file.contains(id))
+            .collect();
+        let before = state.watches.len();
+        state.watches.retain(|watch| !deleted.contains(&watch.id));
+        let dropped_watches = before - state.watches.len();
+
+        let known: HashSet<WatchId> = state.watches.iter().map(|watch| watch.id).collect();
         let mut adopted_watches = 0;
         for watch in contents.watches {
             if !known.contains(&watch.id) {
@@ -517,13 +558,15 @@ impl ProjectStore {
         }
         state.next_watch_id = state.next_watch_id.max(contents.next_watch_id);
 
-        if adopted > 0 || adopted_watches > 0 {
+        if adopted + dropped + adopted_watches + dropped_watches > 0 {
             tracing::info!(
                 target: "daemon.store",
                 path = %self.path.display(),
                 adopted,
+                dropped,
                 adopted_watches,
-                "adopted entries added by editing the state file",
+                dropped_watches,
+                "took over edits made to the state file by hand",
             );
         }
         Ok(())
@@ -770,6 +813,111 @@ mod tests {
             "the hand-added breakpoint must survive our write: {lines:?}",
         );
         assert!(lines.contains(&19) && lines.contains(&20), "got: {lines:?}");
+    }
+
+    #[test]
+    fn a_breakpoint_deleted_by_hand_stays_deleted() {
+        // The other half of the file being hand-editable (D-WP2-1). Deleting
+        // an entry and watching it come back on the next write makes the file
+        // look like a cache lazydap merely humours.
+        let project = TempProject::new("handdel");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 19));
+        store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        // Somebody opens the file and deletes the second entry.
+        std::fs::write(
+            project.state_file(),
+            "version = 1\nnext_breakpoint_id = 3\n\n\
+             [[breakpoints]]\nid = 1\nsource = \"main.c\"\nline = 19\nenabled = true\n",
+        )
+        .expect("write");
+
+        store.add(new_breakpoint(&source, 21));
+        store.flush_now().expect("flush");
+
+        let lines: Vec<u32> = project
+            .store()
+            .breakpoints()
+            .iter()
+            .map(|breakpoint| breakpoint.line)
+            .collect();
+        assert!(
+            !lines.contains(&20),
+            "the hand-deleted breakpoint must not come back: {lines:?}",
+        );
+        assert!(lines.contains(&19) && lines.contains(&21), "got: {lines:?}");
+    }
+
+    #[test]
+    fn an_edit_made_in_the_same_moment_as_our_own_write_is_still_noticed() {
+        // mtime has a resolution, and an edit landing inside the same tick as
+        // our write used to be indistinguishable from no edit at all — so the
+        // next flush silently reverted it.
+        let project = TempProject::new("sametick");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 19));
+        store.flush_now().expect("flush");
+
+        let stamp = std::fs::metadata(project.state_file())
+            .and_then(|metadata| metadata.modified())
+            .expect("our write's mtime");
+        let mut contents = std::fs::read_to_string(project.state_file()).expect("read");
+        contents.push_str("\n[[breakpoints]]\nid = 99\nsource = \"hand.c\"\nline = 7\n");
+        std::fs::write(project.state_file(), contents).expect("write");
+        std::fs::File::options()
+            .write(true)
+            .open(project.state_file())
+            .and_then(|file| file.set_modified(stamp))
+            .expect("backdate the edit onto our own mtime");
+
+        store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        let lines: Vec<u32> = project
+            .store()
+            .breakpoints()
+            .iter()
+            .map(|breakpoint| breakpoint.line)
+            .collect();
+        assert!(
+            lines.contains(&7),
+            "an edit sharing our mtime is still an edit: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn an_abandoned_temporary_file_is_cleared_by_the_next_write() {
+        // A crash between the write and the rename leaves one of these
+        // forever; nothing else ever removes them.
+        let project = TempProject::new("tmplitter");
+        let store = project.store();
+        store.add(new_breakpoint(&project.root.join("main.c"), 1));
+        store.flush_now().expect("flush");
+
+        let litter = project.state_file().with_extension("toml.tmp.999999");
+        std::fs::write(&litter, b"half a file").expect("write the litter");
+        let fresh = project.state_file().with_extension("toml.tmp.999998");
+        std::fs::write(&fresh, b"a live writer's").expect("write the fresh one");
+        std::fs::File::options()
+            .write(true)
+            .open(&litter)
+            .and_then(|file| {
+                file.set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+            })
+            .expect("backdate");
+
+        store.add(new_breakpoint(&project.root.join("main.c"), 2));
+        store.flush_now().expect("flush");
+
+        assert!(!litter.exists(), "an abandoned temporary must be cleared");
+        assert!(
+            fresh.exists(),
+            "a temporary young enough to belong to a live writer must be left alone",
+        );
     }
 
     #[test]

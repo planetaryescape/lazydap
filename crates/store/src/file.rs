@@ -147,9 +147,12 @@ fn next_id(counter: Option<u32>, in_use: impl Iterator<Item = u32>) -> u32 {
 
 /// Read the state file, returning the empty document if there isn't one.
 ///
-/// The mtime comes back with it so a caller can tell whether the file changed
-/// under them between two reads.
-pub fn read(path: &Path) -> Result<(Document, Option<SystemTime>)> {
+/// The raw text comes back with it: it is what a later read is compared
+/// against to tell whether the file changed under us (see
+/// `ProjectStore::adopt_external_edits`). Bytes rather than an mtime, because
+/// an mtime has a resolution — an edit made inside the same tick as our own
+/// write is indistinguishable from no edit at all, and gets overwritten.
+pub fn read(path: &Path) -> Result<(Document, Option<String>)> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -167,14 +170,16 @@ pub fn read(path: &Path) -> Result<(Document, Option<SystemTime>)> {
         path: path.to_path_buf(),
         source,
     })?;
-    Ok((document, mtime(path)))
+    Ok((document, Some(contents)))
 }
 
 /// Write the state file atomically, creating `.lazydap/` if it is missing.
 ///
 /// Write-then-rename, so a crash or a full disk mid-write leaves the previous
 /// state intact rather than half a file where a user's breakpoints used to be.
-pub fn write(path: &Path, document: &Document) -> Result<Option<SystemTime>> {
+///
+/// Returns exactly what now stands on disk, for the caller to remember.
+pub fn write(path: &Path, document: &Document) -> Result<String> {
     let serialised = toml::to_string_pretty(document)?;
 
     if let Some(parent) = path.parent() {
@@ -183,6 +188,7 @@ pub fn write(path: &Path, document: &Document) -> Result<Option<SystemTime>> {
             source,
         })?;
     }
+    remove_abandoned_temporaries(path);
 
     // Same directory as the target, because `rename` is only atomic within a
     // filesystem — and named per process, because two daemons pointed at one
@@ -191,7 +197,7 @@ pub fn write(path: &Path, document: &Document) -> Result<Option<SystemTime>> {
     // half-written bytes into place. Unique names make the worst case a lost
     // update rather than a corrupt file.
     let temporary = path.with_extension(format!("toml.tmp.{}", std::process::id()));
-    std::fs::write(&temporary, serialised).map_err(|source| StoreError::Write {
+    write_and_sync(&temporary, serialised.as_bytes()).map_err(|source| StoreError::Write {
         path: temporary.clone(),
         source,
     })?;
@@ -202,14 +208,71 @@ pub fn write(path: &Path, document: &Document) -> Result<Option<SystemTime>> {
             source,
         }
     })?;
+    // The rename is atomic but not durable: on ext4 and APFS alike the
+    // directory entry can still be in a write cache after this returns, and a
+    // power cut then leaves the file the rename replaced — or, on some
+    // filesystems, an empty one. Best-effort: the data is already in place, so
+    // a filesystem that will not fsync a directory handle is not worth failing
+    // the write over.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
+    }
 
-    Ok(mtime(path))
+    Ok(serialised)
 }
 
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
+/// Write and flush all the way to the disk before returning.
+///
+/// Without the `sync_all`, write-then-rename protects against a crash *during*
+/// the write and not against one just after it: the rename can reach the disk
+/// before the bytes it points at, leaving a state file that is present, named
+/// correctly and empty.
+fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Temporary files older than this belonged to a writer that died mid-write.
+///
+/// Age rather than "is that pid still alive": a live writer holds its
+/// temporary for the microseconds between the write and the rename, whereas a
+/// pid is recycled, and mistaking a recycled pid for a live writer would leave
+/// the litter forever. An hour is far past any real write and far short of the
+/// next machine reboot.
+const ABANDONED_TEMPORARY_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Clear `state.toml.tmp.<pid>` files left behind by a crash between the write
+/// and the rename. Nothing else ever removes them.
+fn remove_abandoned_temporaries(path: &Path) {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let prefix = format!("{name}.tmp.");
+
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let abandoned = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| {
+                now.duration_since(modified)
+                    .map_err(|_| std::io::Error::other("clock went backwards"))
+            })
+            .is_ok_and(|age| age > ABANDONED_TEMPORARY_AGE);
+        if abandoned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A path inside the project becomes relative to it; anything else stays as it
@@ -593,7 +656,9 @@ mod tests {
         let error = write(&path, &Document::default()).expect_err("renaming onto a directory");
         assert!(matches!(error, StoreError::Write { .. }), "got: {error}");
         assert!(
-            !path.with_extension("toml.tmp").exists(),
+            !path
+                .with_extension(format!("toml.tmp.{}", std::process::id()))
+                .exists(),
             "a failed write must not leave litter next to the state file",
         );
 
