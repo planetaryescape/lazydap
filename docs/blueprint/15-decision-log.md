@@ -2062,3 +2062,8 @@ decided:
   a daemon that will not start is now a failed `daemon` check rather than an aborted command,
   and `doctor --check-state` starts no daemon at all — naming a check narrows the run to what
   this process can answer on its own.
+
+That leaves `Request::Doctor { check_adapters, check_state }` with no in-tree caller asking for
+either — the CLI now sends both as `false` and the daemon answers only for itself. The fields
+stay on the wire rather than being removed, because taking them off would change the frame's
+shape for a version bump nothing else needs; they are retirable at the next one.
