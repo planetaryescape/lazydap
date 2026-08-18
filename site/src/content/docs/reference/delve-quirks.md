@@ -1,6 +1,6 @@
 ---
 title: "delve quirks"
-description: "17 delve behaviours lazydap had to be told about, found by reading the wire rather than the documentation."
+description: "18 delve behaviours lazydap had to be told about, found by reading the wire rather than the documentation."
 ---
 
 :::note[Generated page]
@@ -437,6 +437,39 @@ and make sure `$(go env GOPATH)/bin` is on `PATH` — `go install` puts it there
 and a shell that has never been told about that directory will not find it. This
 is the single most likely reason `lazydap doctor --check-adapters` reports delve
 missing on a machine that has it.
+
+---
+
+## 18. On Linux the first breakpoint is reached before `launch` has finished answering
+
+Timings from a CI run (Ubuntu 24.04, delve 1.27.0), with a breakpoint persisted
+before the launch and no `stopOnEntry`:
+
+```
+17.040  <-- event stopped              ← the launch answer had only just gone out
+17.044  --> request continue  (seq 5)  ← the next command a client could send
+        exited
+```
+
+Four milliseconds, against a compiled Go binary that delve has already built by
+this point. The debuggee reaches the breakpoint before a separate process can
+read the launch answer and send anything back; on macOS the same sequence leaves
+enough room that the client's `continue` arrives while the program is still
+running.
+
+A `continue` against a program that has *already stopped* is an ordinary resume,
+so it runs past the breakpoint and the program ends. Nothing is wrong on either
+side — the assumption "it is still running because I have not resumed it" is
+what is wrong.
+
+**What it means for a client:** read `lazydap status` rather than assuming, or
+be ready for a `--wait` blob that describes a program which had already arrived.
+debugpy behaves identically on Linux (debugpy quirk 19).
+`crates/daemon/tests/wait_delve.rs`'s
+`continuing_a_program_that_is_already_running_reaches_the_breakpoint` sidesteps
+the race instead of racing it: `spins.go`, with the breakpoint inside the loop,
+so a stop that lands before the `continue` is simply hit again on the next
+iteration.
 
 ## See also
 

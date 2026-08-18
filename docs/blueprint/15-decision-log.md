@@ -2286,7 +2286,8 @@ seq that will carry the reply — and `record_breakpoint_ids` in the pump is its
 today.
 
 **Why not record it in the caller and accept the race.** Because the race is not rare and not
-tolerable: it fires on *every* first `setBreakpoints` of a session. What made it look rare is
+tolerable: it fires on every `setBreakpoints` the pump carries — which is every `lazydap break`
+against a live session. What made it look rare is
 that codelldb on macOS sends a **second** `breakpoint` event about 20 ms later, once modules
 have loaded, and `--wait` coalesces updates by adapter id — so the good update overwrote the
 bad one and the blob looked right. On Linux there is no second event (quirk 27). The
@@ -2301,9 +2302,23 @@ does not put the pump behind a lock it can only release by reading.
 **What is left where it was.** The launch path does not go through the pump at all: the
 handshake reads its own `setBreakpoints` answers, and `handlers::session::launch` records
 them into the session *before* `spawn_pump`, so no event can be dispatched ahead of the
-mapping. `handlers::breakpoints::apply` still records what the caller received; it is the
-same pairing, it costs a map insert, and it does not depend on the pump having decoded the
-body.
+mapping.
+
+**And what was taken away.** `handlers::breakpoints::apply` used to record the same answer
+again after its `await` returned. That is not a harmless duplicate: `BreakpointMap::record`
+inserts the whole entry, so the second write puts the adapter's *first* word — the response —
+back over whatever the `breakpoint` event refreshed microseconds later. It is latent against
+codelldb today only because that event's body repeats the response's; the first event that
+carries a different opinion would have been undone, and on Linux there is no second event to
+repair it (quirk 27). The pump covers every path that reaches `apply`, so the call is gone.
+
+**The residual, stated rather than left to be discovered.** An event that *precedes* its own
+response is still unmapped. Nothing in DAP forbids that order; it is simply not what any of
+the three adapters does — measured against codelldb, the order is response, then the event
+43 µs later, then a second event 23 ms after that. Closing it would mean holding the map
+against a request whose answer has not arrived, which is a guess about which breakpoints the
+adapter is about to number. An update lazydap cannot name is reported with a `null` id rather
+than a wrong one.
 
 **A drop that remains, deliberately.** An update whose adapter id maps to nothing is still
 dropped rather than invented into the map. After this change that means only what it always

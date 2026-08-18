@@ -234,17 +234,17 @@ async fn apply(state: &Arc<DaemonState>, sources: &[PathBuf]) -> Result<bool> {
             .filter(|breakpoint| breakpoint.enabled)
             .collect();
 
-        let applied = session
+        // What the adapter made of them is deliberately not recorded here: the
+        // pump has already recorded this same answer as it went past, which is
+        // what stops a `breakpoint` event arriving right behind it being
+        // reported under an id nobody can match (D-WP7-2). Recording it again
+        // would be a whole-entry overwrite of a map that event has since
+        // refreshed — putting the adapter's first word back over its second.
+        session
             .adapter()
             .set_breakpoints(source, &enabled)
             .await
             .map_err(AdapterError::into_ipc)?;
-        // Usually already done: the pump records the same pairing as the
-        // answer passes it, which is what stops a `breakpoint` event arriving
-        // between the two from being reported under an id nobody can match
-        // (D-WP7-2). Kept because it costs a map insert and does not depend on
-        // the pump having decoded the body.
-        session.record_breakpoints(&applied);
 
         tracing::debug!(
             target: "daemon.session",

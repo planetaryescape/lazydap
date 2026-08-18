@@ -405,20 +405,42 @@ fn continuing_a_program_that_is_already_running_reaches_the_breakpoint() {
     let (_python, _turn) = require_python!();
     let sandbox = Sandbox::new("run");
 
-    sandbox.breakpoint("exits.py", 4);
+    // `spins` rather than `exits`, with the breakpoint *inside* the loop, and
+    // that is the whole design of this test. What it exists to check is a
+    // `continue` sent to a program that is genuinely running — and on Linux
+    // the debuggee reaches its breakpoint before a second command can be sent
+    // (quirk 19), so against `exits` the resume ran a program that had already
+    // stopped past its own breakpoint and out the end: `exited`, not `paused`,
+    // and a test that failed for being right. A loop makes the race moot.
+    // Whoever wins it, the next iteration is another hit of the same
+    // breakpoint, and the program cannot finish in between.
+    //
+    // Which is also why the launch's own state is not asserted: on Linux the
+    // loop can be reached *during* the handshake, so the launch itself answers
+    // `paused`. What can be asserted, and is, is that the breakpoint recorded
+    // before the launch went in during the configuration phase and bound.
+    sandbox.breakpoint("spins.py", 11);
     let launched = sandbox.json(&[
         "--format",
         "json",
         "launch",
-        &fixture("exits.py").to_string_lossy(),
+        &fixture("spins.py").to_string_lossy(),
     ]);
-    assert_eq!(launched["state"], "running", "got: {launched}");
+    assert_eq!(launched["breakpoints"][0]["line"], 11, "got: {launched}");
+    assert_eq!(
+        launched["breakpoints"][0]["verified"], true,
+        "got: {launched}"
+    );
 
     let blob = sandbox.wait("20");
 
     assert_eq!(blob["state"], "paused", "got: {blob}");
     assert_eq!(blob["reason"], "breakpoint", "got: {blob}");
-    assert_eq!(blob["frame"]["line"], 4, "got: {blob}");
+    assert_eq!(blob["frame"]["line"], 11, "got: {blob}");
+
+    // `spins.py` never ends on its own, so it is still sitting at the
+    // breakpoint. `Sandbox::drop` disconnects, which terminates it, and then
+    // checks for orphans — the same teardown every other test here relies on.
 }
 
 #[test]

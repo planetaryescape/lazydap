@@ -485,7 +485,7 @@ impl AdapterHandle {
         args: &A,
         register: impl FnOnce(i64),
     ) -> Result<serde_json::Value> {
-        let receiver = {
+        let (seq, receiver) = {
             let mut writer = self.writer.lock().await;
             let writer = writer.as_mut().ok_or(AdapterError::Gone)?;
 
@@ -509,7 +509,7 @@ impl AdapterHandle {
                 self.forget_request(seq);
                 return Err(error.into());
             }
-            receiver
+            (seq, receiver)
         };
 
         let response = match tokio::time::timeout(REQUEST_TIMEOUT, receiver).await {
@@ -518,6 +518,9 @@ impl AdapterHandle {
             // is gone.
             Ok(Err(_)) => return Err(AdapterError::Gone),
             Err(_) => {
+                // The answer may still arrive, but nothing is waiting for it
+                // and this request is no longer one we are describing.
+                self.forget_request(seq);
                 return Err(AdapterError::Timeout {
                     command: command.to_string(),
                     timeout: REQUEST_TIMEOUT,

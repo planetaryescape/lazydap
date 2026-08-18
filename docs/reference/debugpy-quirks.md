@@ -429,3 +429,40 @@ adapter that cannot detach, and carries out `--no-terminate` as a terminate —
 answering `terminated_debuggee: true`, which is what happens, and printing a
 warning on stderr saying why (D095). The misspelled field is deliberately not
 read: trusting it would restore both the twelve-second wait and the false answer.
+
+---
+
+## 19. On Linux the first breakpoint is reached before `launch` has finished answering
+
+Timings from a CI run (Ubuntu 24.04, debugpy 1.8.21, CPython 3.12), with a
+breakpoint persisted before the launch and no `stopOnEntry`:
+
+```
+01.561140  launched  state="running"
+01.561365  <-- event stopped              ← 0.2 ms later
+01.566     --> request continue  (seq 5)  ← the next command a client could send
+02.223     exited
+```
+
+The interpreter starts, reaches the breakpoint and stops in less time than it
+takes a separate process to read the launch answer and send anything back. On
+macOS the same sequence leaves about 20 ms between the two, so the client's
+`continue` arrives while the program really is running.
+
+Nothing here is wrong on either side. A `continue` against a program that has
+*already stopped* is an ordinary resume, so it runs past the breakpoint — which
+is why the run above ends `exited` rather than `paused`.
+
+**What it means for a client:** "I launched without stop-on-entry, so the
+program is running" is not something to assume even one message later. Read
+`lazydap status`, or send `continue --wait` and be prepared for a blob that
+describes a program which had already arrived. This is a property of the
+machine, not of the adapter: the same test passed on macOS for months and failed
+the first time it ran on Linux.
+
+**Where this bites lazydap:** `crates/daemon/tests/wait_debugpy.rs`'s
+`continuing_a_program_that_is_already_running_reaches_the_breakpoint` used to
+launch `exits.py`, which on Linux was over before the `continue` was sent. It
+now uses `spins.py` with the breakpoint inside the loop: whoever wins the race,
+the next iteration is another hit of the same breakpoint, and the program cannot
+finish in between. delve does the same thing on Linux (delve quirk 18).
