@@ -45,11 +45,7 @@ pub async fn dispatch(
             lazydap: env!("CARGO_PKG_VERSION").to_string(),
             protocol: LAZYDAP_PROTOCOL_VERSION,
         }),
-        // The two flags are decoded and ignored (D093): the adapter and state
-        // checks are the client's, because both answer questions about *your*
-        // machine and *your* working directory rather than the daemon's. They
-        // stay on the wire until a protocol bump can take them off it.
-        Request::Doctor { .. } => Ok(Response::Doctor(doctor(state))),
+        Request::Doctor => Ok(Response::Doctor(doctor(state))),
         Request::Shutdown => shutdown(state),
 
         // --- Session lifecycle ---
@@ -441,21 +437,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn doctor_answers_for_the_daemon_and_ignores_the_flags_it_still_decodes() {
-        // `check_adapters` and `check_state` are answered in the client
-        // (D093); the daemon accepts them so that a frame carrying them is
-        // still readable, and does nothing with them.
+    async fn doctor_answers_only_for_the_daemon() {
+        // The adapter and state checks belong to the client (D093); all the
+        // daemon has to say is whether it is up.
         let state = state();
-        let report = match dispatch(
-            &state,
-            Request::Doctor {
-                check_adapters: true,
-                check_state: true,
-            },
-            None,
-        )
-        .await
-        .expect("doctor")
+        let report = match dispatch(&state, Request::Doctor, None)
+            .await
+            .expect("doctor")
         {
             Response::Doctor(report) => report,
             other => unreachable!("expected a doctor report, got: {other:?}"),

@@ -363,7 +363,7 @@ $ lazydap doctor --format json
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
     { "detail": "/Users/you/go/bin/dlv", "name": "adapter.delve", "ok": true },
     { "detail": "/Users/you/project/.lazydap/state.toml (1 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance cookbook-pin2, pid 54121, protocol v9", "name": "daemon", "ok": true }
+    { "detail": "instance cookbook-pin2, pid 54121, protocol v10", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
@@ -386,7 +386,7 @@ adapter.codelldb  missing  codelldb is pinned to /nope/codelldb by lazydap's con
 adapter.debugpy   ok       /opt/homebrew/bin/python3
 adapter.delve     ok       /Users/you/go/bin/dlv
 state.file        ok       /Users/you/project/.lazydap/state.toml (1 breakpoints)
-daemon            ok       instance cookbook-pin2, pid 53986, protocol v9
+daemon            ok       instance cookbook-pin2, pid 53986, protocol v10
 
 not usable here: codelldb. lazydap does not need them all — each one adds the languages it debugs.
 ```

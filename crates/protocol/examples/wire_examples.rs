@@ -40,17 +40,7 @@ fn main() {
         "BreakpointList",
         &IpcMessage::request(4, Request::BreakpointList),
     );
-
-    show(
-        "Doctor",
-        &IpcMessage::request(
-            5,
-            Request::Doctor {
-                check_adapters: true,
-                check_state: true,
-            },
-        ),
-    );
+    show("Doctor", &IpcMessage::request(5, Request::Doctor));
 
     show(
         "Launch",

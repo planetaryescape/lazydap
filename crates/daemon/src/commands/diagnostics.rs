@@ -253,13 +253,10 @@ async fn daemon_check(instance: &Instance) -> DoctorCheck {
         Ok(client) => client,
         Err(error) => return unreachable(error),
     };
-    // Both checks are answered above, in the process whose config and `PATH`
-    // the answers are about; what is left is the daemon describing itself.
-    let request = Request::Doctor {
-        check_adapters: false,
-        check_state: false,
-    };
-    match client.request(request).await {
+    // The adapter and state checks are answered above, in the process whose
+    // config and `PATH` the answers are about; what is left is the daemon
+    // describing itself.
+    match client.request(Request::Doctor).await {
         Ok(Response::Doctor(report)) => report
             .checks
             .into_iter()

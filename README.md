@@ -155,7 +155,7 @@ $ lazydap doctor --format json
     { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
     { "detail": "no delve binary found on PATH — install it with `go install github.com/go-delve/delve/cmd/dlv@latest`", "name": "adapter.delve", "ok": false },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (0 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v9", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v10", "name": "daemon", "ok": true }
   ],
   "ok": true
 }

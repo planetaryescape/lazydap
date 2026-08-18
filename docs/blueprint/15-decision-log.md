@@ -2395,3 +2395,33 @@ daemon's working directory, which is wherever it was started and is nobody's pro
 and the TUI both send absolute paths (D050 makes the same point about adapter discovery); a
 relative one is left to fail as it always has rather than being rewritten into a confident wrong
 answer.
+
+---
+
+## D-WP10-1 — `Request::Doctor` has no fields, and taking them off is protocol v10
+
+**Status:** decided (2026-08-18, defect campaign WP10).
+
+**Context.** D093 moved `doctor`'s adapter and state checks into the client and left
+`check_adapters` and `check_state` on the wire, decoded and ignored, "retirable at the next
+bump". Nothing else needed a bump, so a year of readers would have gone on finding two fields
+that no code on either side reads.
+
+**Decision.** `Request::Doctor` is a unit variant, like `Ping`, `Status`, `Version` and
+`Shutdown` — the other requests that ask for nothing. `LAZYDAP_PROTOCOL_VERSION` goes 9 → 10.
+
+**Why a removed field is a bump, given nothing reads it.** The version and the payload travel
+in one envelope, so the payload is decoded before the version can be looked at. Both directions
+fail there: serde reads `"Doctor"` against the old shape as `invalid type: unit variant,
+expected struct variant`, and `{"Doctor":{…}}` against the new one as `invalid type: map,
+expected unit`. Neither is a `VersionMismatch` — an undecodable frame gets `BadRequest` on id
+`0` and the connection is hung up (`server.rs`'s `unreadable_frame`), which reads to a user as
+a daemon that died mid-answer. The bump is what makes sure that frame is never sent: every
+*other* request still decodes, so the `Ping` handshake reports the mismatch first and `lazydap
+shutdown` clears it. The rule this is an instance of is the one `Request::Shutdown`'s own
+comment states — the wire form of a variant changes when its field list does, in either
+direction, and a shape change is a version change whether or not anyone reads the fields.
+
+**Not affected: the CLI.** `lazydap doctor --check-adapters` and `--check-state` are unchanged.
+They narrow what the *client* runs, which is where both checks have lived since D093; they were
+never the request's fields.

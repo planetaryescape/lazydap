@@ -86,7 +86,19 @@ use std::path::PathBuf;
 /// client fails the whole envelope on either of them — the same break D061's
 /// `AdapterKind` and D075's `ErrorCode` had, and the same reason for a bump:
 /// the failure belongs at the handshake, where `lazydap shutdown` clears it.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 9;
+///
+/// v10 (D-WP10-1): [`Request::Doctor`] lost `check_adapters` and `check_state`
+/// and became a unit variant, so it now goes on the wire as `"Doctor"` rather
+/// than `{"Doctor":{...}}`. Removing a field breaks in *both* directions —
+/// serde reads `"Doctor"` against the old shape as `invalid type: unit
+/// variant, expected struct variant`, and the old shape against this one as
+/// `invalid type: map, expected unit`. Neither is a `VersionMismatch`: the
+/// version lives in the same envelope as the payload, so the frame fails to
+/// decode before the daemon can look at it, and the connection is hung up with
+/// an unreadable-frame error instead. The bump is what stops a client ever
+/// sending that frame: every other request still decodes, so the handshake
+/// reports the mismatch and `lazydap shutdown` clears it.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 10;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,10 +180,11 @@ pub enum Request {
     /// `Shutdown` at all.
     Shutdown,
     Version,
-    Doctor {
-        check_adapters: bool,
-        check_state: bool,
-    },
+    /// What the daemon can say about itself. The adapter and state checks
+    /// `lazydap doctor` prints are answered client-side, in the process whose
+    /// `PATH`, config and working directory they describe (D093), so this
+    /// request has nothing to ask for.
+    Doctor,
 
     // --- Session lifecycle ---
     Launch(LaunchRequest),

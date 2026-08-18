@@ -60,7 +60,7 @@ well-formed frame; there is nothing to recover on the old connection.
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 1,
   "payload": {
     "Request": "Ping"
@@ -79,31 +79,32 @@ something you sent.
 
 :::caution[A request with no fields is a bare string]
 `{"Request": "Ping"}`, not `{"Request": {"Ping": null}}`. serde writes unit variants as plain
-strings, and the wrapped form is rejected. The same goes for `Status`, `Shutdown`, `Version`
-and `BreakpointList`.
+strings, and the wrapped form is rejected. The same goes for `Status`, `Shutdown`, `Version`,
+`Doctor` and `BreakpointList`.
 :::
 
 A request that does have fields looks like this:
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 5,
   "payload": {
     "Request": {
-      "Doctor": {
-        "check_adapters": true,
-        "check_state": true
+      "Disconnect": {
+        "session_id": "1807b262-de22-43bd-9158-f7237f0981c8",
+        "terminate": true,
+        "dry_run": false
       }
     }
   }
 }
 ```
 
-Both of `Doctor`'s fields are accepted and ignored since v0.2.8: the adapter and state checks
-run in the client, which is the process whose `PATH` and working directory they describe, and
-the daemon answers only for itself. They stay on the wire because removing a field changes the
-frame's shape; they come off at the next protocol bump.
+`Doctor` used to be that example. It carried `check_adapters` and `check_state` until protocol
+v10 took them off. Both checks moved into the client in v0.2.3 — it is the process whose `PATH`
+and working directory they actually describe — the daemon stopped reading the fields in v0.2.8,
+and removing them changes the frame's shape, which is what that bump is for.
 
 ## Handshake
 
@@ -155,7 +156,7 @@ scroll offsets — not a request variant. Nothing sends it and the daemon has no
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 6,
   "payload": {
     "Request": {
@@ -181,7 +182,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 7,
   "payload": {
     "Request": {
@@ -205,7 +206,7 @@ Stepping requests do have a wait mode:
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 8,
   "payload": {
     "Request": {
@@ -239,7 +240,7 @@ wire**, even though the Rust variants are not:
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 9,
   "payload": {
     "Request": {
@@ -274,7 +275,7 @@ requests. A client must be able to read a frame it did not ask for at any point.
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 0,
   "payload": {
     "Event": {
@@ -294,7 +295,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 0,
   "payload": {
     "Event": {
@@ -315,7 +316,7 @@ change to the project's list, which `lazydap break` can make with nothing runnin
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "id": 0,
   "payload": {
     "Event": {

@@ -4,11 +4,13 @@ All notable changes to lazydap are recorded here.
 
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The **lazydap protocol** is versioned separately from the binary. It is at **v9**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
+The **lazydap protocol** is versioned separately from the binary. It is at **v10**; a daemon left running from an older build refuses connections with `VersionMismatch`, and `lazydap shutdown` clears it — which the TUI now does for itself.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+**Protocol v9 → v10.** `Request::Doctor` lost `check_adapters` and `check_state`. Both checks moved into the CLI in v0.2.3 and the daemon stopped reading the fields in v0.2.8, so the request now asks for nothing and goes on the wire as `"Doctor"` rather than `{"Doctor":{...}}`. Removing a field breaks in both directions — an old daemon reads `"Doctor"` as the wrong shape, a new one reads the old shape the same way — and because the version travels in the same envelope as the payload, that failure lands as an unreadable frame rather than a clean `VersionMismatch`. Bumping is what stops the frame being sent at all: every other request still decodes, so the handshake reports the mismatch and `lazydap shutdown` clears it (D-WP10-1). `lazydap doctor --check-adapters` and `--check-state` are unchanged; they always narrowed what the client runs, not what it asked the daemon for.
 
 ## [0.2.8] — 2026-08-18
 
