@@ -516,6 +516,10 @@ mod tests {
         // It is ratatui's, and ratatui's is what puts the terminal back out of
         // raw mode and off the alternate screen. Replacing it rather than
         // wrapping it would trade one unrestored mode for two.
+        // The hook is process-global, so whatever the harness had is put back
+        // before this returns: leaving std's default installed would rob every
+        // later failure in this binary of its backtrace.
+        let previous = std::panic::take_hook();
         let ran = Arc::new(AtomicBool::new(false));
         let wrapped = ran.clone();
         std::panic::set_hook(Box::new(move |_| wrapped.store(true, Ordering::SeqCst)));
@@ -523,7 +527,7 @@ mod tests {
         restore_paste_on_panic();
         let _ = std::panic::catch_unwind(|| unreachable!("a forced panic"));
 
-        let _ = std::panic::take_hook();
+        std::panic::set_hook(previous);
         assert!(ran.load(Ordering::SeqCst));
     }
 }

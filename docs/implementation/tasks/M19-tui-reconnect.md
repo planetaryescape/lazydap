@@ -244,8 +244,10 @@ restarting it in a loop — reset the backoff on every cycle: `ensure_daemon()` 
 as long as the TUI was open. The ladder now keeps its rung across a connection that did not
 last and is only reset once one has been up for five seconds, counted in the loop's ticks
 because the reducer has no clock. It still never gives up (**D-WP6-1**). A side effect worth
-having: attempt numbers are now monotonic, so the superseded-attempt check cannot mistake
-attempt 1 of a new ladder for attempt 1 of the old one.
+having: attempt numbers climb across a whole unproven streak instead of restarting at 1 on
+every handshake, so the superseded-attempt check cannot mistake one ladder's attempt 1 for the
+previous one's. (A connection that proves itself does reset the count — deliberately — so they
+are not monotonic for the life of the TUI.)
 
 **A panic left bracketed paste on.** `enable_bracketed_paste()` runs after `ratatui::try_init`,
 and ratatui's panic hook only calls `restore()` — raw mode and the alternate screen. A crash

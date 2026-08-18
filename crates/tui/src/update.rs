@@ -3267,8 +3267,25 @@ mod tests {
         });
         assert!(screen[2].contains('◯'), "{screen:?}");
 
-        // And the cursor is on the marker, so `b` is about line 1.
-        assert_eq!(cursor(&state), 1);
+        // `b` on the line the sign is drawn on selects it by the name the
+        // store knows it by, which is the whole point of the removal path.
+        assert_eq!(cursor(&state), 1, "the cursor is on the marker");
+        let (state, _) = press(state, KeyCode::Char('j'));
+        let (state, cmd) = press(state, KeyCode::Char('b'));
+        assert_eq!(
+            one_request(&cmd),
+            Request::BreakpointRemove {
+                selector: BreakpointSelector::Location {
+                    source: PathBuf::from(STORED),
+                    line: 2,
+                },
+                dry_run: false,
+            },
+        );
+        assert!(state.breakpoints.is_empty(), "and the gutter sign went");
+
+        // And on a bare line it adds under the same name.
+        let (state, _) = press(state, KeyCode::Char('k'));
         let (_, cmd) = press(state, KeyCode::Char('b'));
         assert_eq!(
             one_request(&cmd),

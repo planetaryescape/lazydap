@@ -2195,9 +2195,12 @@ ceiling every other failure reaches.
 one heartbeat it does hear is `Msg::Tick`. Counting those is the only way to express "has been
 up for a while" without giving the reducer something to read the time from.
 
-**A side effect worth having:** attempt numbers are now monotonic for the life of the TUI, so
-the `is_awaiting` check that drops a superseded reconnection cannot mistake attempt 1 of a new
-ladder for attempt 1 of the old one.
+**A side effect worth having:** attempt numbers now climb for as long as the trouble lasts
+rather than restarting at 1 on every handshake, so within one unproven streak the
+`is_awaiting` check that drops a superseded reconnection cannot mistake one ladder's attempt 1
+for the previous one's. They are not monotonic for the life of the TUI — a connection that
+proves itself resets the count, which is the point — but by then there is nothing in flight
+for a number to collide with.
 
 ---
 
