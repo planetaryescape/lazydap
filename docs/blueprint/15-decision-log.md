@@ -1808,7 +1808,7 @@ submodule.
 
 ---
 
-## D-WP4-1 — setting a location that already has a breakpoint edits it, and says which
+## D086 — setting a location that already has a breakpoint edits it, and says which
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -1848,7 +1848,7 @@ handshake, where `lazydap shutdown` clears it.
 
 ---
 
-## D-WP4-2 — the store commits first, the adapter is told second, and a refusal says so
+## D087 — the store commits first, the adapter is told second, and a refusal says so
 
 **Status:** decided (2026-08-18, defect campaign).
 

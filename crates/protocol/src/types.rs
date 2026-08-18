@@ -80,7 +80,7 @@ use std::path::PathBuf;
 /// table. Both failures are silent without the bump, and a `VersionMismatch`
 /// `lazydap shutdown` clears is the better one.
 ///
-/// v9 (D-WP4-1): [`BreakpointAction`] gained `Updated` and `Unchanged`, so that
+/// v9 (D086): [`BreakpointAction`] gained `Updated` and `Unchanged`, so that
 /// setting a location that already has a breakpoint can say which of the three
 /// things it did. Two more variants on the daemon's side of the wire, and a v8
 /// client fails the whole envelope on either of them — the same break D061's
@@ -607,7 +607,7 @@ pub enum BreakpointAction {
     Listed,
     Added,
     /// A location that already had a breakpoint, set again with different
-    /// modifiers. The id is the one it already had (D-WP4-1).
+    /// modifiers. The id is the one it already had (D086).
     Updated,
     /// A location set again with exactly what it already said. Distinct from
     /// `Updated` because a script re-applying a list of breakpoints wants to

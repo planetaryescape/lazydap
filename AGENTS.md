@@ -346,7 +346,7 @@ end to end against a C binary. What exists today:
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
 
-Note the protocol is at **v9** (D-WP4-1: `action` on a breakpoint report gained
+Note the protocol is at **v9** (D086: `action` on a breakpoint report gained
 `updated` and `unchanged`, because setting a location that already has a
 breakpoint now *edits* it — keeping its id, and clearing the modifiers the new
 command left out — rather than returning the old one untouched. v8 was

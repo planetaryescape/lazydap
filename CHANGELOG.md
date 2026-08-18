@@ -8,7 +8,19 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+**Protocol v8 → v9.** `action` on a breakpoint report gained `updated` and `unchanged`, so that setting a location that already has a breakpoint can say which of the three things it did. A new variant on an enum that crosses the wire is not additive — a v8 client fails to decode the whole frame rather than the one field — so it is a bump, the same way a new `AdapterKind` (v6) and a new `ErrorCode` (v8) were.
+
+**Setting a breakpoint on a location that already has one now edits it.** `lazydap break x.c:10 --condition 'i > 5'` on a line you had already broken on updates that breakpoint in place, keeping its id, and reports `"action": "updated"` — or `"unchanged"` when you asked for exactly what was already there. The whole request wins, including the parts you left out: no `--condition` means no condition, the same as it does on the first call — and that covers `enabled` too, so a bare re-set re-enables a breakpoint you had disabled with `--toggle`. Pass `--disabled` to keep it off.
+
+### Fixed
+
+**`lazydap break FILE:LINE --condition ...` silently dropped every modifier when the line already had a breakpoint.** The command answered `"action": "added"` with `enabled: true` and no condition, exit 0, and the debugger went on using the old unconditional breakpoint — so a script that narrowed a breakpoint it had set earlier debugged against something else entirely. Setting a location now edits what is there and reports `updated` or `unchanged`, and `--dry-run` previews the same decision.
+
+**A breakpoint the adapter refused was recorded without telling anybody.** The store was changed and the change announced only after the adapter had accepted it, so a `setBreakpoints` that failed — usually an adapter that had just died — left the caller with an error, the project with the change, and a TUI drawing the list from before it. The announcement now goes out before the adapter is told, and the error says the change is recorded and will apply at the next launch, naming the ids.
+
+**Two clients removing or toggling the same breakpoint could both report success.** `not_found` was worked out from a selection taken before the lock the mutation ran under, so the loser of the race answered with no breakpoints, no missing ids and exit 0 — success, for work it did not do. Selection and mutation now happen under one lock, as they already did for watches.
 
 ## [0.2.0] — 2026-08-18
 
@@ -35,10 +47,6 @@ Nothing yet.
 **Protocol v5 → v7.** v6 added the `delve` adapter — a new `AdapterKind` variant, which an older daemon cannot decode at all. v7 changed four things about what the daemon reports: `threads` may omit a thread's `name`, the `--wait` blob and the `Stopped` event gained `adapter_thread_id`, `capabilities` gained `supports_variable_paging`, and a variable gained `evaluate_name`.
 
 **`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
-
-**Protocol v8 → v9.** `action` on a breakpoint report gained `updated` and `unchanged`, so that setting a location that already has a breakpoint can say which of the three things it did. A new variant on an enum that crosses the wire is not additive — a v8 client fails to decode the whole frame rather than the one field — so it is a bump, the same way a new `AdapterKind` (v6) and a new `ErrorCode` (v8) were.
-
-**Setting a breakpoint on a location that already has one now edits it.** `lazydap break x.c:10 --condition 'i > 5'` on a line you had already broken on updates that breakpoint in place, keeping its id, and reports `"action": "updated"` — or `"unchanged"` when you asked for exactly what was already there. The whole request wins, including the parts you left out: no `--condition` means no condition, the same as it does on the first call — and that covers `enabled` too, so a bare re-set re-enables a breakpoint you had disabled with `--toggle`. Pass `--disabled` to keep it off.
 
 ### Fixed
 
@@ -77,12 +85,6 @@ Nothing yet.
 **The state file's durability and its hand edits both got stricter.** The temporary file is now `fsync`ed before the rename, so a power cut cannot leave a `state.toml` that is present and empty; abandoned `state.toml.tmp.<pid>` files from a crash mid-write are swept on the next write. External edits are noticed by comparing bytes rather than mtimes, so an edit landing in the same clock tick as lazydap's own write is no longer silently reverted — and a breakpoint or watch *deleted* by hand now stays deleted instead of being written back on the next flush. A file that is missing or empty is not read as a deletion of everything, so `rm -rf .lazydap` or an editor caught mid-save cannot cost you the project's state.
 
 **A `.git` in your home directory no longer makes every directory one project.** The project-root walk had no ceiling, so with dotfiles in `~/.git` — or a stray `~/Cargo.toml` — any unmarked directory under `$HOME` resolved to `$HOME`: one `~/.lazydap/state.toml` and one daemon shared across everything you debug. The walk now stops at the home directory, which is only a root if you asked for it with a `.lazydap/` directory. A *file* named `.lazydap` no longer counts as the marker either; it has to be a directory.
-
-**`lazydap break FILE:LINE --condition ...` silently dropped every modifier when the line already had a breakpoint.** The command answered `"action": "added"` with `enabled: true` and no condition, exit 0, and the debugger went on using the old unconditional breakpoint — so a script that narrowed a breakpoint it had set earlier debugged against something else entirely. Setting a location now edits what is there and reports `updated` or `unchanged`, and `--dry-run` previews the same decision.
-
-**A breakpoint the adapter refused was recorded without telling anybody.** The store was changed and the change announced only after the adapter had accepted it, so a `setBreakpoints` that failed — usually an adapter that had just died — left the caller with an error, the project with the change, and a TUI drawing the list from before it. The announcement now goes out before the adapter is told, and the error says the change is recorded and will apply at the next launch, naming the ids.
-
-**Two clients removing or toggling the same breakpoint could both report success.** `not_found` was worked out from a selection taken before the lock the mutation ran under, so the loser of the race answered with no breakpoints, no missing ids and exit 0 — success, for work it did not do. Selection and mutation now happen under one lock, as they already did for watches.
 
 ## [0.1.0] — 2026-07-31
 

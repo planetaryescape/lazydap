@@ -1189,7 +1189,7 @@ fn continuing_a_program_that_is_already_running_reports_it_and_invents_no_thread
 fn a_condition_added_to_an_existing_breakpoint_reaches_the_debugger() {
     // The claim being checked is about the *adapter*: re-setting a location
     // that already has a breakpoint has to send the new condition, not the old
-    // unconditional one. Before D-WP4-1 the store returned the breakpoint that
+    // unconditional one. Before D086 the store returned the breakpoint that
     // was already there, so codelldb was re-sent exactly what it already had
     // and the program stopped on the first iteration.
     let (toolchain, _turn) = require_toolchain!();

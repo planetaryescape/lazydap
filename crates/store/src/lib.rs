@@ -118,7 +118,7 @@ pub struct Addition {
 /// Distinguished because "added" was reported for all three, which made
 /// `lazydap break x.c:5 --condition 'i > 5'` on a line that already had a
 /// breakpoint look like it had taken when the modifiers were being dropped
-/// (D-WP4-1).
+/// (D086).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddOutcome {
     /// Nothing was there; a new id was minted.
@@ -326,7 +326,7 @@ impl ProjectStore {
     /// one visible breakpoint are two things to remove. So the second call
     /// *edits* the first rather than adding beside it, keeping its id — ids
     /// are never reused (D031), and a re-set location is the same breakpoint
-    /// with different modifiers rather than a new one (D-WP4-1).
+    /// with different modifiers rather than a new one (D086).
     ///
     /// The whole request wins, including the parts that were not given: a
     /// `--condition` that is absent means "no condition", the same way it does
@@ -882,7 +882,7 @@ mod tests {
         // The bug: the second call returned the breakpoint that was already
         // there, untouched, and the caller was told it had been added — so
         // `lazydap break x.c:10 --condition ...` reported success while the
-        // debugger went on stopping every time (D-WP4-1).
+        // debugger went on stopping every time (D086).
         let project = TempProject::new("recondition");
         let source = project.root.join("main.c");
         let store = project.store();

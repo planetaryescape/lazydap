@@ -511,7 +511,7 @@ fn re_setting_a_location_updates_it_and_says_so() {
     // The defect: the modifiers were dropped on the floor and the command
     // still reported `added`, so a script that set a condition on a line it
     // had already broken on debugged with an unconditional breakpoint and no
-    // sign anything had gone wrong (D-WP4-1).
+    // sign anything had gone wrong (D086).
     let sandbox = Sandbox::new("bpupd");
     let source = sandbox.project().join("f.c");
     std::fs::write(&source, "int main(void) { return 0; }\n").expect("write the fixture");
