@@ -57,47 +57,79 @@ pub async fn ensure_daemon_running(instance: &Instance) -> Result<DaemonClient> 
 async fn spawn_and_wait(instance: &Instance) -> Result<DaemonClient> {
     let deadline = tokio::time::Instant::now() + SPAWN_DEADLINE;
 
-    let Some(_lock) = SpawnLock::acquire(&instance.lock)? else {
-        // Somebody else is already starting one. Waiting is both simpler and
-        // more correct than starting a second.
-        tracing::debug!(target: "daemon.spawn", "another client is starting the daemon; waiting");
-        return connect_until(&instance.socket, deadline, None).await;
-    };
+    // A loop, because losing the race is not the end of the story: the client
+    // that won it may put up a daemon that refuses to start, and then nobody
+    // is starting one. Whoever is left takes a turn rather than waiting out a
+    // deadline for a daemon that is never coming — and gets the same "it
+    // exited immediately" diagnosis the winner got.
+    loop {
+        let Some(_lock) = SpawnLock::acquire(&instance.lock)? else {
+            tracing::debug!(target: "daemon.spawn", "another client is starting the daemon; waiting");
+            match wait_for_the_other_spawner(instance, deadline).await {
+                Some(result) => return result,
+                None => continue,
+            }
+        };
 
-    // Re-check under the lock: the winner of the race may have finished while
-    // we were waiting for it.
-    if let Ok(client) = DaemonClient::connect(&instance.socket).await {
-        return Ok(client);
+        // Re-check under the lock: the winner of the race may have finished
+        // while we were waiting for it.
+        if let Ok(client) = DaemonClient::connect(&instance.socket).await {
+            return Ok(client);
+        }
+
+        // Nothing answered, so any socket file here is left over from a daemon
+        // that is gone. Removing it is safe *because we hold the lock*.
+        if instance.socket.exists() {
+            tracing::info!(
+                target: "daemon.spawn",
+                socket = %instance.socket.display(),
+                "removing a stale socket",
+            );
+            std::fs::remove_file(&instance.socket).map_err(CliError::general)?;
+        }
+
+        // Where the log ends *before* the daemon starts, so a failure can be
+        // reported from the lines this daemon wrote rather than from whatever
+        // the previous one left in the same file.
+        let log_from = std::fs::metadata(&instance.log)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut child = spawn_detached(instance)?;
+        return connect_until(
+            &instance.socket,
+            deadline,
+            Some(Spawned {
+                child: &mut child,
+                log: &instance.log,
+                log_from,
+            }),
+        )
+        .await;
     }
+}
 
-    // Nothing answered, so any socket file here is left over from a daemon
-    // that is gone. Removing it is safe *because we hold the lock*.
-    if instance.socket.exists() {
-        tracing::info!(
-            target: "daemon.spawn",
-            socket = %instance.socket.display(),
-            "removing a stale socket",
-        );
-        std::fs::remove_file(&instance.socket).map_err(CliError::general)?;
+/// Wait for the client that holds the spawn lock to produce a daemon.
+///
+/// `None` means it let the lock go without one appearing: its daemon refused
+/// to start, and the caller should take its own turn. Waiting the full
+/// deadline for a daemon nobody is starting is exactly the ten seconds of
+/// silence this whole path exists to avoid.
+async fn wait_for_the_other_spawner(
+    instance: &Instance,
+    deadline: tokio::time::Instant,
+) -> Option<Result<DaemonClient>> {
+    let mut last_error = None;
+    while tokio::time::Instant::now() < deadline {
+        match DaemonClient::connect(&instance.socket).await {
+            Ok(client) => return Some(Ok(client)),
+            Err(error) => last_error = Some(error),
+        }
+        if !instance.lock.exists() {
+            return None;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
-
-    // Where the log ends *before* the daemon starts, so a failure can be
-    // reported from the lines this daemon wrote rather than from whatever the
-    // previous one left in the same file.
-    let log_from = std::fs::metadata(&instance.log)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let mut child = spawn_detached(instance)?;
-    connect_until(
-        &instance.socket,
-        deadline,
-        Some(Spawned {
-            child: &mut child,
-            log: &instance.log,
-            log_from,
-        }),
-    )
-    .await
+    Some(Err(deadline_error(last_error)))
 }
 
 /// Start `lazydap daemon` as a detached process that outlives this command.
@@ -215,13 +247,17 @@ async fn connect_until(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    Err(CliError::unreachable(anyhow::anyhow!(
+    Err(deadline_error(last_error))
+}
+
+fn deadline_error(last_error: Option<CliError>) -> CliError {
+    CliError::unreachable(anyhow::anyhow!(
         "the daemon did not come up within {}s{}",
         SPAWN_DEADLINE.as_secs(),
         last_error
             .map(|error| format!(" ({error})"))
             .unwrap_or_default(),
-    )))
+    ))
 }
 
 /// What the daemon said on its way out, in one line.

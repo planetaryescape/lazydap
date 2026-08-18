@@ -292,6 +292,46 @@ fn a_broken_state_file_fails_fast_and_leaves_no_socket_behind() {
 }
 
 #[test]
+fn three_commands_racing_a_broken_state_file_all_fail_fast() {
+    // Only one of them wins the spawn lock. The losers used to wait out the
+    // full ten-second deadline for a daemon nobody was starting any more, and
+    // report the connection refusal rather than the reason.
+    let sandbox = Sandbox::new("statebadrace");
+    std::fs::write(
+        sandbox.project().join(".lazydap").join("state.toml"),
+        "[[breakpoints\nbroken",
+    )
+    .expect("write a malformed state file");
+
+    let started = std::time::Instant::now();
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..3)
+            .map(|_| scope.spawn(|| sandbox.run_in_project(&["--format", "json", "status"])))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("the command ran"))
+            .collect()
+    });
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "losing the spawn race must not cost the whole deadline; took {elapsed:?}",
+    );
+    for output in &outputs {
+        assert!(!output.status.success(), "each one fails");
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr");
+        let message = error["message"].as_str().expect("a message");
+        assert!(
+            message.contains("TOML parse error"),
+            "every racer must be told why, not just that nothing answered: {message}",
+        );
+    }
+}
+
+#[test]
 fn doctor_reports_a_broken_config_rather_than_dying_of_it() {
     let sandbox = Sandbox::new("cfgdoc");
     let config = sandbox.write_config("[general\nwait_timeout_seconds = ");
