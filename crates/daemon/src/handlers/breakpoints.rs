@@ -492,6 +492,7 @@ mod tests {
                 breakpoint: new_breakpoint("/p/main.c", 19),
                 dry_run: false,
             },
+            None,
         )
         .await
         .expect_err("the adapter is gone, so re-applying it cannot succeed");
@@ -679,6 +680,7 @@ mod tests {
                 breakpoint: new_breakpoint("/p/main.c", 19),
                 dry_run: false,
             },
+            None,
         )
         .await
         .expect_err("the adapter is gone, so applying it cannot succeed");
