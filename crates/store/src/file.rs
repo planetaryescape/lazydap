@@ -76,7 +76,7 @@ impl Document {
             .breakpoints
             .into_iter()
             .map(|mut breakpoint| {
-                breakpoint.source = absolutise(&breakpoint.source, root);
+                breakpoint.source = resolve(&breakpoint.source, root);
                 breakpoint
             })
             .collect();
@@ -383,6 +383,31 @@ impl StoredLaunchConfig {
     }
 }
 
+/// The file a stored breakpoint means: absolute, and canonical when the file is
+/// there to say what canonical is.
+///
+/// The canonicalising half closes a loop the daemon opens. Every breakpoint the
+/// daemon records goes in under the filesystem's own name for the file
+/// (D-WP9-1), and paths are only ever compared for equality — so a breakpoint
+/// that arrived in the file under another spelling, hand-written or persisted
+/// by an older build, could not be selected by location at all:
+/// `break --remove main.c:1` answered `removed`, `not_found: []`, and removed
+/// nothing.
+///
+/// A path that will not canonicalise is left absolute and alone, for the same
+/// reason the daemon leaves one: a breakpoint on a file that is generated, or
+/// on a branch not checked out, is a reasonable thing to have persisted, and
+/// refusing to load it would be a worse answer than holding it.
+///
+/// `relativise` is unaffected in practice: the root is derived from
+/// `current_dir()`, which the kernel already hands back with symlinks resolved,
+/// so a canonical source inside a canonical root still strips to a relative
+/// path on the way back out.
+fn resolve(source: &Path, root: &Path) -> PathBuf {
+    let absolute = absolutise(source, root);
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
 fn absolutise(source: &Path, root: &Path) -> PathBuf {
     if source.is_absolute() {
         source.to_path_buf()
@@ -486,6 +511,50 @@ mod tests {
 
         assert_eq!(contents.next_breakpoint_id, 8);
         assert_eq!(contents.next_watch_id, 5);
+    }
+
+    #[test]
+    fn a_source_in_the_file_is_loaded_under_the_name_the_filesystem_gives_it() {
+        // The daemon records every breakpoint under the canonical path
+        // (D-WP9-1). One that arrived in the file under another spelling — hand
+        // written, or persisted by a build that did not canonicalise — has to
+        // be loaded under the same name or nothing can select it by location.
+        //
+        // The symlink is built here rather than borrowed from macOS's
+        // `/tmp` → `/private/tmp`, which Linux does not have.
+        // A directory of this test's own: `lazydap-file-<pid>` belongs to the
+        // rename test below, and the two run at the same time.
+        let real = std::env::temp_dir().join(format!("lazydap-store-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(&real).expect("create the real directory");
+        std::fs::write(real.join("a.c"), "int main(void) { return 0; }\n").expect("write");
+        let linked = real.with_extension("link");
+        let _ = std::fs::remove_file(&linked);
+        std::os::unix::fs::symlink(&real, &linked).expect("symlink the directory");
+
+        let document: Document = toml::from_str(&format!(
+            "version = 1\n\n[[breakpoints]]\nid = 1\nsource = \"{}\"\nline = 1\n",
+            linked.join("a.c").display(),
+        ))
+        .expect("parse");
+        let contents = document.into_memory(&linked);
+
+        assert_eq!(
+            contents.breakpoints[0].source,
+            real.join("a.c").canonicalize().expect("canonicalise"),
+        );
+
+        // A file that is not there yet is still worth holding on to, so it is
+        // loaded exactly as written rather than refused.
+        let document: Document = toml::from_str(
+            "version = 1\n\n[[breakpoints]]\nid = 1\nsource = \"generated.c\"\nline = 1\n",
+        )
+        .expect("parse");
+        let contents = document.into_memory(Path::new("/p"));
+        assert_eq!(contents.breakpoints[0].source, Path::new("/p/generated.c"));
+
+        let _ = std::fs::remove_file(&linked);
+        let _ = std::fs::remove_dir_all(&real);
     }
 
     #[test]

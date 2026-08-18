@@ -207,6 +207,13 @@ pub async fn toggle(
 /// Refusing it here would turn a breakpoint the store persisted quite happily
 /// into an error on the next `toggle`. The CLI still refuses a missing file at
 /// the point where the user typed it, which is where the better message is.
+///
+/// A path is also expected to be absolute. `canonicalize` resolves a relative
+/// one against the *daemon's* working directory, which is wherever it happened
+/// to be started and is nobody's project — so a client sends absolute paths, as
+/// the CLI and the TUI both do (D050 says the same about adapter discovery, for
+/// the same reason). A relative path is left to fail the way it always did
+/// rather than being rewritten into a confident wrong answer.
 fn canonical(source: &Path) -> PathBuf {
     source
         .canonicalize()
@@ -484,6 +491,57 @@ mod tests {
 
         let _ = std::fs::remove_file(&linked);
         let _ = std::fs::remove_dir_all(&real);
+    }
+
+    #[tokio::test]
+    async fn a_breakpoint_persisted_under_another_spelling_can_still_be_selected() {
+        // The other half of the loop. The daemon canonicalises what arrives,
+        // but a `state.toml` is hand-editable and older builds wrote whatever
+        // the client sent — so a source loaded under a second spelling matched
+        // no location selector at all, and `break --remove main.c:1` answered
+        // `removed` with an empty `not_found` having removed nothing.
+        let root = std::env::temp_dir().join(format!("lazydap-persisted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(lazydap_store::STATE_DIR)).expect("create the root");
+        std::fs::write(root.join("main.c"), "int main(void) { return 0; }\n").expect("write");
+
+        let linked = root.with_extension("link");
+        let _ = std::fs::remove_file(&linked);
+        std::os::unix::fs::symlink(&root, &linked).expect("symlink the directory");
+
+        std::fs::write(
+            root.join(lazydap_store::STATE_DIR)
+                .join(lazydap_store::STATE_FILE),
+            format!(
+                "version = 1\n\n[[breakpoints]]\nid = 1\nsource = \"{}\"\nline = 3\nenabled = true\n",
+                linked.join("main.c").display(),
+            ),
+        )
+        .expect("write the state file");
+
+        let state = crate::state::DaemonState::new(
+            "lazydap-test".to_string(),
+            lazydap_store::ProjectStore::load(&root).expect("load the store"),
+        );
+
+        let removed = report(
+            &state,
+            Request::BreakpointRemove {
+                selector: BreakpointSelector::Location {
+                    source: root.join("main.c"),
+                    line: 3,
+                },
+                dry_run: false,
+            },
+        )
+        .await;
+
+        assert_eq!(removed.breakpoints.len(), 1, "got: {removed:?}");
+        assert!(removed.not_found.is_empty(), "got: {removed:?}");
+        assert!(state.store.breakpoints().is_empty());
+
+        let _ = std::fs::remove_file(&linked);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
