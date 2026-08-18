@@ -211,15 +211,18 @@ pub async fn disconnect(
         .with_details(serde_json::json!({ "session_id": session_id.to_string() }))
     })?;
     let session = teardown.session();
-    let was_live = session.state().is_live();
 
-    // What is actually about to happen to the program, which is not always what
-    // was asked for: an adapter that cannot detach is asked to terminate
-    // instead, because asking it to detach anyway achieves nothing and — for
-    // debugpy, which simply never answers such a request — costs ten seconds of
-    // request timeout before it achieves nothing (D-WP1-2).
+    // What the `disconnect` will carry, which is not always what was asked for:
+    // an adapter that cannot detach is asked to terminate instead, because
+    // asking it to detach anyway achieves nothing and — for debugpy, which
+    // simply never answers such a request — costs ten seconds of request
+    // timeout before it achieves nothing (D-WP1-2).
+    let ending = ends_the_program(session, terminate);
+    // ...and what becomes of the program, which is the answer the caller gets.
+    // The one function both this and the `--dry-run` above call, so a preview
+    // cannot promise what the mutation will not do (non-negotiable #4).
     let terminating = terminates_debuggee(session, terminate);
-    if terminating && !terminate {
+    if ending && !terminate && session.state().is_live() {
         tracing::info!(
             target: "daemon.session",
             session_id = %session_id,
@@ -240,14 +243,16 @@ pub async fn disconnect(
     // reads that killed adapter as one that died. So the pid is given up first
     // — there is then nothing left to reap — and the adapter is given time to
     // leave on its own below (D-WP1-1).
-    if !terminating {
+    if !ending {
         session.release_debuggee();
     }
 
     // Ask nicely first so the adapter can detach or kill the debuggee as
     // requested, then make sure the process is gone either way. A refused or
     // timed-out disconnect must not leave an adapter behind.
-    if was_live && let Err(error) = session.adapter().disconnect(terminating).await {
+    if session.state().is_live()
+        && let Err(error) = session.adapter().disconnect(ending).await
+    {
         tracing::warn!(
             target: "daemon.session",
             session_id = %session_id,
@@ -262,7 +267,7 @@ pub async fn disconnect(
     // then stays running regardless (quirk 25), so waiting for it in the
     // ordinary case would cost every `lazydap disconnect` the whole grace for
     // nothing.
-    if !terminating && !session.adapter().wait_for_exit(DETACH_GRACE).await {
+    if !ending && !session.adapter().wait_for_exit(DETACH_GRACE).await {
         tracing::debug!(
             target: "daemon.session",
             session_id = %session_id,
@@ -291,19 +296,33 @@ pub async fn disconnect(
     Ok(Response::Disconnected {
         session_id,
         dry_run: false,
-        terminated_debuggee: terminating && was_live,
+        terminated_debuggee: terminating,
     })
 }
 
-/// Whether this disconnect ends the program, given what was asked for and what
-/// the adapter can do.
+/// What becomes of the program: the value `terminated_debuggee` reports.
 ///
-/// One function so the preview and the mutation cannot drift (non-negotiable
-/// #4), and so the one surprising rule lives in one place: `--no-terminate`
-/// against an adapter that does not advertise `supportTerminateDebuggee` is
-/// honoured as a *terminate*, because that is what happens either way and
-/// reporting otherwise is the lie this exists to remove (D-WP1-2).
+/// The **only** place that answer is worked out, called by the mutation and by
+/// its `--dry-run` alike, because the two carrying the same rule separately is
+/// how a preview comes to promise what the mutation will not do
+/// (non-negotiable #4).
+///
+/// A session whose program has already ended terminates nothing, whatever was
+/// asked and whatever the adapter can do.
 fn terminates_debuggee(session: &Session, terminate: bool) -> bool {
+    session.state().is_live() && ends_the_program(session, terminate)
+}
+
+/// Whether the `disconnect` sent to the adapter carries
+/// `terminateDebuggee: true`.
+///
+/// Not the same question as [`terminates_debuggee`]: this one is about the
+/// request, which is sent — or not — regardless of what the program has already
+/// done. The surprising half of the rule lives here: `--no-terminate` against an
+/// adapter that does not advertise `supportTerminateDebuggee` is carried out as
+/// a *terminate*, because that is what happens either way and reporting
+/// otherwise is the lie this exists to remove (D-WP1-2).
+fn ends_the_program(session: &Session, terminate: bool) -> bool {
     terminate || !session.adapter().can_detach()
 }
 
@@ -581,6 +600,67 @@ async fn resolve_thread(session: &Arc<Session>, explicit: Option<i64>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::AdapterHandle;
+    use lazydap_core::{AdapterKind, SessionId};
+
+    /// A session with no adapter behind it, in whatever state is being tested.
+    ///
+    /// `AdapterHandle::detached` cannot detach, which is the case that matters
+    /// here: it is what debugpy and delve are (D-WP1-2).
+    fn session(state: SessionState) -> Session {
+        let (event_tx, _keep_open) = tokio::sync::broadcast::channel(64);
+        Session::new(
+            SessionId::new(),
+            AdapterKind::Debugpy,
+            std::path::PathBuf::from("/tmp/hello.py"),
+            state,
+            AdapterHandle::detached(),
+            event_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        )
+    }
+
+    #[test]
+    fn a_disconnect_from_a_session_whose_program_has_ended_terminates_nothing() {
+        // The preview and the mutation read this one function, so the answer
+        // being wrong here would be wrong in both — and the answer differing
+        // between them is the drift non-negotiable #4 exists to stop. An exited
+        // program cannot be terminated by anything, whatever was asked.
+        for terminate in [true, false] {
+            assert!(
+                !terminates_debuggee(&session(SessionState::Exited), terminate),
+                "nothing to terminate in a session that has exited (terminate: {terminate})",
+            );
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_cannot_detach_terminates_a_live_debuggee_whatever_was_asked() {
+        // debugpy and delve: `--no-terminate` is carried out as a terminate,
+        // and the answer says `true` because that is what happens (D-WP1-2).
+        let live = session(SessionState::Paused);
+
+        assert!(terminates_debuggee(&live, false), "asked to keep it");
+        assert!(terminates_debuggee(&live, true), "asked to end it");
+        assert!(
+            ends_the_program(&live, false),
+            "and the request itself carries terminateDebuggee: true",
+        );
+    }
+
+    #[test]
+    fn what_the_request_carries_is_not_what_the_answer_reports() {
+        // The two questions this pair separates. A `disconnect` of an ended
+        // session still carries `terminateDebuggee: true` — it is just never
+        // sent, and nothing is terminated by it.
+        let ended = session(SessionState::Exited);
+
+        assert!(ends_the_program(&ended, true));
+        assert!(
+            !terminates_debuggee(&ended, true),
+            "the program ended on its own; this disconnect did not end it",
+        );
+    }
 
     #[test]
     fn no_timeout_at_all_is_what_a_caller_asks_for_with_zero() {

@@ -194,9 +194,11 @@ pub async fn disconnect(
     // loses a long-running process and never learns why (D-WP1-2). stderr, so
     // it cannot land in anybody's parsed stdout.
     if !terminate && terminated_debuggee {
-        eprintln!(
-            "warning: this adapter cannot leave a debuggee running; the program was terminated",
-        );
+        let outcome = match dry_run {
+            true => "the program would be terminated",
+            false => "the program was terminated",
+        };
+        eprintln!("warning: this adapter cannot leave a debuggee running; {outcome}");
     }
 
     View::single(

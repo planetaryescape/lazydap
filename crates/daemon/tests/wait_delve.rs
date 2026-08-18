@@ -262,6 +262,7 @@ impl Sandbox {
                     // compiled binary are. An adapter with no session is caught
                     // by the daemon's own teardown, which `Drop` has already run.
                     .filter(|line| !line.contains("dlv dap"))
+                    .filter(|line| could_be_a_debuggee(line))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -282,6 +283,28 @@ impl Sandbox {
             .cloned()
             .collect()
     }
+}
+
+/// Whether a `pgrep -fl` line could be a Go debuggee at all.
+///
+/// `pgrep -f` matches a whole command line, machine-wide, so it also matches
+/// anything that merely *names* the pattern — including the shell running a
+/// `pgrep` for these very words. That is not hypothetical: a concurrent session
+/// checking this machine for strays failed this suite, reported as a leaked
+/// debuggee whose "command line" was somebody's `pgrep -fl
+/// "lazydap-delve-|go-fixtures|dlv "`. A shell and a process-search tool cannot
+/// be a debuggee, whatever they have in their arguments.
+fn could_be_a_debuggee(line: &str) -> bool {
+    // `pgrep -l` prints `<pid> <command line>`.
+    let Some((_, command)) = line.split_once(' ') else {
+        return false;
+    };
+    let program = command.split_whitespace().next().unwrap_or_default();
+    let program = program.rsplit('/').next().unwrap_or(program);
+    !matches!(
+        program,
+        "pgrep" | "grep" | "ps" | "sh" | "bash" | "zsh" | "fish"
+    )
 }
 
 /// Every `lazydap-delve-` file currently directly in the temp directory.

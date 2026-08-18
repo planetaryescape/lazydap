@@ -248,7 +248,13 @@ async fn handshake(
         "launch sent",
     );
 
+    // Sent, and then *answered*: the launch is not over until the adapter has
+    // acknowledged it. Settling on the send alone meant a launch whose `launch`
+    // response arrived first returned while this answer was still on the wire,
+    // leaving the pump to find a response nobody was waiting for and say so —
+    // a warning on every fast launch, about nothing.
     let mut configuration_done_seq: Option<i64> = None;
+    let mut configuration_done_answered = false;
     // Which source each outstanding `setBreakpoints` was for, so its response
     // can be paired back up with what we asked for.
     let mut breakpoint_seqs: HashMap<i64, usize> = HashMap::new();
@@ -265,7 +271,7 @@ async fn handshake(
         // while the adapter has not answered whether the breakpoints took
         // would make `verified` a race.
         let settled = launch_answered
-            && configuration_done_seq.is_some()
+            && configuration_done_answered
             && breakpoint_seqs.is_empty()
             && (!request.stop_on_entry || outcome.reason.is_some());
         if settled || outcome.state == SessionState::Terminated {
@@ -370,6 +376,9 @@ async fn handshake(
                 }
                 if response.request_seq == launch_seq {
                     launch_answered = true;
+                }
+                if Some(response.request_seq) == configuration_done_seq {
+                    configuration_done_answered = true;
                 }
                 if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
                     let (source, in_source) = &breakpoints[index];
