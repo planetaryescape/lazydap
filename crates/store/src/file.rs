@@ -388,7 +388,7 @@ impl StoredLaunchConfig {
 ///
 /// The canonicalising half closes a loop the daemon opens. Every breakpoint the
 /// daemon records goes in under the filesystem's own name for the file
-/// (D-WP9-1), and paths are only ever compared for equality — so a breakpoint
+/// (D100), and paths are only ever compared for equality — so a breakpoint
 /// that arrived in the file under another spelling, hand-written or persisted
 /// by an older build, could not be selected by location at all:
 /// `break --remove main.c:1` answered `removed`, `not_found: []`, and removed
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn a_source_in_the_file_is_loaded_under_the_name_the_filesystem_gives_it() {
         // The daemon records every breakpoint under the canonical path
-        // (D-WP9-1). One that arrived in the file under another spelling — hand
+        // (D100). One that arrived in the file under another spelling — hand
         // written, or persisted by a build that did not canonicalise — has to
         // be loaded under the same name or nothing can select it by location.
         //

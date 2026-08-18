@@ -199,7 +199,7 @@ pub async fn toggle(
 /// too (D097), but that is each client's courtesy; the daemon is the only place
 /// that can make it the project's rule, and a client that skips it should not
 /// end up with a second breakpoint on a line the CLI already has one on
-/// (D-WP9-1).
+/// (D100).
 ///
 /// A path that will not canonicalise is kept exactly as it arrived. That is
 /// almost always a file which is not there yet — generated, or on a branch not

@@ -2347,7 +2347,7 @@ session.
 
 ---
 
-## D-WP9-1 — the daemon canonicalises a breakpoint's source, so every client agrees what file it is
+## D100 — the daemon canonicalises a breakpoint's source, so every client agrees what file it is
 
 **Status:** decided (2026-08-18, defect campaign WP9).
 
