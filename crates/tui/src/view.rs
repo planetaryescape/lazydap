@@ -224,6 +224,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from(FILE),
+                canonical: PathBuf::from(FILE),
                 contents: Ok(body.join("\n")),
             },
         );
@@ -477,6 +478,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
+                canonical: PathBuf::from("/tmp/gone.c"),
                 contents: Err("no such file".to_string()),
             },
         );

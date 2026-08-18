@@ -78,9 +78,10 @@ const TICK: Duration = Duration::from_millis(100);
 /// banner inside a UI the user then has to quit.
 ///
 /// Once running, the terminal is given back whatever happens, including a
-/// panic: `ratatui::try_init` installs a hook that restores it before
-/// unwinding. A debugger that leaves your shell in raw mode when it crashes is
-/// worse than no debugger.
+/// panic: `ratatui::try_init` installs a hook that restores raw mode and the
+/// alternate screen before unwinding, and [`restore_paste_on_panic`] wraps it
+/// with the one mode ratatui does not know this crate set. A debugger that
+/// leaves your shell in raw mode when it crashes is worse than no debugger.
 pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
     tracing::debug!(target: "tui.lifecycle", socket = %socket.display(), "entering the TUI");
     let socket = socket.to_path_buf();
@@ -117,6 +118,9 @@ pub async fn run(socket: &Path, ensure_daemon: EnsureDaemon) -> Result<()> {
     // debuggee. Enabling it turns the whole paste into one event that can be
     // routed to whatever is being typed into.
     let bracketed = enable_bracketed_paste();
+    if bracketed {
+        restore_paste_on_panic();
+    }
     let mut state = AppState::default();
 
     let mut tick = tokio::time::interval(TICK);
@@ -211,10 +215,7 @@ impl Dispatcher<'_> {
             Cmd::LoadSource { id, path } => {
                 let msgs = self.msgs.clone();
                 tokio::spawn(async move {
-                    let contents = tokio::fs::read_to_string(&path)
-                        .await
-                        .map_err(|error| error.to_string());
-                    let _ = msgs.send(Msg::SourceLoaded { id, path, contents });
+                    let _ = msgs.send(read_source(id, path).await);
                 });
             }
             Cmd::Reconnect { attempt, delay_ms } => spawn_reconnect(
@@ -226,6 +227,32 @@ impl Dispatcher<'_> {
                 self.clients.clone(),
             ),
         }
+    }
+}
+
+/// Read a source file, and say what the filesystem calls it.
+///
+/// The second half is the point. An adapter reports the path the debuggee was
+/// built with, and on macOS that routinely runs through a symlinked directory
+/// — `/tmp` is `/private/tmp`. The daemon canonicalises before it records a
+/// breakpoint (`commands::resolve_source`), so a pane holding the adapter's
+/// spelling draws no sign for a breakpoint that is really there, and `b` on
+/// that line adds a second one under a name `lazydap break --remove` cannot
+/// select. Resolving it here rather than in the reducer keeps the reducer free
+/// of I/O (D012, D-WP6-2); a path that cannot be resolved is left as it came,
+/// which is the same path the read below is about to fail on.
+async fn read_source(id: u64, path: PathBuf) -> Msg {
+    let canonical = tokio::fs::canonicalize(&path)
+        .await
+        .unwrap_or_else(|_| path.clone());
+    let contents = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|error| error.to_string());
+    Msg::SourceLoaded {
+        id,
+        path,
+        canonical,
+        contents,
     }
 }
 
@@ -295,6 +322,23 @@ fn disable_bracketed_paste() {
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
 }
 
+/// Give the terminal its paste mode back when something panics.
+///
+/// `ratatui::try_init` installs a hook that calls `restore()` — raw mode and
+/// the alternate screen — and knows nothing about bracketed paste, which this
+/// crate turned on afterwards. Without this, a panic left the mode set in the
+/// user's shell and everything they pasted for the rest of that terminal's
+/// life arrived wrapped in `\x1b[200~ … \x1b[201~`, visibly, until they ran
+/// `reset`. Wrapping the hook that is already there rather than replacing it
+/// keeps ratatui's restore and the default message that follows it.
+fn restore_paste_on_panic() {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        disable_bracketed_paste();
+        hook(info);
+    }));
+}
+
 /// Turn keystrokes into messages.
 ///
 /// `spawn_blocking` because `event::poll` blocks a whole thread, and blocking
@@ -341,4 +385,145 @@ fn spawn_input_pump(tx: UnboundedSender<Msg>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A directory that goes away with the test, reached through a symlink.
+    ///
+    /// The point of the symlink is that it makes the two spellings of one file
+    /// real. `/tmp` is one of these on macOS and nowhere else, so a test that
+    /// relied on finding one would pass on this machine and prove nothing in
+    /// CI.
+    struct Linked {
+        root: PathBuf,
+    }
+
+    impl Linked {
+        fn new(name: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("lazydap-tui-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("real")).expect("a temp directory");
+            std::os::unix::fs::symlink("real", root.join("link")).expect("a symlink");
+            Self { root }
+        }
+    }
+
+    impl Drop for Linked {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_reached_through_a_symlink_is_reported_under_its_real_name() {
+        // Which is the name the daemon records a breakpoint under, and
+        // therefore the only one the gutter can match against.
+        let dir = Linked::new("symlink");
+        std::fs::write(dir.root.join("real/hello.c"), "int main(void) {}\n").expect("the file");
+        let asked_for = dir.root.join("link/hello.c");
+
+        let msg = read_source(7, asked_for.clone()).await;
+
+        let Msg::SourceLoaded {
+            id,
+            path,
+            canonical,
+            contents,
+        } = msg
+        else {
+            unreachable!("a read answers with SourceLoaded");
+        };
+        assert_eq!(id, 7);
+        assert_eq!(path, asked_for, "the name it was asked for");
+        assert_eq!(
+            canonical,
+            std::fs::canonicalize(&asked_for).expect("the real name"),
+        );
+        assert_ne!(
+            canonical, asked_for,
+            "which is not the one it was asked for"
+        );
+        assert_eq!(contents.as_deref(), Ok("int main(void) {}\n"));
+    }
+
+    #[tokio::test]
+    async fn a_file_that_will_not_open_keeps_the_name_it_was_asked_for() {
+        // There is nothing to resolve it against, and the error is about the
+        // path the user can see.
+        let path = std::env::temp_dir().join("lazydap-tui-nothing-here.c");
+        let _ = std::fs::remove_file(&path);
+
+        let Msg::SourceLoaded {
+            path: reported,
+            canonical,
+            contents,
+            ..
+        } = read_source(1, path.clone()).await
+        else {
+            unreachable!("a read answers with SourceLoaded");
+        };
+        assert_eq!(reported, path);
+        assert_eq!(canonical, path);
+        assert!(contents.is_err());
+    }
+
+    /// Set on the child this test starts, which is the same binary told to run
+    /// only this test.
+    const PANIC_CHILD: &str = "LAZYDAP_TUI_PANIC_CHILD";
+
+    #[test]
+    fn a_panic_turns_bracketed_paste_back_off() {
+        // In-process there is nowhere to watch the escape sequences arrive, so
+        // the panic happens in a child of this same binary and the bytes it
+        // wrote are read back. A terminal left in this mode wraps everything
+        // the user pastes afterwards in `\x1b[200~ … \x1b[201~`, for the life
+        // of the shell.
+        if std::env::var_os(PANIC_CHILD).is_some() {
+            enable_bracketed_paste();
+            restore_paste_on_panic();
+            unreachable!("the child panics on purpose");
+        }
+
+        let exe = std::env::current_exe().expect("the test binary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "--nocapture",
+                "tests::a_panic_turns_bracketed_paste_back_off",
+            ])
+            .env(PANIC_CHILD, "1")
+            .output()
+            .expect("running this test binary again");
+
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let enabled = printed
+            .find("\x1b[?2004h")
+            .expect("paste mode was turned on");
+        let disabled = printed
+            .rfind("\x1b[?2004l")
+            .expect("the panic hook turned it back off");
+        assert!(disabled > enabled, "and it did so after turning it on");
+    }
+
+    #[test]
+    fn the_paste_hook_leaves_the_hook_it_wrapped_in_place() {
+        // It is ratatui's, and ratatui's is what puts the terminal back out of
+        // raw mode and off the alternate screen. Replacing it rather than
+        // wrapping it would trade one unrestored mode for two.
+        let ran = Arc::new(AtomicBool::new(false));
+        let wrapped = ran.clone();
+        std::panic::set_hook(Box::new(move |_| wrapped.store(true, Ordering::SeqCst)));
+
+        restore_paste_on_panic();
+        let _ = std::panic::catch_unwind(|| unreachable!("a forced panic"));
+
+        let _ = std::panic::take_hook();
+        assert!(ran.load(Ordering::SeqCst));
+    }
 }

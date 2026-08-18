@@ -138,6 +138,15 @@ pub struct AppState {
     /// Whether the daemon is reachable, and how the attempts to get it back
     /// are going (M19).
     pub(crate) connection: Connection,
+    /// Which rung of the reconnection ladder the TUI is on, kept across a
+    /// connection that came up and did not last (D-WP6-1).
+    ///
+    /// Zero while the daemon has been reachable long enough to be trusted, so
+    /// the next time it goes away the retries start at 250ms again.
+    pub(crate) reconnect_attempt: u32,
+    /// How many ticks the current connection has lasted, up to the point where
+    /// it has proved itself. Meaningless while reconnecting.
+    pub(crate) connected_for: u32,
 }
 
 impl AppState {

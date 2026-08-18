@@ -54,7 +54,14 @@ pub enum Msg {
     /// one it has been overtaken by.
     SourceLoaded {
         id: u64,
+        /// The name the file was asked for under — the adapter's spelling.
         path: PathBuf,
+        /// The name the filesystem knows it by, which is the one every
+        /// breakpoint is recorded under: the CLI canonicalises before it
+        /// stores one. The two differ under a symlinked directory, and
+        /// `/tmp` is one on macOS. Falls back to `path` for a file that
+        /// could not be resolved, which is also the file that failed to open.
+        canonical: PathBuf,
         contents: std::result::Result<String, String>,
     },
 

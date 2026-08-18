@@ -39,7 +39,16 @@ const NO_BREAKPOINT: &str = " ";
 /// cursor is always on a line that exists, and the scroll offset always keeps
 /// it on screen.
 pub struct SourceView {
+    /// The name the filesystem knows the file by. Everything that matches a
+    /// breakpoint against this pane goes through it, because that is the name
+    /// the daemon records one under.
     path: PathBuf,
+    /// The name the file was opened under, when the adapter spelled it
+    /// differently — a debuggee under a symlinked directory reports
+    /// `/tmp/x.c` for a file the store calls `/private/tmp/x.c`. Kept so the
+    /// next stop in the same file recognises it as already open instead of
+    /// re-reading it and losing the scroll.
+    opened_as: Option<PathBuf>,
     lines: Vec<String>,
     pub(crate) cursor_line: u32,
     /// First visible line, 1-indexed.
@@ -62,6 +71,7 @@ impl SourceView {
     pub fn from_contents(path: impl Into<PathBuf>, contents: &str) -> Self {
         Self {
             path: path.into(),
+            opened_as: None,
             lines: contents.lines().map(str::to_string).collect(),
             cursor_line: 1,
             top_line: 1,
@@ -70,8 +80,23 @@ impl SourceView {
         }
     }
 
+    /// Record the name this file was asked for under, if it is not the one the
+    /// filesystem gave back.
+    pub fn opened_as(mut self, requested: PathBuf) -> Self {
+        if requested != self.path {
+            self.opened_as = Some(requested);
+        }
+        self
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this pane is showing the file at `path`, under either of its
+    /// names.
+    pub fn shows(&self, path: &Path) -> bool {
+        self.path == path || self.opened_as.as_deref() == Some(path)
     }
 
     /// At least 1, even for an empty file: the cursor has to be somewhere, and

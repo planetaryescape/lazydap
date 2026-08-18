@@ -61,6 +61,17 @@ const CHANNELS: [EventKind; 6] = [
 /// though it is not all fetched.
 const STACK_LEVELS: u32 = 64;
 
+/// How long a connection has to last before it counts as proof that the daemon
+/// works, in [`crate::TICK`]s — fifty of them, which is five seconds
+/// (D-WP6-1).
+///
+/// Until then a connection that dies keeps climbing the ladder it came up.
+/// A daemon that accepts a connection and then dies on the first request it is
+/// given — a crash on `Subscribe`, or something killing it in a loop — used to
+/// reset the ladder every time, so the TUI started a fresh daemon every 250ms
+/// for as long as it was open.
+const PROVEN_TICKS: u32 = 50;
+
 /// How long to wait before the first reconnection attempt, and the ceiling the
 /// doubling stops at (M19).
 const RECONNECT_BASE_MS: u64 = 250;
@@ -75,13 +86,19 @@ pub fn update(state: AppState, msg: Msg) -> (AppState, Cmd) {
         // message exists so the loop wakes and repaints now rather than at the
         // next tick, which is the difference between a resize that looks
         // instant and one that looks stuck.
-        Msg::Resize | Msg::Tick => (state, Cmd::None),
+        Msg::Resize => (state, Cmd::None),
+        Msg::Tick => (tick(state), Cmd::None),
         Msg::Connected => connected(state),
         Msg::InputClosed => {
             tracing::warn!(target: "tui.input", "no more input can arrive; leaving");
             (state, Cmd::Quit)
         }
-        Msg::SourceLoaded { id, path, contents } => source_loaded(state, id, path, contents),
+        Msg::SourceLoaded {
+            id,
+            path,
+            canonical,
+            contents,
+        } => source_loaded(state, id, path, canonical, contents),
         // Terminals with the kitty protocol on report releases and repeats as
         // well as presses. Acting on all three turns one keystroke into three.
         Msg::Key(key) if key.kind != KeyEventKind::Press => (state, Cmd::None),
@@ -109,6 +126,9 @@ pub fn update(state: AppState, msg: Msg) -> (AppState, Cmd) {
 /// path for it.
 fn connected(mut state: AppState) -> (AppState, Cmd) {
     state.connection = Connection::Connected;
+    // This connection has proved nothing yet: the daemon has accepted it, not
+    // answered on it. The ladder is only reset once it has lasted (D-WP6-1).
+    state.connected_for = 0;
     let subscribe = send(
         &mut state,
         Request::Subscribe {
@@ -441,11 +461,17 @@ fn eval_frame(state: &AppState) -> Option<i64> {
 }
 
 /// `a` in the watches pane, once the expression has been typed (M16).
-fn add_watch(mut state: AppState, expression: String) -> (AppState, Cmd) {
+///
+/// Takes the prompt rather than the text so that a refusal can put it back:
+/// the daemon being away is a reason to try again in a moment, not a reason to
+/// lose what was typed.
+fn add_watch(mut state: AppState, mut input: TextInput) -> (AppState, Cmd) {
     if let Some(notice) = unreachable_notice(&state) {
         state.notice = Some(notice);
+        state.modal = Some(Modal::AddWatch(input));
         return (state, Cmd::None);
     }
+    let expression = input.take();
     // No optimistic row, unlike `b`. A breakpoint's gutter sign has to appear
     // at once because holding the key would otherwise pile up adds; a watch is
     // typed one at a time into a prompt, so the answer is quick enough and an
@@ -501,7 +527,7 @@ fn modal_key(mut state: AppState, modal: Modal, key: KeyEvent) -> (AppState, Cmd
                 // that says nothing. Closing is what the user meant.
                 return (state, Cmd::None);
             }
-            return add_watch(state, input.take());
+            return add_watch(state, input);
         }
         KeyCode::Backspace => input.backspace(),
         // The same meaning it has in the REPL, so the two prompts do not need
@@ -1385,15 +1411,37 @@ fn daemon_gone(mut state: AppState) -> (AppState, Cmd) {
     // of the session reads as a pane that has stopped working.
     state.repl.abandon_pending("the daemon went away");
     state.pending_repl.clear();
-    state.connection = Connection::Reconnecting { attempt: 1 };
+    // Where the ladder is, not the bottom of it: a connection that did not
+    // last long enough to prove itself does not earn a fresh 250ms retry, or
+    // a daemon that dies on every `Subscribe` is respawned four times a second
+    // for as long as the TUI is open (D-WP6-1).
+    let attempt = state.reconnect_attempt + 1;
+    state.reconnect_attempt = attempt;
+    state.connection = Connection::Reconnecting { attempt };
     state.notice = Some("the daemon went away — reconnecting".to_string());
     (
         state,
         Cmd::Reconnect {
-            attempt: 1,
-            delay_ms: backoff(1),
+            attempt,
+            delay_ms: backoff(attempt),
         },
     )
+}
+
+/// The redraw heartbeat, which is also the only clock the reducer has.
+///
+/// A connection that has been up for [`PROVEN_TICKS`] is evidence the daemon
+/// works, so the next time one goes away the retries start at the bottom of
+/// the ladder again.
+fn tick(mut state: AppState) -> AppState {
+    if !state.is_reachable() {
+        return state;
+    }
+    state.connected_for = state.connected_for.saturating_add(1);
+    if state.connected_for >= PROVEN_TICKS {
+        state.reconnect_attempt = 0;
+    }
+    state
 }
 
 fn reconnected(
@@ -1421,6 +1469,7 @@ fn reconnected(
         Err(error) => {
             let next = attempt + 1;
             tracing::warn!(target: "tui.ipc", attempt, %error, "reconnection failed; trying again");
+            state.reconnect_attempt = next;
             state.connection = Connection::Reconnecting { attempt: next };
             (
                 state,
@@ -1460,10 +1509,13 @@ fn backoff(attempt: u32) -> u64 {
 /// by [`source_loaded`] — which is why the location is remembered rather than
 /// passed along.
 fn show(mut state: AppState, location: Location) -> (AppState, Cmd) {
+    // Under either name the open file goes by: the adapter reports the path
+    // the debuggee was built with, which is not always the one the filesystem
+    // resolved it to.
     let already_open = state
         .source
         .as_ref()
-        .is_some_and(|source| source.path() == location.path);
+        .is_some_and(|source| source.shows(&location.path));
 
     if already_open {
         let line = location.line;
@@ -1494,6 +1546,7 @@ fn source_loaded(
     mut state: AppState,
     id: u64,
     path: PathBuf,
+    canonical: PathBuf,
     contents: std::result::Result<String, String>,
 ) -> (AppState, Cmd) {
     // Overtaken. Applying it would put a file the program has already left
@@ -1513,7 +1566,11 @@ fn source_loaded(
 
     match contents {
         Ok(contents) => {
-            let mut source = SourceView::from_contents(&path, &contents);
+            // Held under the filesystem's name, because that is the one the
+            // daemon records a breakpoint under — so the gutter matches and
+            // `b` asks about a location `lazydap break --remove` can select.
+            let mut source =
+                SourceView::from_contents(canonical, &contents).opened_as(path.clone());
             // The daemon may have said where the program is while the file was
             // still being read. Applying it here is what closes that gap.
             if let Some(location) = state.location.as_ref().filter(|l| l.path == path) {
@@ -1658,6 +1715,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from(FILE),
+                canonical: PathBuf::from(FILE),
                 contents: Ok(body.join("\n")),
             },
         );
@@ -1882,6 +1940,7 @@ mod tests {
             Msg::SourceLoaded {
                 id,
                 path: PathBuf::from(path),
+                canonical: PathBuf::from(path),
                 contents: Ok(contents.to_string()),
             },
         )
@@ -2015,7 +2074,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tick_and_a_resize_change_nothing() {
+    fn a_tick_and_a_resize_ask_for_nothing_and_leave_the_view_alone() {
         let before = loaded(10);
         let (after, cmd) = update(before, Msg::Tick);
         assert_eq!(cmd, Cmd::None);
@@ -2260,6 +2319,7 @@ mod tests {
                 // asked for another.
                 id: 1,
                 path: PathBuf::from("/tmp/first.c"),
+                canonical: PathBuf::from("/tmp/first.c"),
                 contents: Ok("a\nb\nc\nd".to_string()),
             },
         );
@@ -3169,6 +3229,94 @@ mod tests {
     }
 
     #[test]
+    fn a_breakpoint_on_a_symlinked_source_matches_the_open_file() {
+        // macOS puts `/tmp` behind a symlink to `/private/tmp`, so a debuggee
+        // built there reports frames under the short name while `lazydap
+        // break` canonicalises before it records one. Compared literally, the
+        // gutter drew nothing on a line that really did have a breakpoint,
+        // and `b` there added a second one under a spelling `break --remove`
+        // could not select.
+        const SHOWN: &str = "/tmp/d/hello.c";
+        const STORED: &str = "/private/tmp/d/hello.c";
+
+        let session_id = SessionId::new();
+        let (state, _) = update(AppState::default(), Msg::DaemonEvent(stopped(session_id)));
+        let (state, _) = answer_stack(state, stack_trace(SHOWN, 1));
+        let id = state.latest_load;
+        let (state, _) = update(
+            state,
+            Msg::SourceLoaded {
+                id,
+                path: PathBuf::from(SHOWN),
+                canonical: PathBuf::from(STORED),
+                contents: Ok("1\n2\n3\n4\n5\n6\n7\n8".to_string()),
+            },
+        );
+        let (mut state, _) = answer(
+            state,
+            report(BreakpointAction::Listed, vec![a_breakpoint(1, STORED, 2)]),
+        );
+
+        let breakpoints = state.breakpoints.clone();
+        let screen = crate::testing::render(40, 10, |frame| {
+            state
+                .source
+                .as_mut()
+                .expect("the file")
+                .render(frame, frame.area(), &breakpoints, true)
+        });
+        assert!(screen[2].contains('◯'), "{screen:?}");
+
+        // And the cursor is on the marker, so `b` is about line 1.
+        assert_eq!(cursor(&state), 1);
+        let (_, cmd) = press(state, KeyCode::Char('b'));
+        assert_eq!(
+            one_request(&cmd),
+            Request::BreakpointAdd {
+                breakpoint: NewBreakpoint {
+                    source: PathBuf::from(STORED),
+                    line: 1,
+                    column: None,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                    enabled: true,
+                },
+                dry_run: false,
+            },
+        );
+    }
+
+    #[test]
+    fn stopping_again_in_a_symlinked_file_does_not_re_read_it() {
+        // The pane holds the filesystem's name and the adapter keeps sending
+        // its own, so "is this file already open" has to know both — or every
+        // step costs a read and pins the current line to the top of the pane.
+        const SHOWN: &str = "/tmp/d/hello.c";
+        const STORED: &str = "/private/tmp/d/hello.c";
+
+        let session_id = SessionId::new();
+        let (state, _) = update(AppState::default(), Msg::DaemonEvent(stopped(session_id)));
+        let (state, _) = answer_stack(state, stack_trace(SHOWN, 6));
+        let id = state.latest_load;
+        let (state, _) = update(
+            state,
+            Msg::SourceLoaded {
+                id,
+                path: PathBuf::from(SHOWN),
+                canonical: PathBuf::from(STORED),
+                contents: Ok("1\n2\n3\n4\n5\n6\n7\n8".to_string()),
+            },
+        );
+
+        let (state, _) = update(state, Msg::DaemonEvent(stopped(session_id)));
+        let (state, cmd) = answer_stack(state, stack_trace(SHOWN, 7));
+
+        assert_eq!(cmd, Cmd::None, "the file is already open");
+        assert_eq!(marker(&state), Some(7));
+    }
+
+    #[test]
     fn b_only_means_a_breakpoint_when_the_source_pane_has_the_keys() {
         // In the stack pane there is no cursor line for it to be about.
         let (state, _) = press(loaded(20), KeyCode::Tab);
@@ -3354,6 +3502,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: second,
                 path: PathBuf::from("/tmp/second.c"),
+                canonical: PathBuf::from("/tmp/second.c"),
                 contents: Ok("a\nb\nc\nd\ne\nf\ng\nh\ni\nj".to_string()),
             },
         );
@@ -3362,6 +3511,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: first,
                 path: PathBuf::from("/tmp/first.c"),
+                canonical: PathBuf::from("/tmp/first.c"),
                 contents: Ok("a\nb\nc\nd".to_string()),
             },
         );
@@ -3394,6 +3544,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 1,
                 path: PathBuf::from("/tmp/first.c"),
+                canonical: PathBuf::from("/tmp/first.c"),
                 contents: Err("No such file or directory (os error 2)".to_string()),
             },
         );
@@ -3506,6 +3657,83 @@ mod tests {
             state.connection,
             Connection::Reconnecting { attempt: 107 },
             "still trying, which is the whole point",
+        );
+    }
+
+    #[test]
+    fn a_fresh_handshake_does_not_reset_the_backoff_to_attempt_1() {
+        // A daemon that accepts a connection and then dies on the first
+        // request it is given — a crash on `Subscribe`, or something killing
+        // it in a loop — is exactly what the ladder is for. Counting from the
+        // bottom again each time had the TUI starting a daemon every 250ms for
+        // as long as it was open (D-WP6-1).
+        let (mut state, cmd) = update(loaded(20), Msg::DaemonGone);
+        assert_eq!(
+            cmd,
+            Cmd::Reconnect {
+                attempt: 1,
+                delay_ms: 250,
+            },
+        );
+
+        for (attempt, delay_ms) in [(1, 500), (2, 1_000), (3, 2_000), (4, 4_000)] {
+            let (up, _) = update(
+                state,
+                Msg::Reconnected {
+                    attempt,
+                    outcome: Ok(()),
+                },
+            );
+            assert_eq!(up.connection, Connection::Connected);
+
+            let (down, cmd) = update(up, Msg::DaemonGone);
+            state = down;
+            assert_eq!(
+                cmd,
+                Cmd::Reconnect {
+                    attempt: attempt + 1,
+                    delay_ms,
+                },
+                "after handshake {attempt}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_connection_that_lasts_puts_the_ladder_back_at_the_bottom() {
+        // The other half: a daemon that works is not held against the next
+        // one that goes away, which is the ordinary case — `lazydap shutdown`
+        // at lunchtime and a `launch` in the afternoon.
+        fn ladder_after(ticks: u32) -> Cmd {
+            let (state, _) = update(loaded(20), Msg::DaemonGone);
+            let (state, _) = update(state, failed(1));
+            let (mut state, _) = update(
+                state,
+                Msg::Reconnected {
+                    attempt: 2,
+                    outcome: Ok(()),
+                },
+            );
+            for _ in 0..ticks {
+                (state, _) = update(state, Msg::Tick);
+            }
+            update(state, Msg::DaemonGone).1
+        }
+
+        assert_eq!(
+            ladder_after(PROVEN_TICKS),
+            Cmd::Reconnect {
+                attempt: 1,
+                delay_ms: 250,
+            },
+        );
+        assert_eq!(
+            ladder_after(PROVEN_TICKS - 1),
+            Cmd::Reconnect {
+                attempt: 3,
+                delay_ms: 1_000,
+            },
+            "a connection that did not last is part of the same failure",
         );
     }
 
@@ -3655,6 +3883,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
+                canonical: PathBuf::from("/tmp/gone.c"),
                 contents: Err("No such file or directory (os error 2)".to_string()),
             },
         );
@@ -3674,6 +3903,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from("/tmp/gone.c"),
+                canonical: PathBuf::from("/tmp/gone.c"),
                 contents: Err("no".to_string()),
             },
         );
@@ -3682,6 +3912,7 @@ mod tests {
             Msg::SourceLoaded {
                 id: 0,
                 path: PathBuf::from("/tmp/there.c"),
+                canonical: PathBuf::from("/tmp/there.c"),
                 contents: Ok("int main(void) {}".to_string()),
             },
         );
@@ -4074,6 +4305,28 @@ mod tests {
 
         assert!(state.modal.is_none());
         assert_eq!(cmd, Cmd::None, "and nothing was asked for");
+    }
+
+    #[test]
+    fn enter_in_the_add_watch_prompt_while_disconnected_keeps_the_text() {
+        // The prompt is taken from the state before the key is looked at, so
+        // a submission the daemon cannot carry threw away the expression as
+        // well as refusing it — with nothing on screen to type it back from.
+        let state = focus_watches(loaded_disconnected());
+        let (state, _) = press(state, KeyCode::Char('a'));
+        let state = type_in(state, "pos->x");
+
+        let (state, cmd) = press(state, KeyCode::Enter);
+
+        assert_eq!(cmd, Cmd::None, "nothing could be sent");
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("the daemon is not reachable — reconnecting"),
+        );
+        match state.modal.as_ref() {
+            Some(Modal::AddWatch(input)) => assert_eq!(input.as_str(), "pos->x"),
+            other => unreachable!("the prompt is still open: {other:?}"),
+        }
     }
 
     #[test]
