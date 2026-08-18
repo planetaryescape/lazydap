@@ -12,6 +12,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v10
 
 **Protocol v9 → v10.** `Request::Doctor` lost `check_adapters` and `check_state`. Both checks moved into the CLI in v0.2.3 and the daemon stopped reading the fields in v0.2.8, so the request now asks for nothing and goes on the wire as `"Doctor"` rather than `{"Doctor":{...}}`. Removing a field breaks in both directions — an old daemon reads `"Doctor"` as the wrong shape, a new one reads the old shape the same way — and because the version travels in the same envelope as the payload, that failure lands as an unreadable frame rather than a clean `VersionMismatch`. Bumping is what stops the frame being sent at all: every other request still decodes, so the handshake reports the mismatch and `lazydap shutdown` clears it (D-WP10-1). `lazydap doctor --check-adapters` and `--check-state` are unchanged; they always narrowed what the client runs, not what it asked the daemon for.
 
+### Fixed
+
+**A hand edit to a section lazydap does not model could have silently won.** `state.toml` is merged, not overwritten, when somebody edits it while the daemon is up — but only for breakpoints and watches. Everything else in the file, `[[launch_configs]]` included, was taken from the file wholesale. Nothing in lazydap writes those sections today, so nothing was lost; the day something does, an edit made in the same second would have disappeared without a word. Those sections are now merged by top-level key against the same baseline, and a key both sides changed goes to the file with a `warn!` in the daemon log naming it (D-WP10-2).
+
 ## [0.2.8] — 2026-08-18
 
 ### Fixed

@@ -2425,3 +2425,26 @@ direction, and a shape change is a version change whether or not anyone reads th
 **Not affected: the CLI.** `lazydap doctor --check-adapters` and `--check-state` are unchanged.
 They narrow what the *client* runs, which is where both checks have lived since D093; they were
 never the request's fields.
+
+---
+
+## D-WP10-2 — the unmodelled sections of `state.toml` are three-way merged too, by key
+
+**Status:** decided (2026-08-18, defect campaign WP10).
+
+D084 merges breakpoints and watches against the baseline; `unknown` — the sections this build
+does not model, `[[launch_configs]]` among them — was taken from the file wholesale instead.
+That is the right answer as long as nothing in lazydap writes there, and the wrong one the
+moment something does: our edit would vanish into a concurrent hand edit with nothing said.
+
+`merge_tables` applies `merge_by_id`'s rule one level up, with a top-level key as the unit: a
+key the file left alone keeps our value, a key we left alone takes the file's, and one both
+sides moved goes to the file with a `warn!` naming it. A missing key is a value that changed to
+nothing and follows the same rule, so a section deleted by hand stays deleted and one we
+deleted is not written back by a file that still lists it.
+
+The tie goes to the *file*, which is the opposite of the breakpoint rule. A breakpoint lazydap
+holds has already been given to a live adapter, so the file losing a tie is one command away
+from being right again; nothing has told an adapter about `unknown`, and the only way a value
+gets in there is somebody typing it.
+

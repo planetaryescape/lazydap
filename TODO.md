@@ -35,12 +35,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   adapter process per session that ended on its own.
 - **Follow-ups the campaign left**, less the four v0.2.8 fixed — the unframeable subscriber
   event, `completions` panicking on `EPIPE`, `Request::Doctor`'s dead daemon-side flags, and
-  `install.sh`'s missing `GITHUB_TOKEN` passthrough. Neither of the two left is a milestone yet:
-  - **`ProjectStore`'s merge replaces `state.unknown` wholesale** with the file's copy
-    (`crates/store/src/lib.rs:643`) rather than three-way merging it the way breakpoints and
-    watches are merged. Harmless today, because lazydap never writes into `unknown` — but it
-    is where `[[launch_configs]]` lives, so the day anything does write there, a concurrent
-    hand edit wins silently.
+  `install.sh`'s missing `GITHUB_TOKEN` passthrough. The one left is not a milestone yet:
   - **The demo GIF** is still missing (M15's step 4). Not a blocker; the README works without it.
 
 ### Repo state notes (for cold-start agent)

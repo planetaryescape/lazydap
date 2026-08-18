@@ -638,9 +638,17 @@ impl ProjectStore {
             .unwrap_or_default()
             .into_memory(&self.root);
         let contents = document.into_memory(&self.root);
-        // The file is the authority on the parts we do not model: a newer
-        // lazydap may have written launch configs since we loaded.
-        state.unknown = contents.unknown;
+        let (unknown, contested) =
+            merge_tables(&state.unknown, &baseline.unknown, &contents.unknown);
+        for key in &contested {
+            tracing::warn!(
+                target: "daemon.store",
+                path = %self.path.display(),
+                key = %key,
+                "this section changed both in the file and in memory; the file's version wins",
+            );
+        }
+        state.unknown = unknown;
 
         let breakpoints = merge_by_id(
             &mut state.breakpoints,
@@ -698,6 +706,53 @@ impl Edits {
 /// One past the highest id in use, or 1 for an empty list.
 fn one_past_highest(ids: impl Iterator<Item = u32>) -> u32 {
     ids.map(|id| id + 1).max().unwrap_or(1)
+}
+
+/// Fold the file's version of the unmodelled sections into ours, by key.
+///
+/// [`merge_by_id`]'s rule, one level up: `unknown` is a table of whole sections
+/// — `[[launch_configs]]` and whatever a newer lazydap wrote — so a top-level
+/// key is the unit that can be said to have changed. Against the baseline, a
+/// key the file left alone keeps our value, a key we left alone takes the
+/// file's, and one both of us moved goes to the file, whose name is returned so
+/// the caller can say so. A key missing on either side is just a value that
+/// changed to nothing, and follows the same rule.
+///
+/// The tie goes to the file rather than to us — the opposite of `merge_by_id` —
+/// because nothing in this build writes into `unknown`: our copy is what we
+/// read at load, and the file's is somebody typing. That reverses the day
+/// lazydap models one of these sections, at which point it stops being unknown
+/// and gets a merge of its own.
+fn merge_tables(
+    ours: &toml::Table,
+    baseline: &toml::Table,
+    from_file: &toml::Table,
+) -> (toml::Table, Vec<String>) {
+    // The file's order first, so a rewrite keeps the sections where the person
+    // editing it put them; ours can only be keys the file no longer has.
+    let keys = from_file
+        .keys()
+        .chain(ours.keys().filter(|key| !from_file.contains_key(*key)));
+
+    let mut merged = toml::Table::new();
+    let mut contested = Vec::new();
+    for key in keys {
+        let was = baseline.get(key);
+        let mine = ours.get(key);
+        let theirs = from_file.get(key);
+        let winner = if theirs == was {
+            mine
+        } else if mine == was || mine == theirs {
+            theirs
+        } else {
+            contested.push(key.clone());
+            theirs
+        };
+        if let Some(value) = winner {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    (merged, contested)
 }
 
 /// Fold the file's version of a list into ours, by id.
@@ -1604,5 +1659,129 @@ mod tests {
             "all twenty landed in the one write: {written}",
         );
         flusher.abort();
+    }
+
+    fn table(text: &str) -> toml::Table {
+        text.parse().expect("parse the table")
+    }
+
+    // `merge_tables` is exercised directly for the next eight: nothing in this
+    // build writes into `unknown` yet, so half of its cases cannot be reached
+    // through the store's public API at all.
+    #[test]
+    fn a_section_only_the_file_changed_is_adopted() {
+        let (merged, contested) =
+            merge_tables(&table("port = 1"), &table("port = 1"), &table("port = 2"));
+        assert_eq!(merged, table("port = 2"));
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_section_only_we_changed_survives_the_files_older_copy() {
+        let (merged, contested) =
+            merge_tables(&table("port = 2"), &table("port = 1"), &table("port = 1"));
+        assert_eq!(merged, table("port = 2"));
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_section_changed_on_both_sides_goes_to_the_file_and_is_named() {
+        let (merged, contested) =
+            merge_tables(&table("port = 2"), &table("port = 1"), &table("port = 3"));
+        assert_eq!(
+            merged,
+            table("port = 3"),
+            "a hand edit is the user's word (D084)",
+        );
+        assert_eq!(contested, ["port"]);
+    }
+
+    #[test]
+    fn the_same_edit_on_both_sides_is_not_a_conflict() {
+        let (merged, contested) =
+            merge_tables(&table("port = 2"), &table("port = 1"), &table("port = 2"));
+        assert_eq!(merged, table("port = 2"));
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_section_added_by_hand_is_adopted() {
+        let (merged, contested) =
+            merge_tables(&toml::Table::new(), &toml::Table::new(), &table("port = 1"));
+        assert_eq!(merged, table("port = 1"));
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_section_deleted_by_hand_stays_deleted() {
+        let (merged, contested) =
+            merge_tables(&table("port = 1"), &table("port = 1"), &toml::Table::new());
+        assert!(merged.is_empty(), "got: {merged:?}");
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_section_we_deleted_is_not_written_back_by_a_file_that_still_lists_it() {
+        // The asymmetry `merge_by_id` has for the same reason: ours is the
+        // newer edit, not yet flushed.
+        let (merged, contested) =
+            merge_tables(&toml::Table::new(), &table("port = 1"), &table("port = 1"));
+        assert!(merged.is_empty(), "got: {merged:?}");
+        assert!(contested.is_empty(), "got: {contested:?}");
+    }
+
+    #[test]
+    fn a_deletion_on_one_side_and_an_edit_on_the_other_is_a_conflict() {
+        let (dropped, contested) =
+            merge_tables(&table("port = 2"), &table("port = 1"), &toml::Table::new());
+        assert!(dropped.is_empty(), "the file deleted it: {dropped:?}");
+        assert_eq!(contested, ["port"]);
+
+        let (kept, contested) =
+            merge_tables(&toml::Table::new(), &table("port = 1"), &table("port = 2"));
+        assert_eq!(kept, table("port = 2"), "the file still has it, changed");
+        assert_eq!(contested, ["port"]);
+    }
+
+    #[test]
+    fn a_launch_config_typed_in_while_the_daemon_holds_state_survives_the_next_write() {
+        let project = TempProject::new("handconfig");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 19));
+        store.flush_now().expect("flush");
+
+        let mut contents = std::fs::read_to_string(project.state_file()).expect("read");
+        contents.push_str("\n[[launch_configs]]\nname = \"hello\"\nprogram = \"./hello\"\n");
+        std::fs::write(project.state_file(), contents).expect("write");
+
+        store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        let (configs, warnings) = project.store().launch_configs();
+        assert!(warnings.is_empty(), "got: {warnings:?}");
+        let names: Vec<&str> = configs.iter().map(|config| config.name.as_str()).collect();
+        assert_eq!(names, ["hello"]);
+    }
+
+    #[test]
+    fn a_state_file_that_vanished_does_not_take_the_launch_configs_with_it() {
+        let project = TempProject::new("gonefileconfig");
+        std::fs::create_dir_all(project.state_file().parent().expect("state dir"))
+            .expect("create the state dir");
+        std::fs::write(
+            project.state_file(),
+            "version = 1\n\n[[launch_configs]]\nname = \"hello\"\nprogram = \"./hello\"\n",
+        )
+        .expect("write");
+
+        let store = project.store();
+        std::fs::remove_file(project.state_file()).expect("remove the state file");
+
+        store.add(new_breakpoint(&project.root.join("main.c"), 19));
+        store.flush_now().expect("flush");
+
+        let (configs, _) = project.store().launch_configs();
+        assert_eq!(configs.len(), 1, "got: {configs:?}");
     }
 }
