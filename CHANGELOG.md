@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.2] — 2026-08-18
+
 ### Fixed
 
 **`--wait` could report `timeout` for a program that had already stopped.** A debuggee chatty enough to outrun the wait's own event stream lost whatever was in the dropped range — and if that held the `stopped`, the wait sat there until its deadline while `lazydap status` said `paused`, which is the worst kind of wrong answer because nothing in the blob says it is one. Falling behind is now reconciled against the session's own record of what happened, so the outcome is the truth even when the events that carried it are gone. The arithmetic that made a wait slow enough to fall behind is gone too: the output cap re-summed every chunk it had kept, for every chunk that arrived.
