@@ -708,6 +708,41 @@ fn a_closed_pipe_ends_the_command_quietly_rather_than_panicking() {
 }
 
 #[test]
+fn the_two_commands_that_do_not_print_through_lazydap_survive_a_closed_pipe_too() {
+    // `clap_complete` writes the script itself and clap renders its own usage
+    // errors, so neither went through `print_line` and both panicked on
+    // `EPIPE` — the completions script into a `| head` while installing it,
+    // and a usage error whenever stderr was folded into a piped stdout.
+    // Neither needs a sandbox: `completions` starts nothing, and a command
+    // clap cannot parse never gets far enough to look for a daemon.
+    for (script, expected) in [
+        (
+            format!("{{ {LAZYDAP} completions bash; echo \"rc=$?\" >&2; }} | true"),
+            "rc=0",
+        ),
+        (
+            // Both streams go into the closed pipe, so the exit code has to
+            // come back out on a third descriptor to be observable at all.
+            format!(
+                "exec 3>&2; {{ {LAZYDAP} --format json nosuchcommand 2>&1; \
+                 echo \"rc=$?\" >&3; }} | true"
+            ),
+            "rc=2",
+        ),
+    ] {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run the pipeline");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "`{script}` gave: {stderr}");
+        assert!(!stderr.contains("panicked"), "`{script}` gave: {stderr}");
+    }
+}
+
+#[test]
 fn following_a_log_nobody_is_reading_ends_rather_than_waiting_for_a_line() {
     // The first regression this fix caused: the tail print noticed the closed
     // pipe and the answer was thrown away, so `follow_log` went on polling

@@ -340,9 +340,8 @@ fn report_usage_error(error: &clap::Error, args: &[String]) -> ExitCode {
         "message": message.trim(),
         "details": { "kind": format!("{:?}", error.kind()) },
     });
-    eprintln!(
-        "{}",
-        serde_json::to_string(&body).unwrap_or_else(|_| r#"{"error":"UsageError"}"#.to_string()),
+    output::eprint_line(
+        &serde_json::to_string(&body).unwrap_or_else(|_| r#"{"error":"UsageError"}"#.to_string()),
     );
     ExitCode::from(error::exit::USAGE)
 }

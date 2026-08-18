@@ -218,6 +218,17 @@ pub fn print_line(line: &str) -> Result<Wrote> {
     }
 }
 
+/// Print one line to stderr, treating a closed reader as nothing to report.
+///
+/// `eprintln!` panics on `EPIPE` exactly as `println!` does, and
+/// `lazydap nosuch 2>&1 | head -1` is a normal thing to type. There is no
+/// `Wrote` to hand back: nothing lazydap says on stderr is followed by more of
+/// it, and a diagnostic nobody read is not a failure worth a second one.
+pub fn eprint_line(line: &str) {
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{line}");
+}
+
 /// Choosing a format the command cannot produce is a usage mistake, and a
 /// script should be able to tell it apart from a debugger failure.
 fn not_a_list(format: OutputFormat) -> CliError {

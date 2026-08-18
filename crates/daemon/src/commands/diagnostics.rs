@@ -41,7 +41,14 @@ pub fn completions(shell: clap_complete::Shell) -> Result<()> {
     // added in `cli.rs` is completable without anybody remembering to say so.
     let mut command = Cli::command();
     let name = command.get_name().to_string();
-    clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
+    // Generated into memory rather than straight at stdout: handed a
+    // `std::io::stdout()`, `clap_complete` panics on the `EPIPE` that
+    // `lazydap completions bash | head -20` produces. Going through
+    // `print_line` instead makes a closed reader the end of the job, the way
+    // it is for every other thing lazydap prints.
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut command, name, &mut script);
+    print_line(String::from_utf8_lossy(&script).trim_end())?;
     Ok(())
 }
 
