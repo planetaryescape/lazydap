@@ -477,26 +477,32 @@ impl ProjectStore {
     /// between our load and our write must not be silently reverted — and
     /// "reverted" covers a deletion as much as an addition. Both are decided
     /// against a *baseline*: the text of the file as we last read or wrote it.
-    /// An id in the file but not in the baseline was added by hand and is
-    /// adopted; an id in the baseline but not in the file was deleted by hand
-    /// and goes. An id in both keeps *our* version, because ours is what the
-    /// live adapter has already been told about — a file that loses a tie is
-    /// one `lazydap break` away from being right again, whereas an adapter
-    /// disagreeing with the file is invisible.
-    ///
-    /// A hand-deleted breakpoint is *not* withdrawn from a running adapter;
-    /// it stops existing for the next launch. Editing the file under a live
-    /// session was never a way to change what the debuggee is doing (D-WP2-1).
+    /// See [`merge_by_id`] for the rule, and D-WP2-1 for what it does not
+    /// promise.
     fn adopt_external_edits(&self, state: &mut State) -> Result<()> {
         let (document, text) = file::read(&self.path)?;
         if text == state.seen_text {
             return Ok(());
         }
+        // A file that is gone or empty is not somebody deleting every
+        // breakpoint they own. It is `rm -rf .lazydap` as a reset, or an
+        // editor between its truncate and its write, or a disk that filled up
+        // — and reading it as a deletion means the next flush, 500ms later,
+        // makes it permanent. Keep what we have; the flush that follows
+        // rewrites the file.
+        if text.as_deref().is_none_or(|text| text.trim().is_empty()) {
+            tracing::warn!(
+                target: "daemon.store",
+                path = %self.path.display(),
+                "the state file is missing or empty; keeping what is in memory and rewriting it",
+            );
+            return Ok(());
+        }
 
         // Whatever we last saw. A baseline that will not parse can only come
         // from bytes we ourselves wrote, so it is not a case to design for —
-        // and treating it as empty degrades to the old adopt-only rule rather
-        // than to deleting anything.
+        // and treating it as empty degrades to adopting everything rather than
+        // to deleting anything.
         let baseline = state
             .seen_text
             .as_deref()
@@ -508,69 +514,110 @@ impl ProjectStore {
         // lazydap may have written launch configs since we loaded.
         state.unknown = contents.unknown;
 
-        let in_file: HashSet<BreakpointId> = contents.breakpoints.iter().map(|b| b.id).collect();
-        let deleted: HashSet<BreakpointId> = baseline
-            .breakpoints
-            .iter()
-            .map(|breakpoint| breakpoint.id)
-            .filter(|id| !in_file.contains(id))
-            .collect();
-        let before = state.breakpoints.len();
-        state
-            .breakpoints
-            .retain(|breakpoint| !deleted.contains(&breakpoint.id));
-        let dropped = before - state.breakpoints.len();
-
-        let known: HashSet<BreakpointId> = state.breakpoints.iter().map(|b| b.id).collect();
-        let mut adopted = 0;
-        for breakpoint in contents.breakpoints {
-            if !known.contains(&breakpoint.id) {
-                state.next_id = state.next_id.max(breakpoint.id.0 + 1);
-                state.breakpoints.push(breakpoint);
-                adopted += 1;
-            }
-        }
-        state.next_id = state.next_id.max(contents.next_breakpoint_id);
+        let breakpoints = merge_by_id(
+            &mut state.breakpoints,
+            &baseline.breakpoints,
+            contents.breakpoints,
+            |breakpoint| breakpoint.id,
+        );
+        state.next_id = state
+            .next_id
+            .max(contents.next_breakpoint_id)
+            .max(one_past_highest(state.breakpoints.iter().map(|b| b.id.0)));
 
         // Watches, by exactly the same rule. Typing an expression into the file
         // is the other half of `lazydap watch add` being documented as
         // hand-editable, and one that vanished on the next write would make the
         // file look like a cache rather than the record it is.
-        let in_file: HashSet<WatchId> = contents.watches.iter().map(|watch| watch.id).collect();
-        let deleted: HashSet<WatchId> = baseline
-            .watches
-            .iter()
-            .map(|watch| watch.id)
-            .filter(|id| !in_file.contains(id))
-            .collect();
-        let before = state.watches.len();
-        state.watches.retain(|watch| !deleted.contains(&watch.id));
-        let dropped_watches = before - state.watches.len();
+        let watches = merge_by_id(
+            &mut state.watches,
+            &baseline.watches,
+            contents.watches,
+            |watch| watch.id,
+        );
+        state.next_watch_id = state
+            .next_watch_id
+            .max(contents.next_watch_id)
+            .max(one_past_highest(state.watches.iter().map(|w| w.id.0)));
 
-        let known: HashSet<WatchId> = state.watches.iter().map(|watch| watch.id).collect();
-        let mut adopted_watches = 0;
-        for watch in contents.watches {
-            if !known.contains(&watch.id) {
-                state.next_watch_id = state.next_watch_id.max(watch.id.0 + 1);
-                state.watches.push(watch);
-                adopted_watches += 1;
-            }
-        }
-        state.next_watch_id = state.next_watch_id.max(contents.next_watch_id);
-
-        if adopted + dropped + adopted_watches + dropped_watches > 0 {
+        if breakpoints.happened() || watches.happened() {
             tracing::info!(
                 target: "daemon.store",
                 path = %self.path.display(),
-                adopted,
-                dropped,
-                adopted_watches,
-                dropped_watches,
+                adopted = breakpoints.adopted,
+                dropped = breakpoints.dropped,
+                adopted_watches = watches.adopted,
+                dropped_watches = watches.dropped,
                 "took over edits made to the state file by hand",
             );
         }
         Ok(())
     }
+}
+
+/// What a merge did, for the log line.
+struct Edits {
+    adopted: usize,
+    dropped: usize,
+}
+
+impl Edits {
+    fn happened(&self) -> bool {
+        self.adopted + self.dropped > 0
+    }
+}
+
+/// One past the highest id in use, or 1 for an empty list.
+fn one_past_highest(ids: impl Iterator<Item = u32>) -> u32 {
+    ids.map(|id| id + 1).max().unwrap_or(1)
+}
+
+/// Fold the file's version of a list into ours, by id.
+///
+/// Three groups, decided against `baseline` — the file as we last read or
+/// wrote it:
+///
+/// - **In the file, not in the baseline.** Added by hand since; adopted.
+/// - **In the baseline, not in the file.** Deleted by hand since; dropped from
+///   ours too, rather than written straight back.
+/// - **In both.** Ours wins, because ours is what a live adapter has already
+///   been told about — a file that loses a tie is one `lazydap break` away
+///   from being right again, whereas an adapter disagreeing with the file is
+///   invisible.
+///
+/// The one asymmetry: an id in the baseline that *we* no longer hold is a
+/// removal of our own that has not been flushed yet, so it is not adopted back
+/// even though the file still lists it. Ours is the newer edit.
+fn merge_by_id<T, I>(
+    ours: &mut Vec<T>,
+    baseline: &[T],
+    from_file: Vec<T>,
+    id_of: impl Fn(&T) -> I,
+) -> Edits
+where
+    I: Copy + Eq + std::hash::Hash,
+{
+    let was: HashSet<I> = baseline.iter().map(&id_of).collect();
+    let now: HashSet<I> = from_file.iter().map(&id_of).collect();
+
+    let before = ours.len();
+    ours.retain(|item| {
+        let id = id_of(item);
+        now.contains(&id) || !was.contains(&id)
+    });
+    let dropped = before - ours.len();
+
+    let known: HashSet<I> = ours.iter().map(&id_of).collect();
+    let mut adopted = 0;
+    for item in from_file {
+        let id = id_of(&item);
+        if !known.contains(&id) && !was.contains(&id) {
+            ours.push(item);
+            adopted += 1;
+        }
+    }
+
+    Edits { adopted, dropped }
 }
 
 /// A poisoned lock here means a panic left a `Vec<Breakpoint>` mid-push, not a
@@ -849,6 +896,144 @@ mod tests {
             "the hand-deleted breakpoint must not come back: {lines:?}",
         );
         assert!(lines.contains(&19) && lines.contains(&21), "got: {lines:?}");
+    }
+
+    #[test]
+    fn a_state_file_that_vanished_is_not_a_deletion_of_everything() {
+        // `rm -rf .lazydap` as a reset, or a backup tool mid-restore. Reading
+        // an absent file as "the user deleted every breakpoint" makes it true
+        // 500ms later, which is the whole state of the project gone.
+        let project = TempProject::new("gonefile");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 19));
+        store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        std::fs::remove_file(project.state_file()).expect("remove the state file");
+
+        store.add(new_breakpoint(&source, 21));
+        store.flush_now().expect("flush");
+
+        let lines: Vec<u32> = project
+            .store()
+            .breakpoints()
+            .iter()
+            .map(|breakpoint| breakpoint.line)
+            .collect();
+        assert_eq!(lines.len(), 3, "nothing may be lost: {lines:?}");
+        assert!(
+            lines.contains(&19) && lines.contains(&20) && lines.contains(&21),
+            "got: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn a_truncated_state_file_is_not_a_deletion_of_everything() {
+        // The window an editor that truncates before it writes leaves open,
+        // and what `> state.toml` does on purpose.
+        let project = TempProject::new("emptyfile");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 19));
+        let watch = store.add_watch(NewWatch {
+            expression: "counter".to_string(),
+            label: None,
+        });
+        store.flush_now().expect("flush");
+
+        std::fs::write(project.state_file(), "   \n\n").expect("truncate");
+
+        store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        let reloaded = project.store();
+        let lines: Vec<u32> = reloaded
+            .breakpoints()
+            .iter()
+            .map(|breakpoint| breakpoint.line)
+            .collect();
+        assert!(lines.contains(&19) && lines.contains(&20), "got: {lines:?}");
+        assert_eq!(
+            reloaded.watches(),
+            vec![watch],
+            "a watch is state too, and the file was not a deletion",
+        );
+    }
+
+    #[test]
+    fn our_own_unflushed_removal_survives_somebody_else_editing_the_file() {
+        // The other side of the three-way merge. A removal that has not
+        // reached disk yet is still in the file, and adopting "everything the
+        // file has that we do not" would undo it the moment anyone touched the
+        // file for an unrelated reason.
+        let project = TempProject::new("ourremoval");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        let first = store.add(new_breakpoint(&source, 19));
+        let doomed = store.add(new_breakpoint(&source, 20));
+        store.flush_now().expect("flush");
+
+        store.remove(&BreakpointSelector::Ids(vec![doomed.id]));
+
+        let mut contents = std::fs::read_to_string(project.state_file()).expect("read");
+        contents.push_str("\n[[breakpoints]]\nid = 99\nsource = \"hand.c\"\nline = 7\n");
+        std::fs::write(project.state_file(), contents).expect("write");
+
+        store.flush_now().expect("flush");
+
+        let ids: Vec<u32> = project
+            .store()
+            .breakpoints()
+            .iter()
+            .map(|breakpoint| breakpoint.id.0)
+            .collect();
+        assert!(
+            !ids.contains(&doomed.id.0),
+            "our removal must not be undone by an unrelated hand edit: {ids:?}",
+        );
+        assert!(
+            ids.contains(&first.id.0) && ids.contains(&99),
+            "and the hand-added one is still adopted: {ids:?}",
+        );
+    }
+
+    #[test]
+    fn our_own_unflushed_watch_removal_survives_an_edit_to_the_file() {
+        let project = TempProject::new("ourwatchremoval");
+        let store = project.store();
+        let kept = store.add_watch(NewWatch {
+            expression: "kept".to_string(),
+            label: None,
+        });
+        let doomed = store.add_watch(NewWatch {
+            expression: "doomed".to_string(),
+            label: None,
+        });
+        store.flush_now().expect("flush");
+
+        store.remove_watches(&WatchSelector::Ids(vec![doomed.id]));
+
+        let mut contents = std::fs::read_to_string(project.state_file()).expect("read");
+        contents.push_str("\n[[watches]]\nid = 99\nexpression = \"by_hand\"\n");
+        std::fs::write(project.state_file(), contents).expect("write");
+
+        store.flush_now().expect("flush");
+
+        let expressions: Vec<String> = project
+            .store()
+            .watches()
+            .iter()
+            .map(|watch| watch.expression.clone())
+            .collect();
+        assert!(
+            !expressions.contains(&"doomed".to_string()),
+            "got: {expressions:?}",
+        );
+        assert!(
+            expressions.contains(&kept.expression) && expressions.contains(&"by_hand".to_string()),
+            "got: {expressions:?}",
+        );
     }
 
     #[test]
