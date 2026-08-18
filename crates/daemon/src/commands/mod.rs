@@ -50,27 +50,53 @@ const WAIT_SLACK: Duration = Duration::from_secs(15);
 /// `[general] wait_timeout_seconds` in the user's config. The environment
 /// beats the config deliberately — a variable set for one command is a more
 /// specific statement than a file written once.
-pub fn wait_mode(args: &WaitArgs, config: &Config) -> WaitMode {
+///
+/// A `LAZYDAP_TIMEOUT` that is not a number is a usage error rather than an
+/// ignored one; see [`env_timeout`].
+pub fn wait_mode(args: &WaitArgs, config: &Config) -> Result<WaitMode> {
     if !args.wait {
-        return WaitMode::NoWait;
+        return Ok(WaitMode::NoWait);
     }
 
-    let seconds = args
-        .timeout
-        .or_else(|| {
-            std::env::var(TIMEOUT_ENV)
-                .ok()
-                .and_then(|value| value.trim().parse().ok())
-        })
-        .or_else(|| config.wait_timeout_seconds())
-        .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+    // The flag is consulted first and the variable only if there is none, so
+    // an explicit `--timeout` is not held hostage by a typo somewhere in the
+    // caller's shell profile.
+    let seconds = match args.timeout {
+        Some(seconds) => Some(seconds),
+        None => env_timeout()?,
+    }
+    .or_else(|| config.wait_timeout_seconds())
+    .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
 
-    WaitMode::Wait {
+    Ok(WaitMode::Wait {
         // Saturating rather than wrapping: a caller who writes
         // `--timeout 99999999999` should get a very long wait, not a very
         // short one.
         timeout_ms: Some(seconds.saturating_mul(1_000).try_into().unwrap_or(u32::MAX)),
+    })
+}
+
+/// `LAZYDAP_TIMEOUT`, when it is set to something readable.
+///
+/// A variable that is set and cannot be read is refused rather than ignored.
+/// Silently falling back to 30 seconds is the worst of both: somebody who
+/// exported `LAZYDAP_TIMEOUT=5m` believes every `--wait` in that shell is
+/// bounded by five minutes, and nothing ever tells them otherwise.
+fn env_timeout() -> Result<Option<u64>> {
+    let Ok(raw) = std::env::var(TIMEOUT_ENV) else {
+        return Ok(None);
+    };
+    // An empty or blank value is how a shell unsets a variable it cannot
+    // remove (`LAZYDAP_TIMEOUT= lazydap ...`), so it means "nothing set".
+    if raw.trim().is_empty() {
+        return Ok(None);
     }
+    raw.trim().parse().map(Some).map_err(|error| {
+        CliError::usage_with_details(
+            format!("`{TIMEOUT_ENV}={raw}` is not a number of seconds: {error}"),
+            serde_json::json!({ "variable": TIMEOUT_ENV, "value": raw }),
+        )
+    })
 }
 
 /// How long the client should be prepared to wait for the daemon's answer, or
@@ -162,7 +188,7 @@ mod tests {
     }
 
     fn mode(wait: bool, timeout: Option<u64>) -> WaitMode {
-        wait_mode(&args(wait, timeout), &Config::default())
+        wait_mode(&args(wait, timeout), &Config::default()).expect("a readable timeout")
     }
 
     #[test]
@@ -235,13 +261,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
-            wait_mode(&args(true, None), &config),
+            wait_mode(&args(true, None), &config).expect("a readable timeout"),
             WaitMode::Wait {
                 timeout_ms: Some(90_000)
             },
         );
         assert_eq!(
-            wait_mode(&args(true, Some(5)), &config),
+            wait_mode(&args(true, Some(5)), &config).expect("a readable timeout"),
             WaitMode::Wait {
                 timeout_ms: Some(5_000)
             },

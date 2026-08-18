@@ -25,7 +25,7 @@ lazydap launch [OPTIONS] <PROGRAM> [-- <ARGS>...]
 | Flag | Description |
 | --- | --- |
 | `--stop-on-entry` | Stop at the program's entry point instead of running to the first breakpoint |
-| `--cwd <CWD>` | Working directory for the debuggee. Defaults to the current one |
+| `--cwd <CWD>` | Working directory for the debuggee. Defaults to the current one. It does not affect how the program path is resolved — that is always relative to your shell |
 | `--env <KEY=VALUE>` | Environment for the debuggee, as KEY=VALUE. Repeatable |
 | `--adapter <ADAPTER>` | Which debug adapter to use: codelldb, debugpy or delve. Defaults to the one the program's file extension implies — debugpy for `.py`, delve for `.go`, codelldb otherwise |
 

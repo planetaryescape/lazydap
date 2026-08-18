@@ -5,6 +5,7 @@
 //! debuggee is launched: this is about the daemon coming up, staying up, and
 //! going away when told.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -54,13 +55,47 @@ impl Sandbox {
     /// the sandbox. The daemon inherits this working directory when the first
     /// command spawns it, and resolves its store from there.
     fn run_in_project(&self, args: &[&str]) -> Output {
+        self.run_in_project_with_env(&[], args)
+    }
+
+    /// The same, with extra environment: a `PATH` an adapter is missing from,
+    /// a `LAZYDAP_TIMEOUT` nothing can read, a `LAZYDAP_CONFIG_PATH`.
+    fn run_in_project_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
         let mut command = Command::new(LAZYDAP);
         command
             .current_dir(self.project())
             .env("LAZYDAP_INSTANCE", &self.instance)
             .env("LAZYDAP_RUNTIME_DIR", self.root.join("r"))
             .env("LAZYDAP_DATA_DIR", self.root.join("d"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
         command.args(args).output().expect("run lazydap")
+    }
+
+    /// Write a file inside the project, creating the directories above it.
+    fn write_in_project(&self, relative: &str, body: &str) -> PathBuf {
+        let path = self.project().join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create the directory");
+        }
+        std::fs::write(&path, body).expect("write the file");
+        path
+    }
+
+    /// Everything the daemon would leave behind if one had been started.
+    fn daemon_files(&self) -> Vec<String> {
+        ["r", "d"]
+            .iter()
+            .flat_map(|dir| std::fs::read_dir(self.root.join(dir)).expect("read the directory"))
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
     }
 
     /// [`Self::run_in_project`] plus the JSON parse and the loud failure.
@@ -568,5 +603,265 @@ fn re_setting_a_location_updates_it_and_says_so() {
     assert_eq!(
         again["action"], "unchanged",
         "asking for what is already there changed nothing: {again}",
+    );
+}
+
+// --- The CLI surface (WP5) --------------------------------------------------
+
+#[test]
+fn a_program_is_resolved_against_the_shell_not_against_cwd() {
+    // `--cwd` says where the debuggee runs. `./app` on the command line means
+    // the `./app` the person typing it can see, and resolving it against
+    // `--cwd` made `lazydap launch ./app --cwd sub` fail for a program plainly
+    // there — or, when `sub/app` existed too, debug the wrong binary in
+    // silence.
+    let sandbox = Sandbox::new("cwd");
+    sandbox.write_in_project("sub/app", "#!/bin/sh\n");
+    // A config pinning codelldb at nothing, so the launch stops at the next
+    // step after the program resolves rather than starting an adapter.
+    let config = sandbox.write_config("[adapter.codelldb]\ncommand = \"/nowhere/codelldb\"\n");
+    let config = config.to_string_lossy().into_owned();
+    let env = [("LAZYDAP_CONFIG_PATH", config.as_str())];
+
+    let missing = sandbox.run_in_project_with_env(
+        &env,
+        &["--format", "json", "launch", "./app", "--cwd", "sub"],
+    );
+    assert_eq!(missing.status.code(), Some(1), "there is no ./app here");
+    let error: serde_json::Value =
+        serde_json::from_slice(&missing.stderr).expect("errors are JSON on stderr");
+    assert_eq!(error["error"], "InvalidLaunchConfig");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("a message")
+            .contains("cannot debug ./app"),
+        "it must not have looked in sub/: {error}",
+    );
+
+    // And the same program, now where the shell is, resolves — the launch gets
+    // as far as the adapter, which is the step after this one.
+    sandbox.write_in_project("app", "#!/bin/sh\n");
+    let found = sandbox.run_in_project_with_env(
+        &env,
+        &["--format", "json", "launch", "./app", "--cwd", "sub"],
+    );
+    assert_eq!(
+        found.status.code(),
+        Some(4),
+        "expected the missing adapter, which is past the program: {}",
+        String::from_utf8_lossy(&found.stderr),
+    );
+}
+
+#[test]
+fn logs_follow_refuses_the_formats_it_cannot_honour() {
+    // It used to print the JSON object and then append bare log lines after
+    // it, which no parser survives.
+    let sandbox = Sandbox::new("flw");
+
+    for format in ["json", "csv", "ids"] {
+        let output = sandbox.run_in_project(&["logs", "--follow", "--format", format]);
+        assert_eq!(output.status.code(), Some(2), "`--format {format}` exits 2");
+        assert!(
+            output.stdout.is_empty(),
+            "and prints nothing at all on stdout: {}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr");
+        assert_eq!(error["error"], "UsageError");
+        assert_eq!(error["details"]["format"], format);
+    }
+}
+
+#[test]
+fn a_closed_pipe_ends_the_command_quietly_rather_than_panicking() {
+    // `lazydap watch list --format jsonl | head -1` used to exit 101 with a
+    // `Broken pipe` panic across stderr. The reader closing is how `head`
+    // works, not a failure.
+    let sandbox = Sandbox::new("pipe");
+    for expression in ["a", "b", "c"] {
+        sandbox.run_in_project(&["watch", "add", expression]);
+    }
+
+    // `| true` closes the read end before lazydap writes, which a race with
+    // `head` would not guarantee. The exit code travels out on stderr because
+    // `$PIPESTATUS` is not POSIX `sh`.
+    let script = format!(
+        "{{ {} watch list --format jsonl; echo \"rc=$?\" >&2; }} | true",
+        LAZYDAP,
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .current_dir(sandbox.project())
+        .env("LAZYDAP_INSTANCE", &sandbox.instance)
+        .env("LAZYDAP_RUNTIME_DIR", sandbox.root.join("r"))
+        .env("LAZYDAP_DATA_DIR", sandbox.root.join("d"))
+        .output()
+        .expect("run the pipeline");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("rc=0"), "got: {stderr}");
+    assert!(!stderr.contains("panicked"), "got: {stderr}");
+}
+
+#[test]
+fn every_usage_error_is_labelled_the_same_way() {
+    // `--format ids` on a result that is not a list said `BadRequest` while
+    // every other usage mistake said `UsageError`, so a script had to know
+    // both.
+    let sandbox = Sandbox::new("lbl");
+
+    let output = sandbox.run(&["version", "--format", "ids"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr");
+    assert_eq!(error["error"], "UsageError");
+    assert!(
+        !error["message"]
+            .as_str()
+            .expect("a message")
+            .contains("BadRequest"),
+        "the label names the mistake once: {error}",
+    );
+}
+
+#[test]
+fn an_explicit_table_format_is_honoured_even_when_stdout_is_a_pipe() {
+    // The guess exists for callers who said nothing. `--format table` is a
+    // person saying they want prose, and piping it into `less` or `cat` does
+    // not change their mind.
+    let sandbox = Sandbox::new("tbl");
+
+    let human = sandbox.run(&["--format", "table", "nosuch"]);
+    assert_eq!(human.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stderr).is_err(),
+        "clap's own text, not JSON: {stderr}",
+    );
+
+    // And with nothing said, a pipe still means JSON.
+    let machine = sandbox.run(&["nosuch"]);
+    let stderr = String::from_utf8_lossy(&machine.stderr);
+    let error: serde_json::Value =
+        serde_json::from_str(&stderr).unwrap_or_else(|error| unreachable!("{error}: {stderr}"));
+    assert_eq!(error["error"], "UsageError");
+}
+
+#[test]
+fn a_timeout_variable_nothing_can_read_is_reported_rather_than_ignored() {
+    // Silently falling back to 30 seconds leaves somebody who exported
+    // `LAZYDAP_TIMEOUT=5m` believing every wait in that shell is bounded by
+    // five minutes.
+    let sandbox = Sandbox::new("tmo");
+
+    let output =
+        sandbox.run_in_project_with_env(&[("LAZYDAP_TIMEOUT", "5m")], &["continue", "--wait"]);
+    assert_eq!(output.status.code(), Some(2), "usage errors exit 2");
+    assert!(
+        sandbox.daemon_files().is_empty(),
+        "and it is refused before a daemon is started: {:?}",
+        sandbox.daemon_files(),
+    );
+}
+
+#[test]
+fn doctor_does_not_fail_just_because_one_adapter_is_missing() {
+    // `ok` means lazydap can debug something here, not that this machine has
+    // every adapter lazydap ships (D-WP5-1). Exit 1 on a healthy install is
+    // the last line of the README, of install.sh and of the Homebrew formula.
+    let sandbox = Sandbox::new("doca");
+    let bin = sandbox.root.join("bin");
+    std::fs::create_dir_all(&bin).expect("create the fake bin directory");
+    let codelldb = bin.join("codelldb");
+    std::fs::write(&codelldb, "#!/bin/sh\n").expect("write the fake adapter");
+    std::fs::set_permissions(&codelldb, std::fs::Permissions::from_mode(0o755))
+        .expect("make it executable");
+
+    let path = bin.to_string_lossy().into_owned();
+    let output = sandbox
+        .run_in_project_with_env(&[("PATH", path.as_str())], &["--format", "json", "doctor"]);
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report is on stdout");
+    let checks = report["checks"].as_array().expect("checks");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "adapter.delve" && check["ok"] == false),
+        "delve is not on this PATH: {report}",
+    );
+    assert_eq!(
+        report["ok"], true,
+        "and codelldb is, which is enough to debug something: {report}",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn doctor_check_state_reads_the_file_without_a_daemon() {
+    // The state file a daemon refuses to start on is exactly the file this
+    // check exists for, so it must not need one.
+    let sandbox = Sandbox::new("docs");
+    sandbox.write_in_project(".lazydap/state.toml", "[[breakpoints]\nfile = \"x.c\"\n");
+
+    let output = sandbox.run_in_project(&["--format", "json", "doctor", "--check-state"]);
+
+    assert_eq!(output.status.code(), Some(1), "a broken file fails");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report is still on stdout");
+    let state = report["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"] == "state.file")
+        .expect("doctor must say something about the state file");
+    assert_eq!(state["ok"], false);
+    let detail = state["detail"].as_str().expect("a detail");
+    assert!(detail.contains("line 1"), "with the line in it: {detail}");
+
+    assert!(
+        sandbox.daemon_files().is_empty(),
+        "and no daemon was started to answer it: {:?}",
+        sandbox.daemon_files(),
+    );
+}
+
+#[test]
+fn a_broken_launch_json_does_not_hide_the_projects_own_configurations() {
+    // `.vscode/launch.json` belongs to VS Code. A stray comma in it must not
+    // take away the configurations in `.lazydap/state.toml`, which is where
+    // `launches run` finds lazydap's own.
+    let sandbox = Sandbox::new("ljson");
+    sandbox.write_in_project(
+        ".lazydap/state.toml",
+        "[[launch_configs]]\nname = \"mine\"\nprogram = \"./app\"\n",
+    );
+    sandbox.write_in_project(".vscode/launch.json", "{ \"configurations\": [ oops ] }");
+
+    let listed = sandbox.json_in_project(&["--format", "json", "launches", "list"]);
+
+    let names: Vec<&str> = listed["configs"]
+        .as_array()
+        .expect("configs")
+        .iter()
+        .map(|config| config["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["mine"], "got: {listed}");
+
+    let warnings = listed["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|w| w.contains("launch.json"))),
+        "and the file that could not be read is named: {listed}",
     );
 }

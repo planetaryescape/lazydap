@@ -33,6 +33,10 @@ format, and stdout stays empty:
 Branch on `error`. The `message` is for a human and may be reworded; the name
 is the contract.
 
+The `error` name and the exit code are consistent with each other: every
+`UsageError` exits `2` and every `DaemonUnreachable` exits `3`, whether the
+mistake was caught by the argument parser or by lazydap itself.
+
 ## The errors you will actually hit
 
 | `error` | Means | Do this |
@@ -49,6 +53,8 @@ is the contract.
 | `InvalidLaunchConfig` | The program or working directory could not be resolved. | Check the path exists and is executable. |
 | `Unsupported` | This build does not implement that. | Do not retry. |
 | `VersionMismatch` | A daemon from a different build is running. | `lazydap shutdown`, then retry. |
+| `UsageError` | The command line was wrong — a flag that does not exist, two that contradict, a `--format` this command cannot print, a `LAZYDAP_TIMEOUT` that is not a number. Always exit `2`. | Fix the arguments; check [`commands.md`](commands.md). Do not retry unchanged. |
+| `DaemonUnreachable` | No daemon could be started or contacted. Also covers the directories lazydap keeps its socket, lock, pid and log in — a socket path over the length limit, a runtime directory owned by somebody else. Always exit `3`. | Retry once. If it repeats, `message` names the directory or the socket. |
 
 ## Failures that are not errors
 

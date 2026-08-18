@@ -150,15 +150,20 @@ Then check the pieces are where lazydap expects:
 $ lazydap doctor --format json
 {
   "checks": [
+    { "detail": "none; create /Users/you/.config/lazydap/config.toml to add one", "name": "config.file", "ok": true },
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
+    { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
+    { "detail": "no delve binary found on PATH — install it with `go install github.com/go-delve/delve/cmd/dlv@latest`", "name": "adapter.delve", "ok": false },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (0 breakpoints)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v5", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 43293, protocol v8", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
 ```
 
-`doctor` starts the daemon if one isn't running, which is also true of every other command — there is nothing to start by hand.
+`ok` means lazydap can debug something here — not that this machine has every adapter lazydap ships. The missing delve above is reported and costs you nothing until you want to debug Go; what has to be sound is the config file, the state file, the daemon, and at least one adapter.
+
+`doctor` starts the daemon if one isn't running, which is also true of every other command — there is nothing to start by hand. The exception is `doctor --check-state`, which reads `.lazydap/state.toml` itself and starts nothing — so it can name the broken line in a state file that a daemon refuses to start on.
 
 ## Quickstart
 

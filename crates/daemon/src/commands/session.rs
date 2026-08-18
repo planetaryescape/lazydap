@@ -59,18 +59,21 @@ pub async fn launch(
     // directory is wherever it was started, and "./hello" would mean something
     // different there. Failing now also beats failing after spawning an
     // adapter.
-    let program = cwd
-        .join(&options.program)
-        .canonicalize()
-        .map_err(|source| {
-            CliError::from(
-                IpcError::new(
-                    ErrorCode::InvalidLaunchConfig,
-                    format!("cannot debug {}: {source}", options.program.display()),
-                )
-                .with_details(serde_json::json!({ "program": options.program })),
+    //
+    // Against *this shell's* directory, not `--cwd`: `./app` in a command line
+    // means the `./app` the person typing it can see, and `--cwd` says where
+    // the debuggee should run, not where its binary lives. Resolving against
+    // `--cwd` made `lazydap launch ./app --cwd sub` fail for a program plainly
+    // there — or, worse, silently debug `sub/app` instead.
+    let program = options.program.canonicalize().map_err(|source| {
+        CliError::from(
+            IpcError::new(
+                ErrorCode::InvalidLaunchConfig,
+                format!("cannot debug {}: {source}", options.program.display()),
             )
-        })?;
+            .with_details(serde_json::json!({ "program": options.program })),
+        )
+    })?;
 
     // `--adapter` if the caller named one, otherwise whatever the program's
     // extension says, otherwise the default. Detection is deliberately weak —
@@ -315,9 +318,11 @@ pub async fn step(
     wait: &WaitArgs,
     format: OutputFormat,
 ) -> Result<()> {
+    // Read before a daemon is started: a `--timeout` this process cannot make
+    // sense of is a command that was never going to run.
+    let wait = wait_mode(wait, &instance.config)?;
     let mut client = ensure_daemon_running(instance).await?;
     let session_id = active_session_id(&mut client).await?;
-    let wait = wait_mode(wait, &instance.config);
 
     let request = match movement {
         Movement::Continue { all_threads } => Request::Continue {

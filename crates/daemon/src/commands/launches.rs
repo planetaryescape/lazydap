@@ -16,7 +16,7 @@ use crate::commands::session::{self, LaunchOptions};
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
 use crate::output::{OutputFormat, Row, View};
-use lazydap_config::launch_json;
+use lazydap_config::{LaunchJsonError, launch_json};
 use lazydap_core::LaunchConfig;
 use lazydap_protocol::{ErrorCode, IpcError};
 use lazydap_store::ProjectStore;
@@ -152,7 +152,7 @@ fn collect(root: &Path) -> Result<Catalogue> {
     let store = ProjectStore::load(root).map_err(CliError::general)?;
     let (configs, mut warnings) = store.launch_configs();
 
-    let imported = launch_json::import(root)?;
+    let imported = read_launch_json(root, &mut warnings)?;
     warnings.extend(imported.warnings);
 
     let mut catalogue = Catalogue { configs, warnings };
@@ -173,6 +173,26 @@ fn collect(root: &Path) -> Result<Catalogue> {
         catalogue.configs.push(config);
     }
     Ok(catalogue)
+}
+
+/// `.vscode/launch.json`, or a warning and nothing.
+///
+/// A file lazydap cannot read at all is a warning rather than a failure, for
+/// the same reason one unreadable configuration inside it is (see
+/// [`launch_json::Imported`]): the file belongs to VS Code, and a stray comma
+/// in it must not take away the configurations in `.lazydap/state.toml` —
+/// which is where `launches run <name>` finds lazydap's own. A read error
+/// stays fatal: that is a permission or an I/O problem, not a typo, and
+/// pretending the file is absent would hide it.
+fn read_launch_json(root: &Path, warnings: &mut Vec<String>) -> Result<launch_json::Imported> {
+    match launch_json::import(root) {
+        Ok(imported) => Ok(imported),
+        Err(error @ (LaunchJsonError::Malformed { .. } | LaunchJsonError::Parse { .. })) => {
+            warnings.push(format!("{error}; its configurations are not listed"));
+            Ok(launch_json::Imported::default())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The error for a name that is not there, listing the ones that are.

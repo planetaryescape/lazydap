@@ -358,5 +358,13 @@ Reading it does not consume it.
                 "detail": "/Users/you/.local/bin/codelldb" } ] }
 ```
 
-`doctor` exits `1` when any check fails, so you can branch on the exit code
-rather than reading `ok`.
+`ok` — and the exit code, which is `1` when it is `false` — means **lazydap can
+debug something here**, not that this machine has every adapter lazydap ships.
+Every check that is about lazydap itself has to pass (`config.file`,
+`state.file`, `daemon`), and at least one `adapter.*` check has to pass. A
+missing adapter is reported with `"ok": false` and a `detail` saying how to
+install it, and does not fail the run on its own; losing the last one does.
+
+`doctor --check-state` reads `.lazydap/state.toml` in this process and starts
+no daemon, so it can name the line in a state file that stops one from
+starting.

@@ -22,6 +22,15 @@ pub struct CliError {
     pub exit_code: u8,
     #[source]
     pub source: anyhow::Error,
+    /// Free-form context for the stderr JSON. Carried rather than recovered
+    /// from `source`, because not every failure worth describing is an
+    /// [`IpcError`] — a usage error is not one, and used to have to pretend.
+    pub details: serde_json::Value,
+}
+
+/// `{}` — what a failure with nothing more to say carries.
+fn no_details() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 impl CliError {
@@ -31,6 +40,7 @@ impl CliError {
             label: "DaemonUnreachable",
             exit_code: exit::DAEMON_UNREACHABLE,
             source: source.into(),
+            details: no_details(),
         }
     }
 
@@ -40,6 +50,7 @@ impl CliError {
             label: "DaemonInternalError",
             exit_code: exit::GENERAL,
             source: source.into(),
+            details: no_details(),
         }
     }
 
@@ -47,10 +58,21 @@ impl CliError {
     /// rejects, so a script cannot tell "you cannot combine those flags" from
     /// "there is no such flag" — and does not need to.
     pub fn usage(message: impl Into<String>) -> Self {
+        Self::usage_with_details(message, no_details())
+    }
+
+    /// A usage error that can say which argument it means.
+    ///
+    /// The message is carried as plain text rather than as an [`IpcError`]:
+    /// that type's `Display` prefixes the code, which printed
+    /// `"message": "BadRequest: ..."` under `"error": "UsageError"` — two
+    /// names for one mistake, and neither one the label a script branches on.
+    pub fn usage_with_details(message: impl Into<String>, details: serde_json::Value) -> Self {
         Self {
             label: "UsageError",
             exit_code: exit::USAGE,
-            source: IpcError::new(ErrorCode::BadRequest, message).into(),
+            source: anyhow::Error::msg(message.into()),
+            details,
         }
     }
 
@@ -72,25 +94,20 @@ impl CliError {
         serde_json::json!({
             "error": self.label,
             "message": format!("{:#}", self.source),
-            "details": self.details(),
+            "details": self.details,
         })
-    }
-
-    fn details(&self) -> serde_json::Value {
-        self.source
-            .downcast_ref::<IpcError>()
-            .map(|error| error.details.clone())
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
     }
 }
 
 impl From<IpcError> for CliError {
     fn from(error: IpcError) -> Self {
         let (label, exit_code) = classify(error.code);
+        let details = error.details.clone();
         Self {
             label,
             exit_code,
             source: error.into(),
+            details,
         }
     }
 }
@@ -139,13 +156,18 @@ impl From<lazydap_config::LaunchJsonError> for CliError {
     }
 }
 
+/// Every one of these is about a directory *lazydap* keeps its own files in —
+/// the runtime directory holding the socket and the lock, or the data
+/// directory holding the pid and the log. None of them is about the project
+/// root, which is detected by walking up and never fails.
+///
+/// So they all mean the same thing to a caller: there is no daemon to talk to
+/// and none can be started. Labelling them `InvalidProjectRoot` under exit 1
+/// sent people to inspect a directory that was fine, and hid a retryable
+/// failure inside the code for "the debugger said no".
 impl From<lazydap_config::PathsError> for CliError {
     fn from(source: lazydap_config::PathsError) -> Self {
-        Self {
-            label: "InvalidProjectRoot",
-            exit_code: exit::GENERAL,
-            source: source.into(),
-        }
+        Self::unreachable(source)
     }
 }
 
@@ -232,6 +254,42 @@ mod tests {
     fn only_a_version_mismatch_carries_a_peer_version() {
         let error: CliError = IpcError::new(ErrorCode::SessionNotFound, "no session").into();
         assert_eq!(error.peer_protocol_version(), None);
+    }
+
+    #[test]
+    fn a_usage_error_names_the_mistake_once() {
+        // It used to be `"error": "UsageError"` over
+        // `"message": "BadRequest: ..."` — two names for one mistake, and the
+        // one in the message is not the one a script branches on.
+        let error = CliError::usage("`--env FOO` is not a KEY=VALUE pair");
+
+        let json = error.as_json();
+        assert_eq!(json["error"], "UsageError");
+        assert_eq!(json["message"], "`--env FOO` is not a KEY=VALUE pair");
+        assert_eq!(error.exit_code, exit::USAGE);
+    }
+
+    #[test]
+    fn a_usage_error_can_still_say_which_argument_it_means() {
+        let error =
+            CliError::usage_with_details("bad format", serde_json::json!({ "format": "ids" }));
+        assert_eq!(error.as_json()["details"]["format"], "ids");
+    }
+
+    #[test]
+    fn a_directory_lazydap_cannot_use_is_an_unreachable_daemon_not_a_bad_project() {
+        // Every `PathsError` is about the runtime or data directory lazydap
+        // keeps its socket, lock, pid and log in. Calling them
+        // `InvalidProjectRoot` sent people to inspect a directory that was
+        // fine, under exit 1, which tells a script not to retry.
+        let error: CliError = lazydap_config::PathsError::SocketPathTooLong {
+            len: 120,
+            path: std::path::PathBuf::from("/very/long/socket.sock"),
+        }
+        .into();
+
+        assert_eq!(error.exit_code, exit::DAEMON_UNREACHABLE);
+        assert_eq!(error.as_json()["error"], "DaemonUnreachable");
     }
 
     #[test]

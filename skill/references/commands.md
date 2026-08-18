@@ -30,7 +30,7 @@ Usage: lazydap launch [OPTIONS] <PROGRAM> [-- <ARGS>...]
 |---|---|---|---|
 | `<PROGRAM>` | yes | - | The program to debug |
 | `--stop-on-entry` | no | `false` | Stop at the program's entry point instead of running to the first breakpoint |
-| `--cwd <CWD>` | no | - | Working directory for the debuggee. Defaults to the current one |
+| `--cwd <CWD>` | no | - | Working directory for the debuggee. Defaults to the current one. It does not affect how the program path is resolved — that is always relative to your shell |
 | `--env <KEY=VALUE>` | no | - | Environment for the debuggee, as KEY=VALUE. Repeatable |
 | `--adapter <ADAPTER>` | no | - | Which debug adapter to use: codelldb, debugpy or delve. Defaults to the one the program's file extension implies — debugpy for `.py`, delve for `.go`, codelldb otherwise |
 | `<ARGS>` | no | - | Arguments for the debuggee, after a `--` separator. They are kept separate so a debuggee flag can never be mistaken for a lazydap one |
@@ -346,7 +346,7 @@ Usage: lazydap logs [OPTIONS]
 |---|---|---|---|
 | `--limit <LIMIT>` | no | `200` | Show at most this many lines, from the end |
 | `--level <LEVEL>` | no | - | Only lines at this level or louder |
-| `--follow` | no | `false` | Keep printing as the daemon writes more |
+| `--follow` | no | `false` | Keep printing as the daemon writes more. Only `--format table` or `--format jsonl`; a stream has no end for the other formats to close a document at |
 | `--purge` | no | `false` | Delete the log file instead of printing it |
 
 ### `lazydap doctor`

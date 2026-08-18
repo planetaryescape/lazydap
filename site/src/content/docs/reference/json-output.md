@@ -260,6 +260,10 @@ non-zero when the buffer overflowed.
 }
 ```
 
+`ok` means lazydap can debug something here: every check that is about lazydap itself passed
+and at least one `adapter.*` check did. A missing adapter has its own `"ok": false` and does
+not make the run fail on its own.
+
 ```json
 { "lazydap": "0.1.0", "protocol": 6 }
 ```

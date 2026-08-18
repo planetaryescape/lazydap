@@ -462,10 +462,21 @@ fn expand(raw: &str, root: &Path, unresolved: &mut Vec<String>) -> String {
     while let Some(start) = rest.find("${") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        // A `${` with no `}` after it is not a variable, it is a string with
-        // a brace in it. Leave the remainder alone.
+        // A `${` with no `}` after it is either a variable somebody mistyped
+        // — `${workspaceFolder/app` — or a string that happens to contain a
+        // brace, like `cost ${100`. Every variable VS Code defines starts with
+        // a letter, so that is where the line goes: recorded as unresolved
+        // when it reads as a name, left alone when it does not. Either way the
+        // text passes through exactly as written, because deleting the part
+        // nobody understood is how you debug the wrong binary. Before this it
+        // was always the second reading, and `launches list` called
+        // `${workspaceFolder/app` runnable right up until the launch failed.
         let Some(end) = after.find('}') else {
-            out.push_str(&rest[start..]);
+            let tail = rest[start..].to_string();
+            if after.starts_with(|c: char| c.is_ascii_alphabetic()) && !unresolved.contains(&tail) {
+                unresolved.push(tail.clone());
+            }
+            out.push_str(&tail);
             return out;
         };
 
@@ -1305,6 +1316,19 @@ mod tests {
             "cost ${100",
         );
         assert!(unresolved.is_empty());
+    }
+
+    #[test]
+    fn an_unterminated_variable_is_recorded_rather_than_passed_off_as_runnable() {
+        // `${workspaceFolder/app` is a typo, and it used to be listed as a
+        // runnable configuration whose program had a `${` in the middle of it.
+        let mut unresolved = Vec::new();
+        assert_eq!(
+            expand("${workspaceFolder/app", Path::new(ROOT), &mut unresolved),
+            "${workspaceFolder/app",
+            "the text is still left exactly as written",
+        );
+        assert_eq!(unresolved, vec!["${workspaceFolder/app"]);
     }
 
     #[test]

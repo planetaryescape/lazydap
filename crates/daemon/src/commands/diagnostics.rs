@@ -10,8 +10,9 @@ use crate::auto_spawn::ensure_daemon_running;
 use crate::cli::Cli;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use crate::output::{OutputFormat, Row, View};
+use crate::output::{OutputFormat, Row, View, Wrote, print_line};
 use clap::CommandFactory;
+use lazydap_core::AdapterKind;
 use lazydap_protocol::{DoctorCheck, DoctorReport, LAZYDAP_PROTOCOL_VERSION, Request, Response};
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
@@ -19,6 +20,9 @@ use std::time::Duration;
 
 /// How often to look for new log lines while following.
 const FOLLOW_INTERVAL: Duration = Duration::from_millis(200);
+
+/// The prefix every per-adapter `doctor` check's name carries.
+const ADAPTER_CHECK_PREFIX: &str = "adapter.";
 
 pub fn version(format: OutputFormat) -> Result<()> {
     let lazydap = env!("CARGO_PKG_VERSION");
@@ -47,44 +51,188 @@ pub async fn doctor(
     check_state: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    // No flags means every check. Naming one narrows it, which is the only
-    // reading of `--check-adapters` that is any use.
-    let (check_adapters, check_state) = match (check_adapters, check_state) {
-        (false, false) => (true, true),
-        chosen => chosen,
+    // No flags means every check, and only then is the daemon part of the
+    // answer. Naming one narrows it to something this process can answer on
+    // its own — which is the point of `--check-state`: the state file a daemon
+    // refuses to start on is exactly the file you need this command to read.
+    let everything = !check_adapters && !check_state;
+
+    let mut checks = vec![config_check(instance)];
+    if everything || check_adapters {
+        checks.extend(adapter_checks(instance));
+    }
+    if everything || check_state {
+        checks.push(state_check(instance));
+    }
+    if everything {
+        checks.push(daemon_check(instance).await);
+    }
+
+    let report = DoctorReport {
+        ok: verdict(&checks),
+        checks,
     };
 
-    let mut client = ensure_daemon_running(instance).await?;
-    let response = client
-        .request(Request::Doctor {
-            check_adapters,
-            check_state,
-        })
-        .await?;
-    let Response::Doctor(mut report) = response else {
-        return Err(unexpected(response));
-    };
-
-    // Added here rather than in the daemon because the config is the client's
-    // to read (D050): the daemon's environment is not the caller's, so a
-    // daemon-side check would report on a different file than the one this
-    // shell is using — or on none at all.
-    report.checks.insert(0, config_check(instance));
-    report.ok = report.checks.iter().all(|check| check.ok);
-
-    let view = view(&report);
-    view.print(format)?;
+    let mut rendered = view(&report);
+    if let Some(note) = note(&report) {
+        rendered = rendered.with_note(note);
+    }
+    rendered.print(format)?;
 
     // Everything goes to stdout (D025), including the verdict — but a failed
     // check is a failed command, so a script can branch on the exit code
     // rather than parsing the report.
     if !report.ok {
         return Err(CliError::general(anyhow::anyhow!(
-            "{} check(s) failed",
-            report.checks.iter().filter(|check| !check.ok).count(),
+            "{}",
+            failure_reason(&report.checks),
         )));
     }
     Ok(())
+}
+
+/// Whether `lazydap doctor` passes (D-WP5-1).
+///
+/// `ok` means "lazydap can debug something here", not "this machine has every
+/// adapter lazydap ships". The adapters are a menu of languages, and a Mac
+/// with codelldb and no Go toolchain is a perfectly working install — but
+/// `doctor` exited 1 there, which is the last line of the README, of
+/// `install.sh` and of the Homebrew formula. Every other check still has to
+/// pass, and losing the last adapter still fails: nothing can be debugged
+/// then.
+fn verdict(checks: &[DoctorCheck]) -> bool {
+    let (adapters, rest): (Vec<&DoctorCheck>, Vec<&DoctorCheck>) =
+        checks.iter().partition(|check| is_adapter(&check.name));
+
+    rest.iter().all(|check| check.ok)
+        && (adapters.is_empty() || adapters.iter().any(|check| check.ok))
+}
+
+fn is_adapter(name: &str) -> bool {
+    name.starts_with(ADAPTER_CHECK_PREFIX)
+}
+
+/// Why the run failed, in the one line that goes to stderr.
+///
+/// "0 check(s) failed" is what counting the failed checks says when the only
+/// thing wrong is that every adapter is missing — which is the one adapter
+/// failure that does fail the run.
+fn failure_reason(checks: &[DoctorCheck]) -> String {
+    match checks
+        .iter()
+        .filter(|check| !check.ok && !is_adapter(&check.name))
+        .count()
+    {
+        0 => "no usable debug adapter; install one of the ones listed above".to_string(),
+        failed => format!("{failed} check(s) failed"),
+    }
+}
+
+/// One check per adapter lazydap ships, whether or not this machine has it.
+///
+/// Resolved against *this* process's config and `PATH` (D050), which is what a
+/// launch from this shell would use. Asking the daemon would answer for the
+/// environment it was started in, days ago, from another directory.
+fn adapter_checks(instance: &Instance) -> Vec<DoctorCheck> {
+    AdapterKind::ALL
+        .iter()
+        .map(|&kind| {
+            let name = format!("{ADAPTER_CHECK_PREFIX}{kind}");
+            match crate::adapter::resolve_with(kind, &instance.config, None) {
+                Ok(path) => DoctorCheck {
+                    name,
+                    ok: true,
+                    detail: path.display().to_string(),
+                },
+                Err(error) => DoctorCheck {
+                    name,
+                    ok: false,
+                    detail: format!("{error} — {}", install_hint(kind)),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Where to get an adapter this machine does not have.
+///
+/// Here rather than on `AdapterError`: it is advice for somebody reading
+/// `doctor`, and a launch that fails for a missing adapter is not the moment
+/// to be told how to install one.
+fn install_hint(kind: AdapterKind) -> &'static str {
+    match kind {
+        AdapterKind::Codelldb => "install it from https://github.com/vadimcn/codelldb/releases",
+        AdapterKind::Debugpy => "install it with `python3 -m pip install debugpy`",
+        AdapterKind::Delve => {
+            "install it with `go install github.com/go-delve/delve/cmd/dlv@latest`"
+        }
+    }
+}
+
+/// What `lazydap doctor` says about `.lazydap/state.toml`.
+///
+/// Read here rather than asked of the daemon. A state file the daemon refuses
+/// to start on is precisely the case this check exists for, and routing it
+/// through the daemon meant the one command that can name the broken line
+/// could not run until somebody had already found it.
+fn state_check(instance: &Instance) -> DoctorCheck {
+    let name = "state.file".to_string();
+    match lazydap_store::ProjectStore::load(&instance.project_root) {
+        Ok(store) => DoctorCheck {
+            name,
+            ok: true,
+            // A state file that does not exist yet is fine — most projects
+            // never have one. What is worth reporting is where it would go.
+            detail: format!(
+                "{} ({})",
+                store.path().display(),
+                if store.path().exists() {
+                    format!("{} breakpoints", store.breakpoints().len())
+                } else {
+                    "not created yet".to_string()
+                },
+            ),
+        },
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            detail: one_line(&error.to_string()),
+        },
+    }
+}
+
+/// What the daemon says about itself, or why it could not be asked.
+///
+/// A daemon that will not start is a report line, not an aborted command:
+/// `doctor` is what you run to find out why, and the checks above have usually
+/// already named the reason.
+async fn daemon_check(instance: &Instance) -> DoctorCheck {
+    let name = "daemon".to_string();
+    let failed = |detail: String| DoctorCheck {
+        name: name.clone(),
+        ok: false,
+        detail: one_line(&detail),
+    };
+
+    let mut client = match ensure_daemon_running(instance).await {
+        Ok(client) => client,
+        Err(error) => return failed(format!("{:#}", error.source)),
+    };
+    // Both checks are answered above, in the process whose config and `PATH`
+    // the answers are about; what is left is the daemon describing itself.
+    let request = Request::Doctor {
+        check_adapters: false,
+        check_state: false,
+    };
+    match client.request(request).await {
+        Ok(Response::Doctor(report)) => report
+            .checks
+            .into_iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| failed("the daemon reported nothing about itself".to_string())),
+        Ok(other) => failed(unexpected(other).to_string()),
+        Err(error) => failed(format!("{:#}", error.source)),
+    }
 }
 
 /// What `lazydap doctor` says about the user's config file.
@@ -100,10 +248,7 @@ fn config_check(instance: &Instance) -> DoctorCheck {
         return DoctorCheck {
             name,
             ok: false,
-            // Flattened: a TOML error is several lines with a caret diagram in
-            // it, and a multi-line cell tears the table apart. The JSON keeps
-            // whatever it says; the table keeps its columns.
-            detail: problem.split_whitespace().collect::<Vec<_>>().join(" "),
+            detail: one_line(problem),
         };
     }
 
@@ -119,6 +264,46 @@ fn config_check(instance: &Instance) -> DoctorCheck {
     }
 }
 
+/// One line, so a multi-line parser error does not tear the table apart.
+///
+/// A TOML or JSON error is several lines with a caret diagram in it. The line
+/// and column survive the flattening, which is the part worth having.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The line under the table: which adapters this machine does not have.
+///
+/// The table only. The JSON carries every check with its own `ok`, and a
+/// second prose copy is one more thing to keep in step.
+fn note(report: &DoctorReport) -> Option<String> {
+    let missing: Vec<&str> = report
+        .checks
+        .iter()
+        .filter(|check| !check.ok && is_adapter(&check.name))
+        .map(|check| &check.name[ADAPTER_CHECK_PREFIX.len()..])
+        .collect();
+
+    (!missing.is_empty()).then(|| {
+        format!(
+            "not installed: {}. lazydap does not need them all — each one adds the \
+             languages it debugs.",
+            missing.join(", "),
+        )
+    })
+}
+
+/// A missing adapter says lazydap cannot debug that language here, not that
+/// lazydap is broken — and the verdict agrees, so the column must not say
+/// FAILED next to an overall `ok`.
+fn status(check: &DoctorCheck) -> &'static str {
+    match (check.ok, is_adapter(&check.name)) {
+        (true, _) => "ok",
+        (false, true) => "missing",
+        (false, false) => "FAILED",
+    }
+}
+
 fn view(report: &DoctorReport) -> View {
     let rows = report
         .checks
@@ -128,7 +313,7 @@ fn view(report: &DoctorReport) -> View {
                 check.name.clone(),
                 vec![
                     check.name.clone(),
-                    if check.ok { "ok" } else { "FAILED" }.to_string(),
+                    status(check).to_string(),
                     check.detail.clone(),
                 ],
                 check,
@@ -190,6 +375,164 @@ mod config_check_tests {
     }
 }
 
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    fn check(name: &str, ok: bool) -> DoctorCheck {
+        DoctorCheck {
+            name: name.to_string(),
+            ok,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn one_missing_adapter_does_not_fail_the_verdict() {
+        // D-WP5-1. A Mac with codelldb and no Go toolchain is a working
+        // lazydap, and `doctor` is the last line of the README, of install.sh
+        // and of the Homebrew formula.
+        assert!(verdict(&[
+            check("config.file", true),
+            check("adapter.codelldb", true),
+            check("adapter.delve", false),
+            check("daemon", true),
+        ]));
+    }
+
+    #[test]
+    fn losing_the_last_adapter_does_fail_it() {
+        assert!(!verdict(&[
+            check("config.file", true),
+            check("adapter.codelldb", false),
+            check("adapter.delve", false),
+        ]));
+    }
+
+    #[test]
+    fn anything_that_is_not_an_adapter_still_has_to_pass() {
+        assert!(!verdict(&[
+            check("config.file", false),
+            check("adapter.codelldb", true),
+        ]));
+        assert!(!verdict(&[
+            check("state.file", false),
+            check("adapter.codelldb", true),
+        ]));
+    }
+
+    #[test]
+    fn a_run_with_no_adapter_checks_at_all_is_judged_on_the_rest() {
+        // `--check-state` asks about one file and nothing else.
+        assert!(verdict(&[
+            check("config.file", true),
+            check("state.file", true)
+        ]));
+    }
+
+    #[test]
+    fn losing_every_adapter_says_so_rather_than_counting_to_zero() {
+        // The failed checks are all adapters, and adapters are not what the
+        // count is about — so counting them gives "0 check(s) failed".
+        let reason =
+            failure_reason(&[check("config.file", true), check("adapter.codelldb", false)]);
+        assert!(reason.contains("no usable debug adapter"), "got: {reason}");
+
+        let reason = failure_reason(&[
+            check("config.file", false),
+            check("adapter.codelldb", false),
+        ]);
+        assert_eq!(reason, "1 check(s) failed");
+    }
+
+    #[test]
+    fn a_missing_adapter_is_not_printed_as_a_failure() {
+        // The column has to agree with the verdict, or the table says FAILED
+        // under `ok: true`.
+        assert_eq!(status(&check("adapter.delve", false)), "missing");
+        assert_eq!(status(&check("adapter.delve", true)), "ok");
+        assert_eq!(status(&check("config.file", false)), "FAILED");
+    }
+
+    #[test]
+    fn the_note_names_the_adapters_this_machine_does_not_have() {
+        let report = DoctorReport {
+            ok: true,
+            checks: vec![
+                check("adapter.codelldb", true),
+                check("adapter.debugpy", false),
+                check("adapter.delve", false),
+            ],
+        };
+        let note = note(&report).expect("a note");
+        assert!(note.contains("debugpy, delve"), "got: {note}");
+        assert!(!note.contains("codelldb"), "got: {note}");
+    }
+
+    #[test]
+    fn a_machine_with_every_adapter_gets_no_note() {
+        let report = DoctorReport {
+            ok: true,
+            checks: vec![check("adapter.codelldb", true)],
+        };
+        assert_eq!(note(&report), None);
+    }
+
+    #[test]
+    fn a_parser_error_is_flattened_onto_one_line_keeping_the_position() {
+        let flattened = one_line(
+            "TOML parse error at line 2, column 1\n  |\n2 | [[breakpoints\n  | ^\ninvalid table header",
+        );
+        assert!(!flattened.contains('\n'), "got: {flattened}");
+        assert!(flattened.contains("line 2, column 1"), "got: {flattened}");
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_can_only_be_followed_in_a_format_that_has_no_end() {
+        assert_eq!(
+            FollowFormat::of(OutputFormat::Table).expect("plain"),
+            FollowFormat::Plain
+        );
+        assert_eq!(
+            FollowFormat::of(OutputFormat::Jsonl).expect("jsonl"),
+            FollowFormat::Jsonl
+        );
+
+        for format in [OutputFormat::Json, OutputFormat::Csv, OutputFormat::Ids] {
+            let error = match FollowFormat::of(format) {
+                Err(error) => error,
+                Ok(follow) => unreachable!("{format:?} cannot carry a stream, got: {follow:?}"),
+            };
+            assert_eq!(error.exit_code, crate::error::exit::USAGE);
+            assert_eq!(error.as_json()["details"]["format"], format.as_str());
+        }
+    }
+
+    #[test]
+    fn a_followed_line_is_the_same_object_the_log_itself_prints() {
+        // So `lazydap logs --format jsonl` and `lazydap logs --follow --format
+        // jsonl` are one stream, not two shapes.
+        assert_eq!(
+            FollowFormat::Jsonl.render("2026-07-30 INFO daemon.ipc: listening"),
+            r#"{"line":"2026-07-30 INFO daemon.ipc: listening"}"#,
+        );
+        assert_eq!(FollowFormat::Plain.render("a line"), "a line");
+    }
+
+    #[test]
+    fn a_quote_in_a_log_line_does_not_break_the_object_around_it() {
+        assert_eq!(
+            FollowFormat::Jsonl.render(r#"said "hi""#),
+            r#"{"line":"said \"hi\""}"#,
+        );
+    }
+}
+
 /// Print the daemon's log.
 ///
 /// Read straight off disk rather than through the daemon. The log is most
@@ -203,6 +546,11 @@ pub async fn logs(
     purge: bool,
     format: OutputFormat,
 ) -> Result<()> {
+    // Decided before anything is printed: a `--follow` in a format that cannot
+    // carry it must fail with an empty stdout, not with a document followed by
+    // lines that do not belong to it.
+    let follow = follow.then(|| FollowFormat::of(format)).transpose()?;
+
     if purge {
         let existed = instance.log.exists();
         if existed {
@@ -245,10 +593,52 @@ pub async fn logs(
 
     View::list(serde_json::json!({ "lines": selected }), &["line"], rows).print(format)?;
 
-    if follow {
-        follow_log(&instance.log, level.as_deref()).await?;
+    match follow {
+        Some(follow) => follow_log(&instance.log, level.as_deref(), follow).await,
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// How a followed log line is printed.
+///
+/// Only two formats can carry a stream. `--format json` is one object and
+/// `--format csv` is a header with rows under it; both describe a result that
+/// has finished, and a log that is still being written has not. `--format ids`
+/// has no id to print. Rather than reject those late, `logs` refuses the
+/// combination before it prints anything — it used to print the document and
+/// then append bare log lines after it, which no parser survives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowFormat {
+    /// The line as the daemon wrote it.
+    Plain,
+    /// `{"line": "..."}` — the object `lazydap logs` already prints per row,
+    /// so following a log and reading one are the same shape.
+    Jsonl,
+}
+
+impl FollowFormat {
+    fn of(format: OutputFormat) -> Result<Self> {
+        match format {
+            OutputFormat::Table => Ok(Self::Plain),
+            OutputFormat::Jsonl => Ok(Self::Jsonl),
+            other => Err(CliError::usage_with_details(
+                format!(
+                    "`--follow` cannot print `--format {}`: a log that is still being written \
+                     has no end to close a document at; use `--format jsonl` or \
+                     `--format table`",
+                    other.as_str(),
+                ),
+                serde_json::json!({ "format": other.as_str() }),
+            )),
+        }
+    }
+
+    fn render(self, line: &str) -> String {
+        match self {
+            Self::Plain => line.to_string(),
+            Self::Jsonl => serde_json::json!({ "line": line }).to_string(),
+        }
+    }
 }
 
 /// The last `limit` lines that match `level`, oldest first.
@@ -279,7 +669,7 @@ fn matches_level(line: &str, level: Option<&str>) -> bool {
 }
 
 /// Print lines as the daemon appends them, until the caller gives up.
-async fn follow_log(path: &Path, level: Option<&str>) -> Result<()> {
+async fn follow_log(path: &Path, level: Option<&str>, format: FollowFormat) -> Result<()> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(path).map_err(CliError::general)?;
@@ -296,8 +686,13 @@ async fn follow_log(path: &Path, level: Option<&str>) -> Result<()> {
             Ok(0) => tokio::time::sleep(FOLLOW_INTERVAL).await,
             Ok(_) => {
                 let line = line.trim_end();
-                if matches_level(line, level) {
-                    println!("{line}");
+                if matches_level(line, level)
+                    && print_line(&format.render(line))? == Wrote::ReaderGone
+                {
+                    // `| head -1` closes the pipe on purpose. Following a log
+                    // nobody is reading any more is the one way this loop ends
+                    // without an error.
+                    return Ok(());
                 }
             }
             Err(error) => return Err(CliError::general(error)),

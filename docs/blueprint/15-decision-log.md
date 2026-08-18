@@ -2023,3 +2023,42 @@ rather than being dropped, or a client that pipelines would hang on a reply that
 An abandoned wait commits nothing — it does not mark its events delivered — because the output
 it saw is still nobody's, and the next caller has to be able to report it.
 
+---
+
+## D-WP5-1 — `lazydap doctor` passes when lazydap can debug *something*, not when the machine has every adapter
+
+**Status:** decided (2026-08-18, defect campaign WP5).
+
+`doctor` computed its verdict as "every check passed", and one check per adapter lazydap
+ships. lazydap ships three. So a machine with codelldb, no Python and no Go toolchain — a
+perfectly working install for the language the person is actually debugging — reported
+`ok: false` and exited `1`.
+
+That exit code is not incidental. `lazydap doctor` is the last line of the README's install
+section, of `install.sh`, and of the Homebrew formula's caveats. Every one of them ended a
+successful install with a failure, which teaches the reader that lazydap's own health check is
+noise to be ignored — the most expensive thing a diagnostic can teach.
+
+**The rule.** `ok` means: every check that is about lazydap itself passed — the config file
+parses, the state file parses, the daemon answered — *and* at least one adapter is usable. A
+missing adapter is reported per adapter, with the command that installs it, and shows as
+`missing` rather than `FAILED` so the table agrees with the verdict. Losing the *last* adapter
+still fails: nothing can be debugged then, and that is a different sentence.
+
+The per-check `ok` field is unchanged and still `false` for a missing adapter, so the JSON
+loses nothing; what changed is the arithmetic on top of it. No wire shape moved, so no protocol
+bump.
+
+**Two things moved to the client while this was being fixed**, both for reasons already
+decided:
+
+- **The adapter checks**, because D050 says adapter discovery belongs in the process that
+  typed the command: the config file and `PATH` describe the machine as the caller sees it,
+  and the daemon may have been started days ago from another directory. `doctor` was reporting
+  on an environment nobody was launching from.
+- **The state-file check**, because a `state.toml` the daemon refuses to start on is exactly
+  the case that check exists for. Routing it through the daemon meant the one command that can
+  name the broken line could not run until somebody had already found it. For the same reason
+  a daemon that will not start is now a failed `daemon` check rather than an aborted command,
+  and `doctor --check-state` starts no daemon at all — naming a check narrows the run to what
+  this process can answer on its own.

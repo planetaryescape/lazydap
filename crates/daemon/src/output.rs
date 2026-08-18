@@ -11,8 +11,7 @@
 
 use crate::error::{CliError, Result};
 use clap::ValueEnum;
-use lazydap_protocol::{ErrorCode, IpcError};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 /// How to print a command's result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -141,53 +140,85 @@ impl View {
     }
 
     pub fn print(&self, format: OutputFormat) -> Result<()> {
+        match self.render(format)? {
+            // A list with nothing in it prints nothing, not a blank line:
+            // `lazydap watch list --format ids | wc -l` should say 0.
+            None => Ok(()),
+            Some(body) => print_line(&body).map(|_| ()),
+        }
+    }
+
+    /// Everything this view prints in `format`, as one document, or `None`
+    /// when it prints nothing at all.
+    ///
+    /// Rendered in full before a byte is written so that a serialisation
+    /// failure is an error rather than half a document already on the pipe.
+    fn render(&self, format: OutputFormat) -> Result<Option<String>> {
         if self.rows.is_none() && format.needs_rows() {
             return Err(not_a_list(format));
         }
-        let rows = self.rows.iter().flatten();
+        let rows = || self.rows.iter().flatten();
 
-        match format {
-            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&self.json)?),
-            OutputFormat::Table => println!("{}", self.table),
-            OutputFormat::Jsonl => {
-                for row in rows {
-                    println!("{}", serde_json::to_string(&row.json)?);
-                }
-            }
-            OutputFormat::Ids => {
-                for row in rows {
-                    println!("{}", row.id);
-                }
-            }
+        Ok(match format {
+            OutputFormat::Json => Some(serde_json::to_string_pretty(&self.json)?),
+            OutputFormat::Table => Some(self.table.clone()),
+            OutputFormat::Jsonl => document(
+                rows()
+                    .map(|row| serde_json::to_string(&row.json))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            ),
+            OutputFormat::Ids => document(rows().map(|row| row.id.clone()).collect()),
             OutputFormat::Csv => {
                 // The header line comes from the same list the table renders
                 // from, so a column added to one appears in the other.
-                println!("{}", csv_line(&self.headers));
-                for row in rows {
-                    println!("{}", csv_line(&row.cells));
-                }
+                let mut lines = vec![csv_line(&self.headers)];
+                lines.extend(rows().map(|row| csv_line(&row.cells)));
+                document(lines)
             }
-        }
-        Ok(())
+        })
     }
 }
 
+/// Lines as one document, or `None` for no lines at all — so an empty list
+/// prints nothing rather than a blank line.
+fn document(lines: Vec<String>) -> Option<String> {
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Whether the far end of stdout is still listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    Line,
+    /// The reader closed the pipe. Nothing is wrong: `| head -1` does this on
+    /// purpose, and so does quitting a pager.
+    ReaderGone,
+}
+
+/// Print one line to stdout, treating a closed reader as the end of the job.
+///
+/// Not `println!`: that panics on `EPIPE`, so `lazydap break --list --format
+/// jsonl | head -1` exited 101 with a panic message where the shell expected
+/// a clean 0. Every write lazydap makes to stdout goes through here.
+pub fn print_line(line: &str) -> Result<Wrote> {
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => Ok(Wrote::Line),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(Wrote::ReaderGone),
+        Err(error) => Err(CliError::from(error)),
+    }
+}
+
+/// Choosing a format the command cannot produce is a usage mistake, and a
+/// script should be able to tell it apart from a debugger failure.
 fn not_a_list(format: OutputFormat) -> CliError {
-    let mut error = CliError::from(
-        IpcError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "`--format {}` prints a list, and this command's result is not one; \
-                 use `--format json` or `--format table`",
-                format.as_str(),
-            ),
-        )
-        .with_details(serde_json::json!({ "format": format.as_str() })),
-    );
-    // Choosing a format the command cannot produce is a usage mistake, and a
-    // script should be able to tell it apart from a debugger failure.
-    error.exit_code = crate::error::exit::USAGE;
-    error
+    CliError::usage_with_details(
+        format!(
+            "`--format {}` prints a list, and this command's result is not one; \
+             use `--format json` or `--format table`",
+            format.as_str(),
+        ),
+        serde_json::json!({ "format": format.as_str() }),
+    )
 }
 
 /// Render `rows` as an aligned table with a header line.
@@ -340,6 +371,35 @@ mod tests {
             error.exit_code,
             crate::error::exit::USAGE,
             "asking for the impossible is a usage mistake, not a debugger failure",
+        );
+        assert_eq!(
+            error.label, "UsageError",
+            "and it is labelled like every other one: {error}",
+        );
+    }
+
+    #[test]
+    fn an_empty_list_prints_nothing_rather_than_a_blank_line() {
+        // `lazydap watch list --format ids | wc -l` should say 0.
+        let empty = View::list(serde_json::json!({ "watches": [] }), &["id"], Vec::new());
+        assert_eq!(empty.render(OutputFormat::Ids).expect("render"), None);
+        assert_eq!(empty.render(OutputFormat::Jsonl).expect("render"), None);
+    }
+
+    #[test]
+    fn a_csv_result_always_has_its_header_even_with_no_rows() {
+        let empty = View::list(serde_json::json!({}), &["id", "location"], Vec::new());
+        assert_eq!(
+            empty.render(OutputFormat::Csv).expect("render"),
+            Some("id,location".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_list_is_one_document_with_a_line_per_row() {
+        assert_eq!(
+            listing().render(OutputFormat::Ids).expect("render"),
+            Some("1\n2".to_string()),
         );
     }
 

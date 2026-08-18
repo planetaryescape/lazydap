@@ -143,9 +143,15 @@ Six checks: whether a config file was found, one per adapter, whether the projec
 file is readable, and whether a daemon is answering. `"ok": true` on all six means you can
 debug anything lazydap supports.
 
-You do not need all three adapters. An `adapter.*` check that is `false` only rules out that
-language — `"ok": false` overall, exit code 1, and everything else still works. Install the
-one you need and run `doctor` again.
+You do not need all three adapters. An `adapter.*` check that is `false` shows as `missing`
+with the command that installs it, and rules out that language and nothing else: the overall
+`"ok"` stays `true` and the exit code stays `0` as long as **one** adapter is usable and the
+config file, the state file and the daemon are sound. Losing the last adapter does fail —
+nothing can be debugged then.
+
+`doctor --check-state` is the one form that starts no daemon: it reads `.lazydap/state.toml`
+here and names the line, which is what you want when a broken state file is why no daemon will
+start.
 
 `doctor` started that daemon. So does every other command — there is nothing to launch by
 hand, and [the daemon guide](/guides/daemon/) explains what it does while it is there.

@@ -162,7 +162,7 @@ Stepping/continue commands have two modes:
 - **Default (no `--wait`):** fire-and-forget. Returns immediately. Useful for human TUI interaction; **rarely useful for you**.
 - **`--wait`:** blocks until the program reaches a stable state — paused on a breakpoint, exited cleanly, or terminated (or timed out). Returns one JSON blob describing what happened. **Always use `--wait` from agent code.**
 
-`--wait` accepts `--timeout=N` (seconds, default 30, `0` = infinite). The `LAZYDAP_TIMEOUT` env var sets the default.
+`--wait` accepts `--timeout=N` (seconds, default 30, `0` = infinite). The `LAZYDAP_TIMEOUT` env var sets the default; a value that is not a number of seconds is a usage error (exit 2) rather than an ignored one.
 
 The response includes everything that happened during execution:
 
@@ -217,7 +217,9 @@ Errors print structured JSON to stderr in JSON mode:
 {"error":"AdapterCrashed","message":"codelldb exited with code 1","details":{...}}
 ```
 
-In table mode, errors print human text to stderr. Exit code is the canonical signal.
+In table mode, errors print human text to stderr. Exit code is the canonical signal, and `error` agrees with it: every `UsageError` exits 2, every `DaemonUnreachable` exits 3, every `AdapterNotFound` exits 4.
+
+Writing to a closed pipe is not an error. `lazydap break --list --format jsonl | head -1` ends with exit 0 — the reader went away on purpose.
 
 ## Working ON lazydap as an agent
 
@@ -330,6 +332,7 @@ end to end against a C binary. What exists today:
 
 - **Cargo workspace**, edition 2024, `rust-version = "1.85"`, seven crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-store`, `lazydap-tui`, `lazydap-daemon`.
 - **One binary: `lazydap`** (built from `crates/daemon`). `cargo install --path crates/daemon` installs it.
+- **`lazydap doctor` passes when lazydap can debug something**, not when this machine has every adapter (`D-WP5-1`). A missing adapter is reported as `missing` with an install hint and does not fail the run; the config file, the state file and the daemon still have to be sound. `doctor --check-state` reads `.lazydap/state.toml` in the CLI process and starts no daemon, which is how you diagnose a state file that stops one from starting.
 - **Working subcommands:** `launch`, `launches` (`list`/`run`), `status`, `disconnect`, `shutdown`, `daemon`, `tui`, `continue`, `step` (alias `next`), `step-in`, `step-out`, `pause`, `break` (add/list/remove/toggle), `watch` (`add`/`list`/`remove`), `stack`, `scopes`, `variables`, `eval`, `threads`, `output`, `doctor`, `version`, `logs`, `completions`. `--wait` and `--timeout` on everything that moves the program.
 - **A TUI.** Bare `lazydap` on a terminal opens it (`lazydap tui` is the explicit spelling); anywhere else — a pipe, a CI job — it prints help instead. It is a **client**, with no path to the daemon's internals: it connects over the same socket, subscribes to events, and F5/`c`, F10/`n`, F11 and shift-F11 send the requests behind `continue`, `step`, `step-in` and `step-out`. `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` move the view; `q` leaves without ending the session. Five panes: source, stack, scopes, watches and a REPL, with `Tab` cycling the focus between them, `<CR>` jumping to a frame or expanding a variable, `b` toggling a breakpoint on the cursor line, and `a`/`dd` adding and removing watches — all through the same requests the CLI sends. It reconnects on its own when the daemon goes away, starting one if there is none. **Note the REPL takes the keyboard:** with the cursor in it `q` is a `q`, so `Esc` leaves the pane before `q` will quit.
 - **All five formats:** `table`, `json`, `jsonl`, `csv`, `ids`, auto-detected from the tty.

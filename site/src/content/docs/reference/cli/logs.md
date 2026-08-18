@@ -19,7 +19,7 @@ lazydap logs [OPTIONS]
 | --- | --- |
 | `--limit <LIMIT>` | Show at most this many lines, from the end [default: 200] |
 | `--level <LEVEL>` | Only lines at this level or louder |
-| `--follow` | Keep printing as the daemon writes more |
+| `--follow` | Keep printing as the daemon writes more. Only `--format table` or `--format jsonl`; a stream has no end for the other formats to close a document at |
 | `--purge` | Delete the log file instead of printing it |
 
 Plus the [options every command takes](/reference/cli/#options-every-command-takes).

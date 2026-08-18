@@ -4,19 +4,27 @@ description: Symptoms, causes and fixes for the ways lazydap and codelldb go wro
 ---
 
 Find your symptom, apply the fix. Start with `lazydap doctor --format json` — it checks the
-three things that are usually wrong.
+things that are usually wrong.
 
 ```console
 $ lazydap doctor --format json
 {
   "checks": [
+    { "detail": "none; create /Users/you/.config/lazydap/config.toml to add one", "name": "config.file", "ok": true },
     { "detail": "/Users/you/.local/bin/codelldb", "name": "adapter.codelldb", "ok": true },
+    { "detail": "/opt/homebrew/bin/python3", "name": "adapter.debugpy", "ok": true },
+    { "detail": "no delve binary found on PATH — install it with `go install github.com/go-delve/delve/cmd/dlv@latest`", "name": "adapter.delve", "ok": false },
     { "detail": "/Users/you/lazydap-demo/.lazydap/state.toml (not created yet)", "name": "state.file", "ok": true },
-    { "detail": "instance lazydap-demo-13cc8efcde46, pid 12102, protocol v5", "name": "daemon", "ok": true }
+    { "detail": "instance lazydap-demo-13cc8efcde46, pid 12102, protocol v8", "name": "daemon", "ok": true }
   ],
   "ok": true
 }
 ```
+
+An adapter you have not installed is reported and does not fail the run: `"ok": true` means
+lazydap can debug *something* here. If the daemon itself will not start, `doctor` says so as a
+failed `daemon` check rather than refusing to run — the checks above it have usually already
+named the reason.
 
 ## A breakpoint never stops anything
 

@@ -38,6 +38,8 @@ pub enum Command {
         stop_on_entry: bool,
 
         /// Working directory for the debuggee. Defaults to the current one.
+        /// It does not affect how the program path is resolved — that is
+        /// always relative to your shell.
         #[arg(long)]
         cwd: Option<PathBuf>,
 
@@ -291,7 +293,9 @@ pub enum Command {
         #[arg(long)]
         level: Option<String>,
 
-        /// Keep printing as the daemon writes more.
+        /// Keep printing as the daemon writes more. Only `--format table` or
+        /// `--format jsonl`; a stream has no end for the other formats to
+        /// close a document at.
         #[arg(long)]
         follow: bool,
 

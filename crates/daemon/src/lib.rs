@@ -20,7 +20,7 @@ pub mod server;
 pub mod state;
 pub mod wait;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use cli::{Cli, Command};
 use error::{CliError, Result};
 use instance::Instance;
@@ -349,19 +349,37 @@ fn report_usage_error(error: &clap::Error, args: &[String]) -> ExitCode {
 
 /// Whether the caller asked for machine-readable output, judged from the raw
 /// arguments and where stdout is going.
+///
+/// An explicit `--format` is honoured in both directions. `--format table`
+/// used to be overruled the moment stdout was a pipe, so
+/// `lazydap --format table nosuch | cat` answered a person's request for
+/// prose with JSON — the one case where the guess has been told it is wrong.
 fn wants_machine_output(args: &[String]) -> bool {
     use std::io::IsTerminal;
 
-    let explicit = args.windows(2).any(|pair| {
-        pair[0] == "--format" && matches!(pair[1].as_str(), "json" | "jsonl" | "csv" | "ids")
-    }) || args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--format=json" | "--format=jsonl" | "--format=csv" | "--format=ids"
-        )
-    });
+    match explicit_format(args) {
+        Some(OutputFormat::Table) => false,
+        Some(_) => true,
+        None => !std::io::stdout().is_terminal(),
+    }
+}
 
-    explicit || !std::io::stdout().is_terminal()
+/// The `--format` in a command line clap could not parse.
+///
+/// Read out of the raw arguments because there is no parsed `Cli` to consult:
+/// parsing is what failed. `--format` takes a value, so a bare trailing
+/// `--format` names nothing and is left to the guess.
+fn explicit_format(args: &[String]) -> Option<OutputFormat> {
+    let named = args
+        .iter()
+        .enumerate()
+        .find_map(|(index, arg)| match arg.split_once('=') {
+            Some(("--format", value)) => Some(value.to_string()),
+            _ if arg == "--format" => args.get(index + 1).cloned(),
+            _ => None,
+        })?;
+
+    OutputFormat::from_str(&named, false).ok()
 }
 
 /// Structured logging from the first thing `main` does (D015).
