@@ -262,7 +262,15 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = self.run(&["disconnect"]);
         let _ = self.run(&["shutdown"]);
-        let _ = std::fs::remove_dir_all(&self.root);
+        // A failing test's daemon log is the whole account of what the
+        // adapter said and in what order, and CI has no shell to go and look
+        // with. Keep the sandbox when the test is on its way out; the job
+        // uploads what is left.
+        if std::thread::panicking() {
+            eprintln!("sandbox kept for evidence: {}", self.root.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
         assert_no_orphans();
     }
 }

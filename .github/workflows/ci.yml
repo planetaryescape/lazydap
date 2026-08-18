@@ -80,12 +80,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/install-adapters
+      # `--no-fail-fast` because the three adapters are three separate
+      # questions: one red test in codelldb must not leave debugpy's and
+      # delve's status unknown. `LAZYDAP_LOG=debug` puts the DAP traffic —
+      # which request, which event, in what order — into each sandbox's daemon
+      # log, which is the only account of an adapter's behaviour a machine
+      # nobody can ssh into will ever produce.
       - name: Test against codelldb, debugpy and delve
         env:
           LAZYDAP_REQUIRE_ADAPTERS: '1'
+          LAZYDAP_LOG: debug
         run: |
-          cargo test -p lazydap-daemon \
+          cargo test -p lazydap-daemon --no-fail-fast \
             --test wait_codelldb --test wait_debugpy --test wait_delve
+
+      # The suites delete their sandboxes on the way out — except when the
+      # test panicked, which is exactly when the log is worth having. Every
+      # sandbox is `/tmp/lzd*`, and the daemon writes into its own data dir.
+      - name: Keep the failing sandboxes' daemon logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adapter-daemon-logs
+          path: /tmp/lzd*/d/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
   skill:
     name: Skill is up to date
