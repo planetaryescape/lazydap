@@ -14,7 +14,8 @@
 #                         when no version argument is given
 #   GITHUB_TOKEN, GH_TOKEN  optional. Raises the release-lookup rate limit from
 #                         GitHub's anonymous 60 requests an hour. Sent to
-#                         api.github.com and nowhere else, never printed
+#                         api.github.com and nowhere else, never printed, and
+#                         retried without it if GitHub rejects it
 #
 # No sudo, ever. The only thing written outside a temporary directory is the one
 # binary in LAZYDAP_INSTALL_DIR.
@@ -130,13 +131,21 @@ digest_from_manifest() {
 # The header arrives through a config file on stdin rather than as an argument
 # because `ps` shows one process's arguments to every user on the machine, and a
 # token is not a thing to put there.
+#
+# A token that fails is worse than no token: an expired GITHUB_TOKEN exported in
+# somebody's shell profile would otherwise turn an install that has always
+# worked anonymously into a 401. So the authenticated attempt is a try, not a
+# commitment — it falls back to the anonymous request the script would have made
+# anyway, and says on stderr that it did. The token itself is never printed.
 fetch_releases() {
   if [ -n "$GITHUB_API_TOKEN" ]; then
     case "$1" in
       https://api.github.com/*)
-        printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_API_TOKEN" |
-          curl -fsSL -K - "$1"
-        return
+        if printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_API_TOKEN" |
+          curl -fsSL -K - "$1"; then
+          return
+        fi
+        echo "install.sh: GITHUB_TOKEN was rejected; retrying without it" >&2
         ;;
     esac
   fi
