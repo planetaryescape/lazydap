@@ -243,7 +243,7 @@ first request it was given — a crash handling `Subscribe`, an out-of-memory ki
 restarting it in a loop — reset the backoff on every cycle: `ensure_daemon()` every 250ms, for
 as long as the TUI was open. The ladder now keeps its rung across a connection that did not
 last and is only reset once one has been up for five seconds, counted in the loop's ticks
-because the reducer has no clock. It still never gives up (**D-WP6-1**). A side effect worth
+because the reducer has no clock. It still never gives up (**D096**). A side effect worth
 having: attempt numbers climb across a whole unproven streak instead of restarting at 1 on
 every handshake, so the superseded-attempt check cannot mistake one ladder's attempt 1 for the
 previous one's. (A connection that proves itself does reset the count — deliberately — so they

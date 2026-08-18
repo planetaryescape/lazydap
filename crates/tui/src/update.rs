@@ -63,7 +63,7 @@ const STACK_LEVELS: u32 = 64;
 
 /// How long a connection has to last before it counts as proof that the daemon
 /// works, in [`crate::TICK`]s — fifty of them, which is five seconds
-/// (D-WP6-1).
+/// (D096).
 ///
 /// Until then a connection that dies keeps climbing the ladder it came up.
 /// A daemon that accepts a connection and then dies on the first request it is
@@ -127,7 +127,7 @@ pub fn update(state: AppState, msg: Msg) -> (AppState, Cmd) {
 fn connected(mut state: AppState) -> (AppState, Cmd) {
     state.connection = Connection::Connected;
     // This connection has proved nothing yet: the daemon has accepted it, not
-    // answered on it. The ladder is only reset once it has lasted (D-WP6-1).
+    // answered on it. The ladder is only reset once it has lasted (D096).
     state.connected_for = 0;
     let subscribe = send(
         &mut state,
@@ -1414,7 +1414,7 @@ fn daemon_gone(mut state: AppState) -> (AppState, Cmd) {
     // Where the ladder is, not the bottom of it: a connection that did not
     // last long enough to prove itself does not earn a fresh 250ms retry, or
     // a daemon that dies on every `Subscribe` is respawned four times a second
-    // for as long as the TUI is open (D-WP6-1).
+    // for as long as the TUI is open (D096).
     let attempt = state.reconnect_attempt + 1;
     state.reconnect_attempt = attempt;
     state.connection = Connection::Reconnecting { attempt };
@@ -3683,7 +3683,7 @@ mod tests {
         // request it is given — a crash on `Subscribe`, or something killing
         // it in a loop — is exactly what the ladder is for. Counting from the
         // bottom again each time had the TUI starting a daemon every 250ms for
-        // as long as it was open (D-WP6-1).
+        // as long as it was open (D096).
         let (mut state, cmd) = update(loaded(20), Msg::DaemonGone);
         assert_eq!(
             cmd,

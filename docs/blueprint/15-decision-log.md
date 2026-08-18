@@ -2172,7 +2172,7 @@ without one.
 
 ---
 
-## D-WP6-1 — the TUI's reconnection ladder is only reset by a connection that lasted
+## D096 — the TUI's reconnection ladder is only reset by a connection that lasted
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -2204,7 +2204,7 @@ for a number to collide with.
 
 ---
 
-## D-WP6-2 — the TUI holds a source file under the name the filesystem gives it
+## D097 — the TUI holds a source file under the name the filesystem gives it
 
 **Status:** decided (2026-08-18, defect campaign).
 

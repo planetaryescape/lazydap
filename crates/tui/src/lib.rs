@@ -239,7 +239,7 @@ impl Dispatcher<'_> {
 /// spelling draws no sign for a breakpoint that is really there, and `b` on
 /// that line adds a second one under a name `lazydap break --remove` cannot
 /// select. Resolving it here rather than in the reducer keeps the reducer free
-/// of I/O (D012, D-WP6-2); a path that cannot be resolved is left as it came,
+/// of I/O (D012, D097); a path that cannot be resolved is left as it came,
 /// which is the same path the read below is about to fail on.
 async fn read_source(id: u64, path: PathBuf) -> Msg {
     let canonical = tokio::fs::canonicalize(&path)

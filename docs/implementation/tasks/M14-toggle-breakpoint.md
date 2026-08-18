@@ -224,4 +224,4 @@ the line the program was stopped on, and `b` there recorded a duplicate that
 `lazydap break --remove /tmp/…` could not select. The source pane now holds the file under the
 name the filesystem gives it (resolved by the read that was already happening, off the
 reducer), remembers the name it was asked for so the next stop is still "already open", and
-every breakpoint match and request is built from the canonical one (**D-WP6-2**).
+every breakpoint match and request is built from the canonical one (**D097**).

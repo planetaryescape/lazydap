@@ -139,7 +139,7 @@ pub struct AppState {
     /// are going (M19).
     pub(crate) connection: Connection,
     /// Which rung of the reconnection ladder the TUI is on, kept across a
-    /// connection that came up and did not last (D-WP6-1).
+    /// connection that came up and did not last (D096).
     ///
     /// Zero while the daemon has been reachable long enough to be trusted, so
     /// the next time it goes away the retries start at 250ms again.
