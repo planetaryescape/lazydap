@@ -6,7 +6,7 @@ lazydap turns a real debugger into shell subcommands that answer in JSON you can
 
 It exists for the work where a debugger is not optional: memory you manage by hand, crashes that destroy their own evidence, races you cannot printf around, and the native library underneath your Python.
 
-> **Early.** `v0.2.0` is a prerelease. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
+> **Early.** `v0.2.4` is a prerelease. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
 
 ## The loop
 
@@ -95,7 +95,7 @@ Six deliberate trade-offs. Each one has a defensible opposite, and a real tool t
 
 **The JSON is the contract. The table output is not.** `--format json` has a stable schema and breaking it costs a decision-log entry. `--format table` is for your eyes and will be reflowed whenever it reads badly. Tools that ship one pretty output and tell you to parse it are making the opposite bet, and it works fine right up until the day it doesn't.
 
-**It wraps codelldb rather than being a debugger.** DWARF parsing, ptrace, expression evaluation in the debuggee's language: LLDB already does all of that, better than a rewrite would. The bill comes as codelldb's quirks becoming yours — [nine of them are written down](docs/reference/codelldb-quirks.md) — and as bugs lazydap cannot fix because they live a layer down.
+**It wraps codelldb rather than being a debugger.** DWARF parsing, ptrace, expression evaluation in the debuggee's language: LLDB already does all of that, better than a rewrite would. The bill comes as codelldb's quirks becoming yours — [twenty-six of them are written down](docs/reference/codelldb-quirks.md) — and as bugs lazydap cannot fix because they live a layer down.
 
 **One debug session per project at a time.** The daemon is per project root and holds one session. Launching a second while the first is live gets you `SessionAlreadyActive`. Multi-session is designed for (session ids are in the protocol from the start) and not built. If you want to debug four services at once today, this is the wrong tool.
 
@@ -206,7 +206,7 @@ lazydap disconnect                # end the session, keep the daemon
 
 Two things that will otherwise cost you a turn:
 
-- **A `variables_reference` is only valid until the program next moves.** Re-run `scopes` after each stop; a stale reference gets you `DapProtocolError: Invalid variabes reference` (the typo is codelldb's).
+- **A `variables_reference` is only valid until the program next moves.** Re-run `scopes` after each stop; a stale one is refused with `StaleHandle` before the debugger is asked anything. The handles are lazydap's, minted per stop and never reused, so an old number can never come back full of another stop's variables.
 - **Breakpoints are project state.** They live in `.lazydap/state.toml`, survive both the session and the daemon, and are re-applied to every later launch. `lazydap break --list` shows them, `lazydap break --all --remove` clears them.
 
 Errors are JSON on stderr, with the exit code as the real signal (`0` fine, `1` operation failed, `2` bad usage, `3` no daemon, `4` no adapter):

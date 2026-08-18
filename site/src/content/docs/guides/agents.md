@@ -60,7 +60,8 @@ These are the mistakes that actually happen, in rough order of how often.
 
 **A `variables_reference` expires the moment the program moves.** The numbers `scopes` returns
 are good for that stop only. After any step, call `scopes` again. Reusing an old one fails
-with `DapProtocolError: Invalid variabes reference` — the typo is codelldb's.
+with `StaleHandle` before the debugger is asked anything. The same is true of a `frame_id`
+from `stack`.
 
 **Inspection needs a paused program.** `stack`, `scopes`, `variables` and `eval` return
 `SessionNotPaused` while it is running:

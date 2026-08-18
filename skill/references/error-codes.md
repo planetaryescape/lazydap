@@ -15,7 +15,7 @@ that is a success, not a failure.
 | `1` | The command failed. | Read `error` on stderr and act on it. |
 | `2` | The command line was wrong. | Fix the arguments; check [`commands.md`](commands.md). |
 | `3` | The daemon could not be started or reached. | Usually transient. Retry once; then report it. |
-| `4` | The debug adapter is missing. | codelldb is not installed. Tell the user; you cannot fix this. |
+| `4` | The debug adapter is missing. | The adapter for this program is not installed — codelldb for C, C++ and Rust, debugpy for Python, delve for Go. Tell the user; you cannot fix this. |
 
 ## The error shape
 
@@ -56,7 +56,7 @@ the `checks` array is where the reason is.
 | `SessionAlreadyActive` | A program is already being debugged. Only one at a time. | `lazydap disconnect`, then launch. `details` names the session in the way. |
 | `StaleHandle` | You passed a `--frame` or `--reference` from a stop the program has left, or from a session that has ended. `message` says which. | Ask again *now* — `lazydap stack` for a frame id, `lazydap scopes` for a reference — and retry with the new one. Handles are never reused, so an old one is always detected rather than silently answered with somebody else's data. |
 | `BadRequest` | The request made no sense here — a handle nobody handed out (`--frame 0` is not "the top frame"), stepping a program that has already exited, pausing one that is already stopped, or asking for an answer too large to fit in one 16 MiB frame. | Read `message`; it says what to do and where a valid value comes from. For an answer that did not fit, narrow it: `--max`, `--start`/`--count`, `--since`. |
-| `AdapterNotFound` | No codelldb on `PATH`. | Nothing you can do in-session. Report it; `details.searched` lists where it looked. |
+| `AdapterNotFound` | The adapter this program needs is not usable here: no codelldb on `PATH`, no `python3` that can import debugpy, or no `dlv`. | Nothing you can do in-session. Report it; `details.searched` lists where it looked, and `lazydap doctor` says how to install it. |
 | `DapProtocolError` | The debugger refused. Usually your expression, not lazydap. | Read `details.adapter_message` — it is the debugger's own words, e.g. *use of undeclared identifier 'y'*. |
 | `AdapterCrashed` | The debugger process died. | The session is unrecoverable. `disconnect`, then launch again. |
 | `AdapterTimeout` | The debugger did not answer in time. | Retry once; if it repeats, `disconnect` and start over. |

@@ -153,7 +153,8 @@ binary. `variables_reference` is what `lazydap variables --reference N` takes.
 
 :::caution[References expire when the program moves]
 These numbers are valid for this stop only. After any step or continue, call `scopes` again.
-A stale one returns `DapProtocolError: Invalid variabes reference` — the typo is codelldb's.
+A stale one returns `StaleHandle`, saying whether it belongs to an earlier stop or to a
+session that has ended.
 :::
 
 ## `variables`
@@ -230,7 +231,7 @@ non-zero when the buffer overflowed.
 {
   "daemon_pid": 2452,
   "instance": "lazydap-demo-13cc8efcde46",
-  "lazydap_version": "0.1.0",
+  "lazydap_version": "0.2.4",
   "protocol_version": 9,
   "session": {
     "adapter": "codelldb",
@@ -265,7 +266,7 @@ and at least one `adapter.*` check did. A missing adapter has its own `"ok": fal
 not make the run fail on its own.
 
 ```json
-{ "lazydap": "0.2.0", "protocol": 9 }
+{ "lazydap": "0.2.4", "protocol": 9 }
 ```
 
 The two versions move independently. The protocol one is what a daemon from an older build

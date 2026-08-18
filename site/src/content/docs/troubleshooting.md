@@ -72,14 +72,19 @@ or set a breakpoint and `continue --wait` to it.
 This most often follows a `--wait` that returned `"state": "timeout"`. A timeout does not
 pause anything — the program is still running, and that is deliberate.
 
-## `Invalid variabes reference`
+## `StaleHandle`
 
 ```json
-{"error":"DapProtocolError","message":"... the adapter rejected `variables`: Internal debugger error: Invalid variabes reference"}
+{"details":{"handle":2,"kind":"variables reference","stale":true},"error":"StaleHandle","message":"StaleHandle: variables reference 2 belongs to an earlier stop; the program has moved since. Ask `lazydap scopes` or `lazydap variables` again for this one"}
 ```
 
-The typo is codelldb's. The cause is a stale `variables_reference`: those numbers are valid
-only for the stop they came from, and any step or continue invalidates them.
+A `variables_reference` and a `frame_id` are lazydap's own handles, minted per stop and
+never reused. They are valid only for the stop they came from, so any step or continue
+invalidates them — and one from a session that has ended says that instead.
+
+The refusal happens before the debugger is asked anything, which is the point: the adapter's
+own numbers get recycled, so a stale one could otherwise be answered with another stop's
+variables under exit 0.
 
 Call `scopes` again after every stop and use the new numbers.
 

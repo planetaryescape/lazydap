@@ -7,8 +7,9 @@ description: |
   it works in any agent that can run a command — no server, no protocol host.
   Use when asked to find why a program crashes, what a variable holds at some
   line, or what actually happens at runtime rather than what the source
-  suggests. Debugs C, C++ and Rust binaries via codelldb, and Python via
-  debugpy. `.py` picks debugpy on its own; anything else defaults to codelldb.
+  suggests. Debugs C, C++ and Rust binaries via codelldb, Python via debugpy
+  and Go via delve. The program's extension picks the adapter — `.py` debugpy,
+  `.go` delve, anything else codelldb — and `--adapter` overrides it.
 lazydap_min_version: "0.2.6"
 ---
 
@@ -25,9 +26,11 @@ program has gone anywhere, and you will read a stale stack.
 
 With `--wait`, lazydap blocks until the program reaches a stable state and
 returns **one JSON object describing everything that happened on the way** —
-where it stopped, why, the top frame, and every line the program printed. That
-single object is usually all you need; do not go fishing for the pieces
-separately.
+where it stopped, why, the top frame, and every line the program printed. It
+also carries `locals`, the variables in scope where it stopped, and
+`user_frame`, the nearest frame in code you wrote when it stopped inside a
+library. That single object is usually all you need: reading a local costs no
+`scopes` and no `variables` call. Do not go fishing for the pieces separately.
 
 ```bash
 lazydap continue --wait --format json
@@ -86,15 +89,19 @@ lazydap launches run "Debug binary" --stop-on-entry --format json
   (`lazydap pause --wait`) or wait for a breakpoint.
 - **A `variables_reference` stops being valid the moment the program moves.**
   The numbers `scopes` hands you are good for that stop only. After any step or
-  `continue`, ask `scopes` again and use the new ones; reusing the old ones
-  fails with `DapProtocolError: Invalid variabes reference` — the typo is the
-  adapter's, and the turn it costs you is avoidable.
+  `continue`, ask `scopes` again and use the new ones; reusing an old one fails
+  with `StaleHandle`, which names the stop it came from. The same goes for a
+  `frame_id` from `stack`.
 - **One session at a time.** Launch again and you get `SessionAlreadyActive`,
   unless the previous program has finished — a finished session is cleared
   automatically.
 - **Breakpoints outlive sessions.** They are project state, kept in
   `.lazydap/state.toml`, and applied to every later launch. Set them before
   launching if you like. Remove the ones you added when you are done.
+- **Breaking on a line that already has a breakpoint edits it.** The reply says
+  `"action": "updated"` (or `"unchanged"`) rather than `"added"`, and the whole
+  request wins: `lazydap break x.c:10` with no `--condition` clears a condition
+  you set earlier, on the same id.
 - **`eval` evaluates an expression** in the program's language. It does *not*
   run debugger commands unless you ask for that with `--context repl`.
 - **Read `state`, not the exit code, to know what happened.** Exit `0` means

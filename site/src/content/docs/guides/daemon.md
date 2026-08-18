@@ -11,7 +11,7 @@ $ lazydap status --format json
 {
   "daemon_pid": 12102,
   "instance": "lazydap-demo-13cc8efcde46",
-  "lazydap_version": "0.1.0",
+  "lazydap_version": "0.2.4",
   "protocol_version": 9,
   "session": {
     "adapter": "codelldb",
@@ -115,7 +115,7 @@ a process manager or when watching it work.
 
 ## Version mismatches
 
-The protocol is versioned separately from the binary and is at **v7**. A daemon left running
+The protocol is versioned separately from the binary and is at **v9**. A daemon left running
 from an older build refuses new clients with `VersionMismatch` rather than half-speaking an
 older dialect:
 

@@ -3,8 +3,12 @@
 What each command returns under `--format json`. Field names are stable; a
 breaking change to any of them requires a decision-log entry in lazydap.
 
-Optional fields are **omitted** rather than set to `null`, except where noted
-below — so test for presence, not for `null`.
+Two different conventions, and it matters which one you are reading:
+
+- **A top-level reply** — the `--wait` blob, `launch`, `status`, `disconnect` —
+  serialises every field it has, `null` when it has nothing. Test the value.
+- **The objects nested inside one** — a breakpoint, a stack frame, a variable,
+  a watch — **omit** their optional fields. Test for presence.
 
 ## The `--wait` blob
 
@@ -54,9 +58,9 @@ Returned by `continue`, `step`, `step-in`, `step-out` and `pause` when given
 |---|---|
 | `state` | `paused`, `exited`, `terminated`, `timeout`, `adapter_died`. Always present. Branch on this first. |
 | `reason` | Why it stopped: `breakpoint`, `step`, `entry`, `exception`, `pause`, or whatever the debugger called it. `null` unless `paused`. |
-| `raw_reason` | Present only when lazydap renamed the reason. See "Normalised reasons" below. |
+| `raw_reason` | `null` unless lazydap renamed the reason. See "Normalised reasons" below. |
 | `thread_id` | The thread that stopped, or — after a `step --thread` — the thread you asked to step. `null` unless `paused`. |
-| `adapter_thread_id` | Present only when the debugger named a *different* thread than the one you asked to step. codelldb does this: it answers a step aimed at one thread by naming whichever it had selected before. `thread_id` is the thread that moved; this is the debugger's own answer, kept so nothing is hidden. |
+| `adapter_thread_id` | `null` unless the debugger named a *different* thread than the one you asked to step. codelldb does this: it answers a step aimed at one thread by naming whichever it had selected before. `thread_id` is the thread that moved; this is the debugger's own answer, kept so nothing is hidden. |
 | `all_threads_stopped` | Whether the whole program stopped, not just this thread. |
 | `additional_stopped_threads` | Other threads that stopped in the same instant. **Always empty against codelldb**, which reports a multi-threaded stop as a single event. Read `all_threads_stopped` instead. |
 | `hit_breakpoint_ids` | Your breakpoint ids — the same numbers `lazydap break` returned. Empty unless a breakpoint caused the stop. |
@@ -95,7 +99,7 @@ the process, which it then reports as an exception:
 ```
 
 `reason` is what happened. `raw_reason` is what the adapter called it, and is
-absent when the two agree. Read `reason`.
+`null` when the two agree. Read `reason`.
 
 ## `launch`
 
@@ -320,7 +324,7 @@ Reading it does not consume it.
   "daemon_pid": 77256,
   "uptime_ms": 776,
   "protocol_version": 9,
-  "lazydap_version": "0.1.0",
+  "lazydap_version": "0.2.4",
   "session": {
     "session_id": "971baa06-...",
     "adapter": "codelldb",
@@ -349,7 +353,7 @@ Reading it does not consume it.
 ```
 
 ```json
-{ "lazydap": "0.2.0", "protocol": 9 }
+{ "lazydap": "0.2.4", "protocol": 9 }
 ```
 
 ```json
@@ -364,6 +368,10 @@ Every check that is about lazydap itself has to pass (`config.file`,
 `state.file`, `daemon`), and at least one `adapter.*` check has to pass. A
 missing adapter is reported with `"ok": false` and a `detail` saying how to
 install it, and does not fail the run on its own; losing the last one does.
+
+In `--format table` a failed adapter check reads `missing` rather than
+`FAILED`, so the column agrees with the verdict. The JSON has no such value —
+it is `"ok": false` either way.
 
 `doctor --check-state` reads `.lazydap/state.toml` in this process and starts
 no daemon, so it can name the line in a state file that stops one from
