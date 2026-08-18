@@ -2067,3 +2067,50 @@ That leaves `Request::Doctor { check_adapters, check_state }` with no in-tree ca
 either — the CLI now sends both as `false` and the daemon answers only for itself. The fields
 stay on the wire rather than being removed, because taking them off would change the frame's
 shape for a version bump nothing else needs; they are retirable at the next one.
+
+---
+
+## D-WP1-1 — the daemon ends an adapter as soon as its session ends, and never kills one it asked to detach
+
+**Status:** decided (2026-08-18, defect campaign WP1).
+
+**Why:** two failures with one shape — nobody owned the moment an adapter stops
+being needed.
+
+**An adapter leaked per session that ended on its own.** codelldb, debugpy and
+delve all report `terminated` and then keep their socket open, waiting to be
+disconnected from; none of them sends an EOF and codelldb does not even exit
+after it has answered the `disconnect`. The daemon's read pump only ever read, so
+it sat on a socket nothing would ever close, holding an `Arc<Session>` — which is
+also why `kill_on_drop` never fired and why `reap_finished`'s comment claiming
+the adapter "goes when the session's `Drop` fires" was false. Three
+`launch` + `continue --wait` cycles left three live codelldb processes. That is
+the ordinary agent loop, which the docs tell agents to run without a closing
+`disconnect`.
+
+**The rule now:** whoever observes the session end is the one that ends the
+adapter. The pump sends `disconnect(terminate: false)` from a side task the
+moment `end_once` fires — it cannot await the answer inline, because the answer
+can only arrive through the read loop it is running — keeps reading for the
+250 ms that might still carry an `exited`, and then kills. A debuggee that
+finished during its own launch has no `terminated` left to see, so the pump
+checks the state it starts with as well. `disconnect` frees the session slot as
+it always did; nothing about the ownership of a *live* session changed.
+
+**`disconnect --no-terminate` killed the program it promised to keep.** The
+handler asked the adapter to detach and killed it a moment later, at the
+acknowledgement rather than at the exit — and a killed adapter is exactly what
+D045 reads as an adapter that died, so the reaper then killed the debuggee. The
+answer said `terminated_debuggee: false` while the program was being killed.
+
+**The rule now:** an intention to leave the debuggee running is recorded before
+anything that could look like a crash. `Session::release_debuggee` gives up the
+pid first — there is then nothing for D045 to reap — and the adapter is given two
+seconds to exit on its own before it is killed. That wait is only taken when
+`--no-terminate` was asked for: codelldb never exits on its own, so waiting for
+it on the ordinary path would cost every `lazydap disconnect` the full grace for
+nothing.
+
+**What this does not change.** `--wait` still returns at the ending; the
+wind-down happens behind it. An adapter that will not go is still killed, which is
+what the graces are for: a promise to be tidy is not a promise to wait forever.

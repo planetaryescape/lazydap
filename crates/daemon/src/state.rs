@@ -174,9 +174,12 @@ impl DaemonState {
                 "reaping a session whose program has finished",
             );
             // The finished session never disconnected, so delve's compiled
-            // binary is still on disk (finding 4); the adapter itself goes when
-            // the session's `Drop` fires `kill_on_drop`, but that does not touch
-            // the file.
+            // binary may still be on disk (finding 4). The adapter itself is
+            // the pump's to end — it disconnects and kills as soon as the
+            // session ends, which is *why* there is a finished session here
+            // (D-WP1-1). Dropping the slot cannot do it: the pump holds an
+            // `Arc<Session>` of its own, so nothing here is the last reference
+            // and `kill_on_drop` never fires.
             if let Some(Slot::Live(session)) = sessions.get(id) {
                 session.clean_compiled_artifact();
             }
@@ -478,6 +481,10 @@ pub struct Session {
     /// `None` for those sessions: the whole point of attaching is that the
     /// process was somebody else's first, and killing it because our adapter
     /// crashed would be destroying something we were only ever looking at.
+    ///
+    /// Taken by [`release_debuggee`](Self::release_debuggee) when the user has
+    /// said to leave the program running, which is the one case where a
+    /// debuggee outliving its session is the answer rather than the bug.
     debuggee: Mutex<Option<Debuggee>>,
 }
 
@@ -624,6 +631,17 @@ impl Session {
     pub async fn reap_debuggee(&self) -> Option<String> {
         let debuggee = lock(&self.debuggee).clone()?;
         debuggee.reap().await
+    }
+
+    /// Stop being responsible for the debuggee, and say which one it was.
+    ///
+    /// `disconnect --no-terminate` promises the program keeps running. The
+    /// adapter is asked to detach, and then killed — which the pump reads as an
+    /// adapter that died, and D045's reaper then kills the very process the
+    /// caller asked to keep. Forgetting the pid first is what makes the promise
+    /// true: there is nothing left to reap (D-WP1-1).
+    pub fn release_debuggee(&self) -> Option<Debuggee> {
+        lock(&self.debuggee).take()
     }
 
     /// Remove a binary lazydap had delve compile, on teardown (best-effort).

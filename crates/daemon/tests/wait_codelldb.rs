@@ -1228,3 +1228,100 @@ fn a_condition_added_to_an_existing_breakpoint_reaches_the_debugger() {
         "the loop should have run three times before stopping: {value}",
     );
 }
+
+#[test]
+fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disconnect() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("reap");
+    let program = toolchain.build("exits.c");
+
+    sandbox.launch(&program);
+    let daemon_pid = sandbox.json(&["--format", "json", "status"])["daemon_pid"]
+        .as_u64()
+        .expect("a daemon pid");
+    assert_eq!(sandbox.wait("20")["state"], "exited");
+
+    // codelldb holds its socket open after `terminated` and waits to be
+    // disconnected from — so a daemon that only ever read from it kept the
+    // adapter, and its ~100MB of LLDB, alive until `lazydap shutdown`. One per
+    // session, and an agent loop that launches without disconnecting is every
+    // session (D-WP1-1). Nothing here says `disconnect`: the point is that the
+    // daemon does it for itself.
+    let survivors = until_gone(|| children_of(daemon_pid, "codelldb"));
+    assert!(
+        survivors.is_empty(),
+        "the adapter outlived the session it was serving: {survivors:?}",
+    );
+}
+
+#[test]
+fn disconnecting_without_terminating_leaves_the_debuggee_running() {
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("keep");
+    let program = toolchain.build("spins.c");
+
+    sandbox.launch(&program);
+    assert_eq!(sandbox.wait("1")["state"], "timeout");
+    let debuggee = *processes_matching(&program.display().to_string())
+        .first()
+        .expect("the fixture is running");
+
+    let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
+    assert_eq!(answer["terminated_debuggee"], false, "got: {answer}");
+
+    // The answer said the program was left alone, and until D-WP1-1 it was
+    // not: killing the adapter made the pump read an adapter that had died,
+    // and D045's reaper then killed the very process this flag exists to keep.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        alive(debuggee),
+        "`--no-terminate` promised pid {debuggee} would keep running",
+    );
+
+    // It is ours to clean up now — nothing is watching it any more, which is
+    // the whole point — and `assert_no_orphans` runs when the sandbox drops.
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(debuggee.to_string())
+        .output();
+    assert!(
+        until_gone(|| processes_matching(&program.display().to_string())).is_empty(),
+        "the fixture should be gone once it is killed",
+    );
+}
+
+/// Poll `pids` until it comes back empty, or five seconds have passed.
+///
+/// Teardown is asynchronous by construction — the daemon answers the client
+/// before the adapter has finished going — so a single check after the command
+/// returns would be testing the timing rather than the behaviour.
+fn until_gone(pids: impl Fn() -> Vec<u32>) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let found = pids();
+        if found.is_empty() || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Every process whose command line contains `pattern`, whoever started it.
+fn processes_matching(pattern: &str) -> Vec<u32> {
+    let output = Command::new("pgrep")
+        .args(["-f", pattern])
+        .output()
+        .expect("run pgrep");
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}

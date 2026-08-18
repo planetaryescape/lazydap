@@ -437,15 +437,24 @@ impl AdapterHandle {
             let mut writer = self.writer.lock().await;
             let writer = writer.as_mut().ok_or(AdapterError::Gone)?;
 
-            // Take the pending map *before* writing. The pump needs it to
-            // deliver a response, so holding it across the write is what makes
-            // "response arrives before we registered for it" impossible. The
-            // pump cannot deadlock on this: it is waiting on the socket, and
-            // the write is what unblocks it.
-            let mut pending = self.pending.lock().await;
+            // Registered *before* the write, so "the response arrives before we
+            // registered for it" is impossible — but the map is released before
+            // the write rather than held across it. The pump needs this same
+            // map to deliver every response, and a write the adapter is slow to
+            // accept (its receive buffer full because it is blocked writing to
+            // us) would stall the pump behind a lock it can only release by
+            // reading. Ordering is still the writer lock's: nothing else can
+            // mint a `seq` or write between these two lines.
+            let seq = writer.next_seq();
             let (sender, receiver) = oneshot::channel();
-            let seq = writer.send_request(command, args).await?;
-            pending.insert(seq, sender);
+            self.pending.lock().await.insert(seq, sender);
+
+            if let Err(error) = writer.send_request_with_seq(seq, command, args).await {
+                // Nothing will ever answer a request that was never sent, and
+                // the entry would sit in the map until the adapter died.
+                self.pending.lock().await.remove(&seq);
+                return Err(error.into());
+            }
             receiver
         };
 
@@ -731,6 +740,22 @@ impl AdapterHandle {
                 "could not answer the adapter's reverse request",
             );
         }
+    }
+
+    /// Give the adapter `grace` to exit on its own, and say whether it did.
+    ///
+    /// The half of teardown that [`kill`](Self::kill) cannot do: an adapter
+    /// killed while it is still handling a `disconnect` never finishes
+    /// detaching from the debuggee, which is what `disconnect --no-terminate`
+    /// asked it to do (D-WP1-1). `false` means the patience ran out and the
+    /// caller should kill it.
+    pub async fn wait_for_exit(&self, grace: Duration) -> bool {
+        let mut writer = self.writer.lock().await;
+        // Already killed, and killing reaps: there is nothing left to wait for.
+        let Some(writer) = writer.as_mut() else {
+            return true;
+        };
+        tokio::time::timeout(grace, writer.wait()).await.is_ok()
     }
 
     /// Kill the adapter process and reap it.

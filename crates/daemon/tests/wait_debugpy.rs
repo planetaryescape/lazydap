@@ -572,3 +572,32 @@ fn variables_and_expressions_read_the_paused_frame() {
         String::from_utf8_lossy(&refused.stdout),
     );
 }
+
+#[test]
+fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disconnect() {
+    let (_python, _turn) = require_python!();
+    let sandbox = Sandbox::new("reap");
+
+    sandbox.launch(&fixture("exits.py"));
+    let daemon_pid = sandbox.json(&["--format", "json", "status"])["daemon_pid"]
+        .as_u64()
+        .expect("a daemon pid");
+    assert_eq!(sandbox.wait("20")["state"], "exited");
+
+    // The C twin, and the same finding: debugpy also keeps its socket open
+    // after `terminated` and waits to be disconnected from, so a daemon that
+    // only ever read from it accumulated one adapter per session (D-WP1-1).
+    // Nothing here says `disconnect` — the daemon does it for itself.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let survivors = loop {
+        let found = children_matching(daemon_pid, "debugpy.adapter");
+        if found.is_empty() || std::time::Instant::now() >= deadline {
+            break found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        survivors.is_empty(),
+        "the adapter outlived the session it was serving: {survivors:?}",
+    );
+}

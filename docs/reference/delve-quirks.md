@@ -360,6 +360,34 @@ everywhere.
 
 ---
 
+## 16. It waits to be disconnected from after `terminated` — and that is when it deletes the binary
+
+delve holds its socket open after reporting the program terminated, waiting for a
+`disconnect`, exactly as codelldb (quirk 25) and debugpy (quirk 17) do. No EOF
+arrives; a client reading until the connection closes reads forever.
+
+For delve there is a second thing riding on that `disconnect`: the binary
+`mode: "debug"` compiled is deleted when delve handles it. So an exited session
+that was never disconnected from leaked both a `dlv` process and a
+`lazydap-delve-<pid>-<nanos>` file in the temp directory — the file leak quirk 5
+describes, reached by a different route. Since D-WP1-1 the daemon disconnects an
+adapter as soon as its session ends, which is what gives delve the chance to
+clean up after itself; lazydap's own removal of the file is now the backstop it
+was meant to be rather than the only thing doing it.
+
+Two smaller notes from the same session (delve 1.27.0, 2026-08-18):
+
+- **`setBreakpoints` for a file that does not exist is answered, not rejected** —
+  `{"verified": false, "message": "could not find file /tmp/ghost.go"}`. Same as
+  the other two adapters.
+- **`mode: "debug"` compiles before it says anything.** delve emits one
+  `Building...` output event and is then silent for as long as `go build` takes.
+  lazydap used to bound every message of a launch at 15 s each, which failed a
+  launch whose build took longer even though the launch itself had 30 s; after
+  `launch` is sent the only deadline is now the launch's own.
+
+---
+
 ## Versions this was verified against
 
 | thing | version |

@@ -9,6 +9,14 @@ use lazydap_protocol::{ErrorCode, Event, IpcError, Response, WaitMode};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How long an adapter asked to *leave the debuggee running* gets to exit
+/// before it is killed.
+///
+/// It has been asked to detach, and detaching is work it does after it answers.
+/// Killing it at the acknowledgement rather than at the exit is what made
+/// `disconnect --no-terminate` kill the program it promised to keep.
+const DETACH_GRACE: Duration = Duration::from_secs(2);
+
 /// What kind of movement a stepping request asks for.
 #[derive(Debug, Clone, Copy)]
 pub enum Movement {
@@ -198,6 +206,16 @@ pub async fn disconnect(
     let session = teardown.session();
     let was_live = session.state().is_live();
 
+    // `--no-terminate` promises the program keeps running, and the daemon has
+    // two ways to break that promise: killing the adapter before it has
+    // finished detaching, and D045's reaper killing the debuggee when the pump
+    // reads that killed adapter as one that died. So the pid is given up first
+    // — there is then nothing left to reap — and the adapter is given time to
+    // leave on its own below (D-WP1-1).
+    if !terminate {
+        session.release_debuggee();
+    }
+
     // Ask nicely first so the adapter can detach or kill the debuggee as
     // requested, then make sure the process is gone either way. A refused or
     // timed-out disconnect must not leave an adapter behind.
@@ -207,6 +225,20 @@ pub async fn disconnect(
             session_id = %session_id,
             %error,
             "the adapter did not acknowledge disconnect; killing it",
+        );
+    }
+    // Acknowledging a `disconnect` is not the same as having acted on it:
+    // detaching from a live process is work the adapter does after it answers,
+    // and killing it at the acknowledgement took the debuggee down with it.
+    // Only when the program is being kept — codelldb answers a `disconnect` and
+    // then stays running regardless (quirk 25), so waiting for it in the
+    // ordinary case would cost every `lazydap disconnect` the whole grace for
+    // nothing.
+    if !terminate && !session.adapter().wait_for_exit(DETACH_GRACE).await {
+        tracing::debug!(
+            target: "daemon.session",
+            session_id = %session_id,
+            "the adapter was still running after its disconnect; killing it",
         );
     }
     session.adapter().kill().await;

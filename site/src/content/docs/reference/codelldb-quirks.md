@@ -1,6 +1,6 @@
 ---
 title: "codelldb quirks"
-description: "All 24 codelldb behaviours that have cost this project time, each with its cause and its fix."
+description: "All 25 codelldb behaviours that have cost this project time, each with its cause and its fix."
 ---
 
 :::note[Generated page]
@@ -39,6 +39,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 22 | [An unresolvable frame id in `evaluate` is reported as "the process is running"](#22-an-unresolvable-frame-id-in-evaluate-is-reported-as-the-process-is-running) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 23 | [`setBreakpoints` answers `verified: true` with `Resolved locations: 0`](#23-setbreakpoints-answers-verified-true-with-resolved-locations-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 24 | [`threads` on a running process answers with a thread whose id is `0`](#24-threads-on-a-running-process-answers-with-a-thread-whose-id-is-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
+| 25 | [It keeps its socket — and its process — after `terminated`, until it is disconnected from](#25-it-keeps-its-socket--and-its-process--after-terminated-until-it-is-disconnected-from) | Defect campaign WP1 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 |
 
 Quirks 11 to 20 are all about **reading values** — the summary strings in `value`, and what
 `eval` will and will not do. They were found in one sitting against a Rust fixture holding one
@@ -1482,6 +1483,50 @@ id it gives back before anything has stopped is not something to act on.
 
 - D076 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
 - D065 — the same rule applied to a thread's *name*: absence beats invention
+
+---
+
+## 25. It keeps its socket — and its process — after `terminated`, until it is disconnected from
+
+### Symptom
+
+Run a program to completion under codelldb and the adapter process stays alive
+indefinitely, holding its half of the TCP connection open. Three
+`launch` + `continue --wait` cycles without a `disconnect` left three live
+`codelldb` processes, each with its own copy of LLDB mapped, parented to the
+lazydap daemon and collected only by `lazydap shutdown`.
+
+### Root cause
+
+`terminated` says the *debug session* is over, not that the adapter is done.
+DAP's shape here is a client-driven one: the client is expected to answer a
+`terminated` with a `disconnect`, and the adapter waits for it. Nothing in the
+event stream after `terminated` says otherwise, and no EOF arrives — a daemon
+waiting for the socket to close waits for the life of the daemon.
+
+Two further details, both measured on 2026-08-18:
+
+- codelldb answers the `disconnect` in **under a millisecond** — and then *still*
+  does not close the socket. Waiting for EOF after the answer is as much of a
+  wait as never sending it.
+- It does not exit on its own after answering either, so something has to kill
+  it. `disconnect` is still worth sending first: it is what lets the adapter
+  detach from a debuggee it was asked to leave running.
+
+debugpy and delve behave the same way — see quirk 17 and quirk 16 in their files
+— so this is the family's behaviour, not codelldb's alone.
+
+### Fix or workaround
+
+The daemon's read pump now sends `disconnect` the moment a session ends, gives
+whatever is still in flight 250 ms to arrive, and then kills the adapter itself
+(D-WP1-1). Nothing waits for an EOF that is not coming.
+
+### Cross-references
+
+- D-WP1-1 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
+- `crates/daemon/src/adapter/pump.rs` — `wind_down`
+- D045 — the sibling rule for the *debuggee* an adapter leaves behind
 
 ---
 

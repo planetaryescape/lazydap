@@ -136,6 +136,12 @@ Nothing yet.
 
 **A `.git` in your home directory no longer makes every directory one project.** The project-root walk had no ceiling, so with dotfiles in `~/.git` — or a stray `~/Cargo.toml` — any unmarked directory under `$HOME` resolved to `$HOME`: one `~/.lazydap/state.toml` and one daemon shared across everything you debug. The walk now stops at the home directory, which is only a root if you asked for it with a `.lazydap/` directory. A *file* named `.lazydap` no longer counts as the marker either; it has to be a directory.
 
+**One adapter process leaked per session that ended on its own.** codelldb, debugpy and delve all hold their DAP socket open after they report the program terminated, waiting to be disconnected from — and the daemon, which only ever read from that socket, kept the adapter alive with it. Three `launch` + `continue --wait` cycles left three codelldb processes running, each with its own copy of LLDB, until `lazydap shutdown`. The daemon now disconnects an adapter as soon as its session ends and pulls the plug if it will not go, so an agent can loop launch-and-continue without a closing `lazydap disconnect`.
+
+**`lazydap disconnect --no-terminate` killed the program it promised to keep.** The adapter was told to detach and then killed a moment later — before it had finished detaching — and the daemon read that killed adapter as one that had crashed, which is the case that reaps an orphaned debuggee (D045). So the response said `terminated_debuggee: false` while the program was being killed. The adapter is now given time to leave on its own, and the daemon gives up responsibility for the debuggee before it does anything that could look like a crash.
+
+**Adapter output that is not UTF-8 no longer wedges the adapter.** One such byte on a log stream ended the loop that drains it; the pipe then filled, and an adapter blocked writing a log line answers no requests. A `Content-Length` larger than 256 MiB is also refused now rather than allocated on the adapter's say-so, and a failed launch reaps a debuggee the adapter had already started instead of orphaning it.
+
 ## [0.1.0] — 2026-07-31
 
 The first release. A debugger you drive from the shell, one command at a time, with JSON as the contract. Rough edges are listed under [Known limitations](#known-limitations) rather than left for you to find.

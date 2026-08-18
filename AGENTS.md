@@ -183,6 +183,11 @@ The response includes everything that happened during execution:
 
 Don't poll `lazydap status` in a loop. Use `--wait`.
 
+A session that ends on its own — the program exited, or the adapter terminated it — needs no
+closing `lazydap disconnect`: the daemon disconnects and reaps the adapter itself as soon as
+the session ends, and the next `launch` reuses the slot. Disconnect when *you* want to stop
+early, not as cleanup after a `--wait` that came back `exited`.
+
 ### Output format conventions
 
 - `--format json` — single JSON object or array. Stable schema. Pipe-friendly.

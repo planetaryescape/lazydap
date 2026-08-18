@@ -448,9 +448,12 @@ fn a_program_that_never_stops_times_out_without_ending_the_session() {
 /// Finding 4, the case that slipped past the other tests: a program that
 /// exited, then `shutdown` with no `disconnect` first.
 ///
-/// delve deletes its compiled binary when it handles a `disconnect`; an exited
-/// session never sends one, and `shutdown` used to just kill the adapter — so
-/// the binary leaked. The other tests miss this because the sandbox always
+/// delve deletes its compiled binary when it handles a `disconnect`, and an
+/// exited session used to send none — the daemon read on until `shutdown` killed
+/// the adapter, so the binary leaked. Since D-WP1-1 the pump disconnects an
+/// adapter whose session has ended, which gives delve the chance to delete it
+/// *before* shutdown; either way, nothing of this session may be on disk once
+/// the daemon is gone. The other tests miss this because the sandbox always
 /// disconnects in `Drop` before it shuts down, which cleans the file the other
 /// way. This one shuts down directly.
 #[test]
@@ -462,16 +465,19 @@ fn the_compiled_binary_is_removed_when_an_exited_session_is_shut_down() {
     let blob = sandbox.wait("30");
     assert_eq!(blob["state"], "exited", "got: {blob}");
 
-    // `mode: "debug"` compiled exactly one binary, and delve has not deleted it
-    // — it is waiting for a disconnect that an exited session never sends.
+    // `mode: "debug"` compiled exactly one binary. Whether it is still there
+    // depends on how fast delve acts on the disconnect the ended session sent
+    // it, so the assertion is about what must never survive rather than about
+    // that race: a file this test can name, still present after shutdown.
     let created = sandbox.new_artifacts();
-    assert_eq!(
-        created.len(),
-        1,
-        "debug mode should have left one compiled binary on disk: {created:?}",
+    assert!(
+        created.len() <= 1,
+        "debug mode compiles one binary: {created:?}",
     );
-    let binary = &created[0];
-    assert!(binary.exists(), "the binary should exist before shutdown");
+    let Some(binary) = created.first() else {
+        sandbox.run(&["shutdown"]);
+        return;
+    };
 
     // Shut down with no prior disconnect — the path that leaked.
     sandbox.run(&["shutdown"]);
@@ -702,5 +708,35 @@ fn variables_and_expressions_read_the_paused_frame() {
         !refused.status.success(),
         "an undefined name must not look like a value: {}",
         String::from_utf8_lossy(&refused.stdout),
+    );
+}
+
+#[test]
+fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disconnect() {
+    let (_dlv, _turn) = require_dlv!();
+    let sandbox = Sandbox::new("reap");
+
+    sandbox.launch(&fixture("exits.go"));
+    let daemon_pid = sandbox.json(&["--format", "json", "status"])["daemon_pid"]
+        .as_u64()
+        .expect("a daemon pid");
+    assert_eq!(sandbox.wait("30")["state"], "exited");
+
+    // The third adapter, the same finding: delve holds its socket open after
+    // `terminated` too, so nothing but `lazydap shutdown` collected one. It
+    // also has a second thing to lose by being killed rather than disconnected
+    // — the binary it compiled, which it deletes on its own way out (quirk 5) —
+    // and the sandbox's `Drop` checks for that file as well (D-WP1-1).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let survivors = loop {
+        let found = children_matching(daemon_pid, "dlv");
+        if found.is_empty() || std::time::Instant::now() >= deadline {
+            break found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        survivors.is_empty(),
+        "the adapter outlived the session it was serving: {survivors:?}",
     );
 }

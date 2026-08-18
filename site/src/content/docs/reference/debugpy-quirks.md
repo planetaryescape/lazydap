@@ -1,6 +1,6 @@
 ---
 title: "debugpy quirks"
-description: "16 places debugpy behaves differently from the other adapters, captured off the wire."
+description: "17 places debugpy behaves differently from the other adapters, captured off the wire."
 ---
 
 :::note[Generated page]
@@ -369,6 +369,39 @@ program's output —
 
 — so anything comparing captured output against expected text needs to strip `\r`, and anything
 splitting it into lines should concatenate the chunks first and split on the result.
+
+
+---
+
+## 17. It waits to be disconnected from after `terminated`, and refuses no breakpoint
+
+Two findings from the same session (2026-08-18), both about what debugpy does
+*not* do.
+
+**The socket stays open after `terminated`.** Exactly as codelldb does (quirk 25
+there) and delve does (quirk 16 there): the adapter reports the program
+terminated and then waits for a `disconnect`, sending no EOF. A client that reads
+until the connection closes never gets there, and the adapter — a Python
+interpreter, plus the launcher it spawned — stays resident. lazydap's pump now
+disconnects as soon as a session ends and kills the adapter afterwards
+(D-WP1-1).
+
+Unlike codelldb, debugpy *does* exit of its own accord once it has been
+disconnected from, so the kill that follows is usually a no-op.
+
+**`setBreakpoints` for a file that does not exist is answered, not rejected.**
+
+```json
+{ "verified": false, "message": "Breakpoint in file that does not exist." }
+```
+
+A successful response carrying an unverified breakpoint, which is what the
+specification asks for and what lazydap reports as unbound. Worth recording
+because the alternative — failing the request — would have taken the whole launch
+down with it in a daemon that treats any rejected response during the handshake
+as fatal; that path is now non-fatal for `setBreakpoints` specifically, but no
+adapter lazydap drives actually needs it (delve answers `could not find file
+/path/x.go` the same way, and codelldb likewise).
 
 ## See also
 

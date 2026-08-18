@@ -15,18 +15,86 @@ use lazydap_core::{
     AdapterBreakpoint, BreakpointId, EndReason, PauseReason, SessionState, ThreadUpdate,
     ThreadUpdateKind,
 };
-use lazydap_dap::{DapEvent, DapReader, Incoming, TransportError};
+use lazydap_dap::{DapEvent, DapReader, Incoming};
 use lazydap_protocol::Event;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
+
+/// How long the adapter gets to answer the `disconnect` that ends a session it
+/// has already terminated. It has nothing else left to do, so this is a
+/// backstop rather than a negotiation.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(2);
+
+/// How long to keep reading after that answer, for an `exited` still behind the
+/// `terminated` on the wire. Same window, and the same reason, as the
+/// handshake's.
+const POST_TERMINATION_GRACE: Duration = Duration::from_millis(250);
+
+/// The longest the pump itself will sit in a session that has already ended —
+/// the wind-down above, plus slack, so a wind-down that somehow never finishes
+/// cannot keep the adapter alive for the life of the daemon.
+const WIND_DOWN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Start pumping. The task ends when the adapter does.
 pub fn spawn_pump(start: PumpStart, session: Arc<Session>) {
-    tokio::spawn(run(start.reader, start.pending, session));
+    tokio::spawn(pump(start.reader, start.pending, session));
+}
+
+/// Read until the adapter has nothing left to say, then make sure it is gone.
+///
+/// The teardown is in this task rather than at the end of the read loop
+/// because a panic in the loop would skip it, and what it skips is an adapter
+/// process left running with nobody holding its socket. `tokio::spawn` turns a
+/// panic into a `JoinError` here instead of into a silent leak — the pump's own
+/// `JoinHandle` is dropped, so nothing else would ever notice.
+async fn pump(reader: DapReader, pending: Pending, session: Arc<Session>) {
+    let reading = tokio::spawn(run(reader, Arc::clone(&pending), Arc::clone(&session)));
+    if let Err(error) = reading.await {
+        finish(&session, format!("the session pump stopped: {error}")).await;
+    }
+
+    // Killed *before* the waiters are woken. A request that registers between
+    // the two would otherwise wait out the full request timeout and come back
+    // as `AdapterTimeout` for an adapter that is already gone; with the writer
+    // taken first it gets `Gone` immediately.
+    session.adapter().kill().await;
+    // Nobody will ever answer the outstanding requests. Dropping the senders
+    // wakes their waiters with `AdapterError::Gone` rather than leaving them
+    // to time out one by one.
+    pending.lock().await.clear();
+
+    tracing::debug!(target: "daemon.session", session_id = %session.id, "pump stopped");
 }
 
 async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
+    // A debuggee quick enough to finish during its own launch has already
+    // ended, and the `terminated` that says so was read by the handshake. There
+    // is nothing left to wait for, so the wind-down starts here rather than
+    // never (D-WP1-1).
+    let mut winding_down = (!session.state().is_live()).then(|| wind_down(&session));
+
     loop {
-        match reader.read_incoming().await {
+        let incoming = match winding_down {
+            None => reader.read_incoming().await,
+            // Cancelling a read leaves the stream mid-frame, which is normally
+            // fatal — but the only thing left to do with this reader is stop
+            // using it, and a misparse gets there as surely as a clean EOF.
+            Some(deadline) => match tokio::time::timeout_at(deadline, reader.read_incoming()).await
+            {
+                Ok(incoming) => incoming,
+                Err(_) => {
+                    tracing::debug!(
+                        target: "daemon.session",
+                        session_id = %session.id,
+                        "the adapter did not close its socket after the session ended; killing it",
+                    );
+                    return;
+                }
+            },
+        };
+
+        match incoming {
             Ok(Incoming::Response(response)) => {
                 let waiter = pending.lock().await.remove(&response.request_seq);
                 match waiter {
@@ -44,25 +112,66 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
                     ),
                 }
             }
-            Ok(Incoming::Event(event)) => handle_event(&session, event),
+            Ok(Incoming::Event(event)) => {
+                handle_event(&session, event);
+                if winding_down.is_none() && !session.state().is_live() {
+                    winding_down = Some(wind_down(&session));
+                }
+            }
             // Answered rather than ignored: an adapter waiting on a reply it
             // will never get is a session that stops making progress with
             // nothing said about why.
             Ok(Incoming::ReverseRequest(request)) => session.adapter().refuse(&request).await,
             Err(error) => {
-                finish(&session, &error).await;
-                break;
+                finish(&session, error.to_string()).await;
+                return;
             }
         }
     }
+}
 
-    // Nobody will ever answer the outstanding requests. Dropping the senders
-    // wakes their waiters with `AdapterError::Gone` rather than leaving them
-    // to time out one by one.
-    pending.lock().await.clear();
-    session.adapter().kill().await;
-
-    tracing::debug!(target: "daemon.session", session_id = %session.id, "pump stopped");
+/// The session has ended. Send the adapter the `disconnect` it is waiting for,
+/// and say how long to keep reading for its answer.
+///
+/// This is the fix for the leak D-WP1-1 names: codelldb, debugpy and delve all
+/// hold their socket open after `terminated` until a client disconnects, so a
+/// pump that simply kept reading kept the adapter — and its whole process tree
+/// — alive for the life of the daemon. One adapter leaked per session that
+/// ended on its own, which is every session an agent runs without a closing
+/// `lazydap disconnect`.
+///
+/// Sent from a task rather than inline because this *is* the read loop: the
+/// answer to the request can only arrive through it, so waiting here would
+/// guarantee the timeout. `terminate: false` because there is nothing left to
+/// terminate — the program has already ended.
+///
+/// The same task then kills the adapter, which is what ends the read loop:
+/// codelldb answers the `disconnect` in under a millisecond and holds the
+/// socket open anyway (quirk 25), so waiting for it to close would cost the
+/// whole grace on every session.
+fn wind_down(session: &Arc<Session>) -> Instant {
+    let session = Arc::clone(session);
+    tokio::spawn(async move {
+        match tokio::time::timeout(DISCONNECT_GRACE, session.adapter().disconnect(false)).await {
+            // Whatever is still in flight — an `exited` behind the
+            // `terminated`, the last of the program's output — has this long to
+            // arrive before the socket goes.
+            Ok(Ok(())) => tokio::time::sleep(POST_TERMINATION_GRACE).await,
+            Ok(Err(error)) => tracing::debug!(
+                target: "daemon.session",
+                session_id = %session.id,
+                %error,
+                "the adapter refused the disconnect that ends its session",
+            ),
+            Err(_) => tracing::debug!(
+                target: "daemon.session",
+                session_id = %session.id,
+                "the adapter did not answer the disconnect that ends its session",
+            ),
+        }
+        session.adapter().kill().await;
+    });
+    Instant::now() + WIND_DOWN_DEADLINE
 }
 
 fn handle_event(session: &Arc<Session>, event: DapEvent) {
@@ -309,9 +418,7 @@ fn adapter_breakpoint(body: &serde_json::Value) -> AdapterBreakpoint {
 /// Adapters do not reliably say goodbye — a crashed one just closes the
 /// socket, and a UI waiting for `terminated` waits forever. So an EOF that
 /// arrives before the session ended properly becomes a synthetic ending.
-async fn finish(session: &Arc<Session>, error: &TransportError) {
-    let mut detail = error.to_string();
-
+async fn finish(session: &Arc<Session>, mut detail: String) {
     // Before the ending is announced, so the ending can say what became of the
     // program. An adapter that was killed never got to stop its debuggee, and a
     // daemon that killed only the adapter left the user's program running with
