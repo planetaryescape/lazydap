@@ -34,6 +34,24 @@ TOML rather than a database, so it diffs, greps, and can be written by anything.
 your team wants shared breakpoints; the repository's own `.gitignore` leaves that choice to
 you.
 
+### Editing it by hand
+
+You can, including while a daemon is running. lazydap compares the file against the version it
+last read or wrote, so it can tell what you changed:
+
+- an entry you **add** is adopted, and its id is reserved so nothing else takes it;
+- an entry you **delete** stays deleted — it is not written back on the next save;
+- an existing id's **fields are lazydap's**, because a live adapter has already been told
+  about it. Change one and lazydap's version wins; set it again with `lazydap break` and the
+  file is right immediately;
+- a file that is **missing, empty, or only whitespace** is not read as "delete everything".
+  `rm -rf .lazydap` as a reset, or an editor caught between truncating and writing, leaves
+  lazydap holding what it had, and it writes the file back out.
+
+A deletion applies from the next launch. It is not withdrawn from a program that is already
+running, so a `--wait` blob can still mention an id you have just removed from the file.
+Watch expressions follow all of the same rules.
+
 ## Verified means bound
 
 `verified` is the field to read. When you set a breakpoint with nothing running, nothing has

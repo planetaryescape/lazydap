@@ -1749,22 +1749,41 @@ memory did not. From the user's side the file was editable in one direction — 
 it a cache lazydap humours rather than the record D006 says it is.
 
 **The rule.** The merge is three-way, against the file's text as lazydap last read or
-wrote it. An id in the file but not in that baseline was added by hand and is adopted; an
-id in the baseline but not in the file was deleted by hand and goes. An id in both keeps
-lazydap's version, unchanged from before: lazydap's is what a live adapter has already
-been told about, and a file that loses a tie is one `lazydap break` away from being right
-again.
+wrote it (the *baseline*):
+
+- in the file, not in the baseline → added by hand, adopted;
+- in the baseline, not in the file → deleted by hand, dropped from memory too;
+- in both → lazydap's version wins, because lazydap's is what a live adapter has already
+  been told about, and a file that loses a tie is one `lazydap break` away from being right
+  again;
+- in the baseline, and no longer in memory → a removal *lazydap* made that has not been
+  flushed yet. Not re-adopted, even though the file still lists it: lazydap's is the newer
+  edit, and adopting it back would undo a removal the moment anyone touched the file for an
+  unrelated reason.
+
+**A missing or empty file is not a deletion of everything.** `rm -rf .lazydap` as a reset,
+`> state.toml`, an editor between its truncate and its write, a restore from backup in
+progress — all of them present as "the file no longer contains any of the entries the
+baseline had", and reading that as a deletion makes it permanent 500ms later when the
+debounce fires. A file that is absent, empty, or only whitespace is treated as *no edit*:
+memory is kept and the next flush writes it back out.
 
 **What it does not do.** A deletion is not withdrawn from a *running* adapter — the
 breakpoint stops existing for the next launch. Editing the file under a live session was
-never a way to change what the debuggee is doing, and making it one would mean the file
-and the adapter racing each other.
+never a way to change what the debuggee is doing, and making it one would mean the file and
+the adapter racing each other. One visible consequence: the adapter keeps the breakpoint
+until the next apply or launch, so a `--wait` blob can still carry `breakpoint_updates`
+naming an id that is no longer in the project's list. Clients should treat an id there as
+the adapter's opinion about a breakpoint it still holds, not as proof the project still has
+one.
 
 **Detection is by content, not mtime.** The comparison used to be `mtime == seen_mtime`,
 which cannot see an edit made inside the same clock tick as lazydap's own write — the file
 system's timestamp resolution decided whether a user's edit survived. The store now
 remembers the exact text it last read or wrote and compares bytes. The file is a few
 kilobytes, so keeping it costs nothing, and it is also what the three-way merge needs.
+
+---
 
 ## D-WP2-2 — the project-root walk stops at `$HOME`
 
