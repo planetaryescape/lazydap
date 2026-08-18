@@ -276,11 +276,15 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = self.run(&["disconnect"]);
         let _ = self.run(&["shutdown"]);
-        // A failing test's daemon log is the whole account of what the
-        // adapter said and in what order, and CI has no shell to go and look
-        // with. Keep the sandbox when the test is on its way out; the job
-        // uploads what is left.
-        if std::thread::panicking() {
+
+        let survivors = self.until_clean();
+
+        // A failing test's daemon log is the whole account of what the adapter
+        // said and in what order, and CI has no shell to go and look with. Keep
+        // the sandbox when the test is on its way out — *including* when what
+        // is about to fail is the check below, which is a failure in `Drop` and
+        // would otherwise delete its own evidence before raising.
+        if std::thread::panicking() || !survivors.is_empty() {
             eprintln!("sandbox kept for evidence: {}", self.root.display());
         } else {
             let _ = std::fs::remove_dir_all(&self.root);
@@ -291,7 +295,6 @@ impl Drop for Sandbox {
         // — so a stray check meant to explain a failure would instead hide
         // one. The strays still get reported, just as output rather than as an
         // assertion nobody can read.
-        let survivors = self.strays();
         if std::thread::panicking() {
             if !survivors.is_empty() {
                 eprintln!("strays left behind by a failing test: {survivors:?}");
@@ -300,8 +303,9 @@ impl Drop for Sandbox {
         }
         assert!(
             survivors.is_empty(),
-            "a Go debuggee or its compiled binary outlived its session — {}. The \
-             adapter died without stopping it and nothing reaped it; see D045.",
+            "a Go debuggee or its compiled binary outlived its session by more \
+             than five seconds — {}. The adapter died without stopping it and \
+             nothing reaped it; see D045.",
             survivors.join(", "),
         );
     }
@@ -328,6 +332,25 @@ impl Sandbox {
     /// pids the compiled binaries' names carry — the only thing tying an
     /// orphan, a process whose parents are all dead, back to the session that
     /// made it. Without that, a neighbouring worktree mid-test fails this one.
+    /// [`strays`](Self::strays), polled until there are none, or for five
+    /// seconds.
+    ///
+    /// Teardown is asynchronous by construction: `disconnect` is answered as
+    /// soon as the adapter has been told, and the debuggee dies — and delve
+    /// deletes the binary it compiled — some microseconds later. A single check
+    /// the instant the command returns tests that timing rather than the
+    /// behaviour, and loses the race on a loaded four-core runner.
+    fn until_clean(&self) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let survivors = self.strays();
+            if survivors.is_empty() || std::time::Instant::now() >= deadline {
+                return survivors;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn strays(&self) -> Vec<String> {
         let fixtures = repo_root().join("examples/go-fixtures");
         let mut patterns = vec![fixtures.display().to_string()];
@@ -706,16 +729,11 @@ fn a_killed_adapter_takes_its_go_debuggee_with_it() {
     // would be that much easier to miss. The compiled binary must go too — the
     // adapter died before deleting it (finding 4). Give the cleanup a moment to
     // land; `strays` covers both the process and the file.
-    for _ in 0..20 {
-        if sandbox.strays().is_empty() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    unreachable!(
+    let survivors = sandbox.until_clean();
+    assert!(
+        survivors.is_empty(),
         "the debuggee or its compiled binary outlived its adapter — {}",
-        sandbox.strays().join(", "),
+        survivors.join(", "),
     );
 }
 

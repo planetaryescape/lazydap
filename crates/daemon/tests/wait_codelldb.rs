@@ -262,16 +262,37 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = self.run(&["disconnect"]);
         let _ = self.run(&["shutdown"]);
-        // A failing test's daemon log is the whole account of what the
-        // adapter said and in what order, and CI has no shell to go and look
-        // with. Keep the sandbox when the test is on its way out; the job
-        // uploads what is left.
-        if std::thread::panicking() {
+
+        let survivors = until_gone(orphans);
+
+        // A failing test's daemon log is the whole account of what the adapter
+        // said and in what order, and CI has no shell to go and look with. Keep
+        // the sandbox when the test is on its way out — *including* when what
+        // is about to fail is the check below, which is a failure in `Drop` and
+        // would otherwise delete its own evidence before raising.
+        if std::thread::panicking() || !survivors.is_empty() {
             eprintln!("sandbox kept for evidence: {}", self.root.display());
         } else {
             let _ = std::fs::remove_dir_all(&self.root);
         }
-        assert_no_orphans();
+
+        // Not an assertion while the test is already failing. This runs in
+        // `Drop`, and a second panic during unwind aborts the process — taking
+        // the first panic's message, the one that explains the failure, with
+        // it. Report the orphans and step aside; the real failure is the one
+        // worth reading.
+        if std::thread::panicking() {
+            if !survivors.is_empty() {
+                eprintln!("orphans left by a failing test: {survivors:?}");
+            }
+            return;
+        }
+        assert!(
+            survivors.is_empty(),
+            "a debuggee outlived its session by more than five seconds — pids {}. \
+             The adapter died without stopping it and nothing reaped it; see D045.",
+            survivors.join(", "),
+        );
     }
 }
 
@@ -287,36 +308,18 @@ impl Drop for Sandbox {
 /// Scoped to *this* build's fixture directory. Several worktrees run this suite
 /// at once and a blanket match on the fixture names would make each of them
 /// fail on the others' processes.
-fn assert_no_orphans() {
+fn orphans() -> Vec<String> {
     let fixtures = repo_root().join("target/debug/c-fixtures");
     let output = Command::new("pgrep")
         .args(["-f", &fixtures.display().to_string()])
         .output()
         .expect("run pgrep");
 
-    let survivors: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
-        .collect();
-
-    // Not an assertion while the test is already failing. This runs in `Drop`,
-    // and a second panic during unwind aborts the process — taking the first
-    // panic's message, the one that explains the failure, with it. Report the
-    // orphans and step aside; the real failure is the one worth reading.
-    if std::thread::panicking() {
-        if !survivors.is_empty() {
-            eprintln!("orphans left by a failing test: {survivors:?}");
-        }
-        return;
-    }
-    assert!(
-        survivors.is_empty(),
-        "a debuggee outlived its session — pids {} under {}. \
-         The adapter died without stopping it and nothing reaped it; see D045.",
-        survivors.join(", "),
-        fixtures.display(),
-    );
+        .collect()
 }
 
 /// Processes named `name` whose parent is `parent`.
@@ -1323,17 +1326,20 @@ fn disconnecting_without_terminating_leaves_the_debuggee_running() {
     );
 }
 
-/// Poll `pids` until it comes back empty, or five seconds have passed.
+/// Poll `found` until it comes back empty, or five seconds have passed.
 ///
-/// Teardown is asynchronous by construction — the daemon answers the client
-/// before the adapter has finished going — so a single check after the command
-/// returns would be testing the timing rather than the behaviour.
-fn until_gone(pids: impl Fn() -> Vec<u32>) -> Vec<u32> {
+/// Teardown is asynchronous by construction: `disconnect` is answered as soon
+/// as the adapter has been told, and the debuggee dies some microseconds later
+/// — by the adapter's own hand on a clean disconnect, or by the daemon's reap
+/// when the adapter died first (D045). A single check the instant the command
+/// returns tests that timing rather than the behaviour, and loses the race on a
+/// loaded four-core runner about one run in six.
+fn until_gone<T>(found: impl Fn() -> Vec<T>) -> Vec<T> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let found = pids();
-        if found.is_empty() || std::time::Instant::now() >= deadline {
-            return found;
+        let survivors = found();
+        if survivors.is_empty() || std::time::Instant::now() >= deadline {
+            return survivors;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
