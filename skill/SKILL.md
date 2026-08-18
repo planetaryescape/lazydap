@@ -90,8 +90,8 @@ lazydap launches run "Debug binary" --stop-on-entry --format json
 - **A `variables_reference` stops being valid the moment the program moves.**
   The numbers `scopes` hands you are good for that stop only. After any step or
   `continue`, ask `scopes` again and use the new ones; reusing an old one fails
-  with `StaleHandle`, which names the stop it came from. The same goes for a
-  `frame_id` from `stack`.
+  with `StaleHandle`, saying whether it belongs to an earlier stop or to a
+  session that has ended. The same goes for a `frame_id` from `stack`.
 - **One session at a time.** Launch again and you get `SessionAlreadyActive`,
   unless the previous program has finished — a finished session is cleared
   automatically.

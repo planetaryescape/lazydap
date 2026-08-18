@@ -16,7 +16,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   2026-07-31. [M23 — js-debug](docs/implementation/tasks/M23-jsdebug-adapter.md) is blocked at
   its own scope gate behind it: the parent session debugs nothing, and a single-level
   child-session milestone has to come first.
-- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.4 shipped 2026-08-18.** All five went out
+- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.4 shipped 2026-08-18.** All six went out
   through [.github/workflows/product-release.yml](.github/workflows/product-release.yml) as
   prereleases, with macOS arm64/x86_64 and Linux x86_64 tarballs, SHA-256 sums and
   `lazydap.skill` attached. `install.sh` and the Homebrew tap (M21) are both live; the docs
@@ -41,15 +41,14 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   - **`lazydap completions <shell>` still panics on `EPIPE`.** Every other command writes
     through `output::print_line`, which treats a closed pipe as a quiet exit 0; `clap_complete`
     writes to stdout itself, as does clap's own error path.
-  - **`Request::Doctor { check_adapters, check_state }` has no in-tree caller** since D093
-    moved both checks to the client. The fields stay on the wire because removing them is a
-    frame-shape change; retire them at the next protocol bump.
+  - **Nothing sets `Request::Doctor`'s flags any more.** D093 moved the adapter and state
+    checks into the client, so the one production caller
+    (`crates/daemon/src/commands/diagnostics.rs:251`) sends both `false` and the daemon-side
+    branches they gate are reached only by tests. The fields stay on the wire because
+    removing them is a frame-shape change; retire them at the next protocol bump.
   - **`install.sh` has no `GITHUB_TOKEN` passthrough.** Its release lookup uses the
     unauthenticated GitHub API, which rate-limits at 60/hour — enough to 403 a run of install
     verifications for an hour.
-  - **The TUI asks for `Variables { max: 0 }`** — no cap — every time it expands a node, so a
-    container with thousands of children crosses the socket whole to fill a pane a few rows
-    tall. The CLI's default cap is 200 (D080).
   - **`ProjectStore`'s merge replaces `state.unknown` wholesale** with the file's copy
     (`crates/store/src/lib.rs:643`) rather than three-way merging it the way breakpoints and
     watches are merged. Harmless today, because lazydap never writes into `unknown` — but it

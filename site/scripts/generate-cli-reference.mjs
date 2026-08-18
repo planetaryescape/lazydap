@@ -71,8 +71,10 @@ const BIN = resolveBinary();
 const HELP_TIMEOUT_MS = 10_000;
 
 // How clap marks a command's other spellings. One source, because the spelling
-// changes with clap's version — `[aliases: c]` up to 4.6.4, `[alias: c]` for a
-// single one from 4.6.5 — and two copies of it drift apart silently.
+// changes with clap's version: a single alias prints `[aliases: c]` up to 4.6.1
+// and `[alias: c]` from 4.6.2 on ("Say `alias` when there is only one"). Two
+// copies of this pattern would drift apart silently. Cargo.lock is on clap
+// 4.6.1, so the committed pages still carry the plural.
 const ALIAS_MARKER = String.raw`\[alias(?:es)?:\s*([^\]]+)\]`;
 const ALIAS_ANYWHERE = new RegExp(ALIAS_MARKER);
 const ALIAS_TRAILING = new RegExp(String.raw`\s*${ALIAS_MARKER}\s*$`);

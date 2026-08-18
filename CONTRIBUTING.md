@@ -52,7 +52,7 @@ LAZYDAP_REQUIRE_ADAPTERS=1 cargo test -p lazydap-daemon \
 
 Empty and `0` count as unset, so `LAZYDAP_REQUIRE_ADAPTERS= cargo test` is how you switch it back off in a shell that has exported it. CI's `adapters` job installs codelldb, debugpy and dlv and runs exactly that, so "the canonical tests run real codelldb" is now checked rather than trusted. The plain `test` job installs nothing, which keeps the skip path honest. Use the variable locally when you want to know that your run really exercised an adapter.
 
-**What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. There is no `FakeAdapter`: where the thing under test genuinely isn't adapter behaviour, use `AdapterHandle::detached()` (`#[cfg(test)]`, every request answers `Gone`) or a scripted transport as `crates/dap/src/transport.rs` does. Anything that is a claim about what an adapter does belongs in `wait_codelldb.rs`, `wait_debugpy.rs` or `wait_delve.rs` against the real one.
+**What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. There is no `FakeAdapter`: where the thing under test genuinely isn't adapter behaviour, use `AdapterHandle::detached()` — `#[cfg(test)] pub(crate)`, every request answers `Gone`, and reachable only from a unit test inside `crates/daemon/src/`, not from `crates/daemon/tests/` — or a scripted transport as `crates/dap/src/transport.rs` does. Anything that is a claim about what an adapter does belongs in `wait_codelldb.rs`, `wait_debugpy.rs` or `wait_delve.rs` against the real one.
 
 ## Sanity-checking a change by hand
 

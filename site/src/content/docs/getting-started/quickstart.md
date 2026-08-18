@@ -202,8 +202,8 @@ First iteration: `i` is 1 and `sum` is still 0.
 
 :::caution[Reference numbers expire the moment the program moves]
 `1006` is good for this stop and no other. After any step or `continue`, run `scopes` again
-and use the new numbers. A stale one is refused with `StaleHandle`, which names the stop it
-came from.
+and use the new numbers. A stale one is refused with `StaleHandle`, saying whether it belongs
+to an earlier stop or to a session that has ended.
 
 Do not copy `1006` out of this page — yours will differ. Read it from your own `scopes`.
 :::

@@ -3,12 +3,16 @@
 What each command returns under `--format json`. Field names are stable; a
 breaking change to any of them requires a decision-log entry in lazydap.
 
-Two different conventions, and it matters which one you are reading:
+Two conventions, and it matters which one a field follows:
 
-- **A top-level reply** — the `--wait` blob, `launch`, `status`, `disconnect` —
-  serialises every field it has, `null` when it has nothing. Test the value.
-- **The objects nested inside one** — a breakpoint, a stack frame, a variable,
-  a watch — **omit** their optional fields. Test for presence.
+- **Everything a response is made of** — the `--wait` blob and its `frame`,
+  `locals` and `user_frame`; `status`'s `session` and its `exit_code`; `stack`'s
+  `total` — is **always present**, and `null` when there is nothing. Test the
+  value.
+- **A breakpoint, a stack frame, a variable, a watch** — the objects a response
+  carries rather than defines — **omit** their optional fields. So a frame with
+  no file has no `source.path` key at all, and a breakpoint with no condition
+  has no `condition`. Test for presence.
 
 ## The `--wait` blob
 
