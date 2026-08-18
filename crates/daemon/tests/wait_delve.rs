@@ -473,7 +473,7 @@ fn a_program_that_never_stops_times_out_without_ending_the_session() {
 ///
 /// delve deletes its compiled binary when it handles a `disconnect`, and an
 /// exited session used to send none — the daemon read on until `shutdown` killed
-/// the adapter, so the binary leaked. Since D-WP1-1 the pump disconnects an
+/// the adapter, so the binary leaked. Since D094 the pump disconnects an
 /// adapter whose session has ended, which gives delve the chance to delete it
 /// *before* shutdown; either way, nothing of this session may be on disk once
 /// the daemon is gone. The other tests miss this because the sandbox always
@@ -747,7 +747,7 @@ fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disco
     // `terminated` too, so nothing but `lazydap shutdown` collected one. It
     // also has a second thing to lose by being killed rather than disconnected
     // — the binary it compiled, which it deletes on its own way out (quirk 5) —
-    // and the sandbox's `Drop` checks for that file as well (D-WP1-1).
+    // and the sandbox's `Drop` checks for that file as well (D094).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let survivors = loop {
         let found = children_matching(daemon_pid, "dlv");
@@ -774,7 +774,7 @@ fn disconnecting_without_terminating_says_so_honestly_when_delve_cannot_detach()
     // it: the debuggee is delve's own child and dies with it whatever the
     // request said. Reporting `terminated_debuggee: false` told a caller their
     // program was still running when it had been dead for eighty milliseconds
-    // (D-WP1-2).
+    // (D095).
     let started = std::time::Instant::now();
     let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
 

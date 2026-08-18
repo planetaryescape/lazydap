@@ -177,7 +177,7 @@ impl DaemonState {
             // binary may still be on disk (finding 4). The adapter itself is
             // the pump's to end — it disconnects and kills as soon as the
             // session ends, which is *why* there is a finished session here
-            // (D-WP1-1). Dropping the slot cannot do it: the pump holds an
+            // (D094). Dropping the slot cannot do it: the pump holds an
             // `Arc<Session>` of its own, so nothing here is the last reference
             // and `kill_on_drop` never fires.
             if let Some(Slot::Live(session)) = sessions.get(id) {
@@ -644,7 +644,7 @@ impl Session {
     /// adapter is asked to detach, and then killed — which the pump reads as an
     /// adapter that died, and D045's reaper then kills the very process the
     /// caller asked to keep. Forgetting the pid first is what makes the promise
-    /// true: there is nothing left to reap (D-WP1-1).
+    /// true: there is nothing left to reap (D094).
     pub fn release_debuggee(&self) -> Option<Debuggee> {
         lock(&self.debuggee).take()
     }
@@ -652,7 +652,7 @@ impl Session {
     /// A client is ending this session itself; the pump should not also try.
     ///
     /// `disconnect` usually provokes a `terminated`, and the pump answers a
-    /// session that has ended by disconnecting from the adapter (D-WP1-1) —
+    /// session that has ended by disconnecting from the adapter (D094) —
     /// which would put a second `disconnect` on the wire behind the client's
     /// own. Two execution-class requests to one adapter is what
     /// non-negotiable #6 forbids, and the second carries the opposite

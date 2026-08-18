@@ -1514,11 +1514,11 @@ debugpy and delve behave the same way — see quirk 17 and quirk 16 in their fil
 
 The daemon's read pump now sends `disconnect` the moment a session ends, gives
 whatever is still in flight 250 ms to arrive, and then kills the adapter itself
-(D-WP1-1). Nothing waits for an EOF that is not coming.
+(D094). Nothing waits for an EOF that is not coming.
 
 ### Cross-references
 
-- D-WP1-1 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
+- D094 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
 - `crates/daemon/src/adapter/pump.rs` — `wind_down`
 - D045 — the sibling rule for the *debuggee* an adapter leaves behind
 
@@ -1557,11 +1557,11 @@ codelldb is the **only** adapter lazydap drives that advertises DAP's
 
 Nothing to fix; the five seconds are codelldb doing the work that was asked for.
 lazydap's own grace after the answer is 500 ms, kept only for an adapter that
-might acknowledge first and detach afterwards (D-WP1-2).
+might acknowledge first and detach afterwards (D095).
 
 ### Cross-references
 
-- D-WP1-2 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
+- D095 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
 - Quirk 25 — the same adapter not exiting when it is done
 
 ---

@@ -1245,7 +1245,7 @@ fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disco
     // disconnected from — so a daemon that only ever read from it kept the
     // adapter, and its ~100MB of LLDB, alive until `lazydap shutdown`. One per
     // session, and an agent loop that launches without disconnecting is every
-    // session (D-WP1-1). Nothing here says `disconnect`: the point is that the
+    // session (D094). Nothing here says `disconnect`: the point is that the
     // daemon does it for itself.
     let survivors = until_gone(|| children_of(daemon_pid, "codelldb"));
     assert!(
@@ -1269,7 +1269,7 @@ fn disconnecting_without_terminating_leaves_the_debuggee_running() {
     let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
     assert_eq!(answer["terminated_debuggee"], false, "got: {answer}");
 
-    // The answer said the program was left alone, and until D-WP1-1 it was
+    // The answer said the program was left alone, and until D094 it was
     // not: killing the adapter made the pump read an adapter that had died,
     // and D045's reaper then killed the very process this flag exists to keep.
     std::thread::sleep(std::time::Duration::from_millis(500));

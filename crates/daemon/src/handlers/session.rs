@@ -216,7 +216,7 @@ pub async fn disconnect(
     // an adapter that cannot detach is asked to terminate instead, because
     // asking it to detach anyway achieves nothing and — for debugpy, which
     // simply never answers such a request — costs ten seconds of request
-    // timeout before it achieves nothing (D-WP1-2).
+    // timeout before it achieves nothing (D095).
     let ending = ends_the_program(session, terminate);
     // ...and what becomes of the program, which is the answer the caller gets.
     // The one function both this and the `--dry-run` above call, so a preview
@@ -242,7 +242,7 @@ pub async fn disconnect(
     // finished detaching, and D045's reaper killing the debuggee when the pump
     // reads that killed adapter as one that died. So the pid is given up first
     // — there is then nothing left to reap — and the adapter is given time to
-    // leave on its own below (D-WP1-1).
+    // leave on its own below (D094).
     if !ending {
         session.release_debuggee();
     }
@@ -321,7 +321,7 @@ fn terminates_debuggee(session: &Session, terminate: bool) -> bool {
 /// done. The surprising half of the rule lives here: `--no-terminate` against an
 /// adapter that does not advertise `supportTerminateDebuggee` is carried out as
 /// a *terminate*, because that is what happens either way and reporting
-/// otherwise is the lie this exists to remove (D-WP1-2).
+/// otherwise is the lie this exists to remove (D095).
 fn ends_the_program(session: &Session, terminate: bool) -> bool {
     terminate || !session.adapter().can_detach()
 }
@@ -606,7 +606,7 @@ mod tests {
     /// A session with no adapter behind it, in whatever state is being tested.
     ///
     /// `AdapterHandle::detached` cannot detach, which is the case that matters
-    /// here: it is what debugpy and delve are (D-WP1-2).
+    /// here: it is what debugpy and delve are (D095).
     fn session(state: SessionState) -> Session {
         let (event_tx, _keep_open) = tokio::sync::broadcast::channel(64);
         Session::new(
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn an_adapter_that_cannot_detach_terminates_a_live_debuggee_whatever_was_asked() {
         // debugpy and delve: `--no-terminate` is carried out as a terminate,
-        // and the answer says `true` because that is what happens (D-WP1-2).
+        // and the answer says `true` because that is what happens (D095).
         let live = session(SessionState::Paused);
 
         assert!(terminates_debuggee(&live, false), "asked to keep it");

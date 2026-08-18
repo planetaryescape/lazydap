@@ -2070,7 +2070,7 @@ shape for a version bump nothing else needs; they are retirable at the next one.
 
 ---
 
-## D-WP1-1 — the daemon ends an adapter as soon as its session ends, and never kills one it asked to detach
+## D094 — the daemon ends an adapter as soon as its session ends, and never kills one it asked to detach
 
 **Status:** decided (2026-08-18, defect campaign WP1).
 
@@ -2109,7 +2109,7 @@ pid first — there is then nothing for D045 to reap — and the adapter is give
 short bounded window to exit on its own before it is killed. That wait is only
 taken when the program is actually being kept: codelldb never exits on its own,
 so waiting for it on the ordinary path would cost every `lazydap disconnect` the
-full grace for nothing. **Which adapters this covers is D-WP1-2's subject** —
+full grace for nothing. **Which adapters this covers is D095's subject** —
 today, only codelldb can detach at all.
 
 **What this does not change.** `--wait` still returns at the ending; the
@@ -2118,7 +2118,7 @@ what the graces are for: a promise to be tidy is not a promise to wait forever.
 
 ---
 
-## D-WP1-2 — `--no-terminate` is a request, and the answer says what actually happened
+## D095 — `--no-terminate` is a request, and the answer says what actually happened
 
 **Status:** decided (2026-08-18, second-opinion review of WP1).
 
@@ -2163,7 +2163,7 @@ and nothing a client does needs it: what a client needs is the honest
 `AdapterHandle`.
 
 **A second `disconnect` is not allowed on the wire.** The client's `disconnect`
-usually provokes `terminated`, which is precisely the event that makes D-WP1-1's
+usually provokes `terminated`, which is precisely the event that makes D094's
 pump disconnect — so both fired, and the pump's carried the opposite
 `terminateDebuggee` to the client's. Two execution-class requests to one adapter
 is non-negotiable #6. `Session::begin_client_teardown` marks the session before

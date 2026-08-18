@@ -377,7 +377,7 @@ For delve there is a second thing riding on that `disconnect`: the binary
 `mode: "debug"` compiled is deleted when delve handles it. So an exited session
 that was never disconnected from leaked both a `dlv` process and a
 `lazydap-delve-<pid>-<nanos>` file in the temp directory — the file leak quirk 5
-describes, reached by a different route. Since D-WP1-1 the daemon disconnects an
+describes, reached by a different route. Since D094 the daemon disconnects an
 adapter as soon as its session ends, which is what gives delve the chance to
 clean up after itself; lazydap's own removal of the file is now the backstop it
 was meant to be rather than the only thing doing it.
@@ -407,7 +407,7 @@ delve takes it with it however the request was phrased.
 
 **What lazydap does:** treats delve as an adapter that cannot detach, so
 `--no-terminate` is carried out as a terminate and answered
-`terminated_debuggee: true`, with a warning on stderr (D-WP1-2). The alternative
+`terminated_debuggee: true`, with a warning on stderr (D095). The alternative
 was reporting `false` about a process that had been dead for eighty milliseconds.
 
 ---

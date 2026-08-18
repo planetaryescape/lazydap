@@ -759,7 +759,7 @@ impl AdapterHandle {
     /// `terminateDebuggee: false`: delve kills the debuggee with itself, and
     /// debugpy never answers the request at all. So this is read as the
     /// permission it is, and `disconnect --no-terminate` reports what actually
-    /// happened rather than what was asked for (D-WP1-2).
+    /// happened rather than what was asked for (D095).
     pub fn can_detach(&self) -> bool {
         self.support_terminate_debuggee
     }
@@ -769,7 +769,7 @@ impl AdapterHandle {
     /// The half of teardown that [`kill`](Self::kill) cannot do: an adapter
     /// killed while it is still handling a `disconnect` never finishes
     /// detaching from the debuggee, which is what `disconnect --no-terminate`
-    /// asked it to do (D-WP1-1). `false` means the patience ran out and the
+    /// asked it to do (D094). `false` means the patience ran out and the
     /// caller should kill it.
     ///
     /// Polled rather than awaited on the child, so the writer lock is taken for

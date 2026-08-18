@@ -71,7 +71,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
     // A debuggee quick enough to finish during its own launch has already
     // ended, and the `terminated` that says so was read by the handshake. There
     // is nothing left to wait for, so the wind-down starts here rather than
-    // never (D-WP1-1).
+    // never (D094).
     let mut winding_down = ended_by_itself(&session).then(|| wind_down(&session));
 
     loop {
@@ -144,7 +144,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
 /// The session has ended. Send the adapter the `disconnect` it is waiting for,
 /// and say how long to keep reading for its answer.
 ///
-/// This is the fix for the leak D-WP1-1 names: codelldb, debugpy and delve all
+/// This is the fix for the leak D094 names: codelldb, debugpy and delve all
 /// hold their socket open after `terminated` until a client disconnects, so a
 /// pump that simply kept reading kept the adapter — and its whole process tree
 /// — alive for the life of the daemon. One adapter leaked per session that
@@ -190,7 +190,7 @@ fn wind_down(session: &Arc<Session>) -> Instant {
 /// Only that case is the pump's to wind down. A `lazydap disconnect` is already
 /// sending its own `disconnect` and killing the adapter after it; adding a
 /// second one behind it puts two of them on the wire, carrying opposite
-/// `terminateDebuggee` values (D-WP1-2).
+/// `terminateDebuggee` values (D095).
 fn ended_by_itself(session: &Arc<Session>) -> bool {
     !session.state().is_live() && !session.client_teardown_started()
 }

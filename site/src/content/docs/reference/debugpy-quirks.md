@@ -384,7 +384,7 @@ terminated and then waits for a `disconnect`, sending no EOF. A client that read
 until the connection closes never gets there, and the adapter — a Python
 interpreter, plus the launcher it spawned — stays resident. lazydap's pump now
 disconnects as soon as a session ends and kills the adapter afterwards
-(D-WP1-1).
+(D094).
 
 Unlike codelldb, debugpy *does* exit of its own accord once it has been
 disconnected from, so the kill that follows is usually a no-op.
@@ -434,7 +434,7 @@ program (debugpy 1.8.21, CPython 3.14.6, 2026-08-18):
 **What lazydap does:** reads the specification's spelling, treats debugpy as an
 adapter that cannot detach, and carries out `--no-terminate` as a terminate —
 answering `terminated_debuggee: true`, which is what happens, and printing a
-warning on stderr saying why (D-WP1-2). The misspelled field is deliberately not
+warning on stderr saying why (D095). The misspelled field is deliberately not
 read: trusting it would restore both the twelve-second wait and the false answer.
 
 ## See also

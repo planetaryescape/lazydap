@@ -199,7 +199,7 @@ struct Outcome {
     ///
     /// Daemon-side only: it decides what `disconnect --no-terminate` does, and
     /// nothing a client reads depends on it, so it stays off
-    /// [`AdapterCapabilities`] and out of the protocol's shape (D-WP1-2).
+    /// [`AdapterCapabilities`] and out of the protocol's shape (D095).
     support_terminate_debuggee: bool,
 }
 

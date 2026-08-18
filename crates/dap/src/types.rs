@@ -19,7 +19,7 @@ pub struct Capabilities {
     /// `supportsTerminateDebuggee`, which is not the same field and is not the
     /// one DAP defines (debugpy quirk 18). Reading the specification's spelling
     /// predicts what all three adapters actually *do* with a
-    /// `terminateDebuggee: false`, and reading debugpy's does not (D-WP1-2).
+    /// `terminateDebuggee: false`, and reading debugpy's does not (D095).
     pub support_terminate_debuggee: bool,
 }
 

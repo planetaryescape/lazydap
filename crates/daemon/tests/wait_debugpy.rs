@@ -586,7 +586,7 @@ fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disco
 
     // The C twin, and the same finding: debugpy also keeps its socket open
     // after `terminated` and waits to be disconnected from, so a daemon that
-    // only ever read from it accumulated one adapter per session (D-WP1-1).
+    // only ever read from it accumulated one adapter per session (D094).
     // Nothing here says `disconnect` — the daemon does it for itself.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let survivors = loop {
@@ -615,7 +615,7 @@ fn disconnecting_without_terminating_says_so_honestly_when_debugpy_cannot_detach
     // a `disconnect` carrying `terminateDebuggee: false` at all. lazydap used
     // to send one anyway, wait out the ten-second request timeout, kill the
     // adapter, watch the debuggee die with it, and report
-    // `terminated_debuggee: false`. Both halves of that were wrong (D-WP1-2).
+    // `terminated_debuggee: false`. Both halves of that were wrong (D095).
     let started = std::time::Instant::now();
     let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
 

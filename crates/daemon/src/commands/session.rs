@@ -191,7 +191,7 @@ pub async fn disconnect(
     // not support DAP's `terminateDebuggee` ends the program whatever was
     // asked, and `terminated_debuggee` says so honestly. Said out loud on
     // stderr too, because a flag that was silently not honoured is how somebody
-    // loses a long-running process and never learns why (D-WP1-2). stderr, so
+    // loses a long-running process and never learns why (D095). stderr, so
     // it cannot land in anybody's parsed stdout.
     if !terminate && terminated_debuggee {
         let outcome = match dry_run {
