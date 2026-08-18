@@ -201,10 +201,10 @@ say.
 
 ### Left open for the user
 
-**Deployment and domain.** No Vercel project was created and nothing was deployed, per the
-milestone. `site/vercel.json` matches mxr's shape (`buildCommand`, `outputDirectory`,
-`framework`) minus mxr's apex-redirect rule, which is domain-specific. `astro.config.mjs`
-reads `SITE_URL` from the environment and falls back to `https://lazydap.sh`, a placeholder
-chosen only for symmetry with `mxr.sh` — it appears in canonical tags, the sitemap,
-`robots.txt` and `llms-full.txt`, so it needs deciding before the first deploy rather than
-after.
+**Deployment and domain.** *Settled after this milestone was written:* the site is deployed
+to Vercel and live at <https://lazydap.sh>. The project is linked through the gitignored
+`site/.vercel/`, and a deploy is `cd site && vercel deploy --prod --scope planetaryescape`.
+`https://lazydap.sh` is therefore the real host `astro.config.mjs` falls back to, not the
+placeholder it was chosen as; it appears in canonical tags, the sitemap, `robots.txt` and
+`llms-full.txt`. `site/vercel.json` still matches mxr's shape (`buildCommand`,
+`outputDirectory`, `framework`) minus mxr's apex-redirect rule.

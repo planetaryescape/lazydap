@@ -9,7 +9,7 @@ Phased delivery of lazydap. Each phase is a directory's worth of milestones; eac
 - **[02 — Phase B: daemon + protocol](02-phase-B.md)** — IPC core, CLI subcommands, agent skill. M5–M7.
 - **[03 — Phase C: TUI](03-phase-C.md)** — ratatui shell, Elm-ified, IPC-wired. M8–M11.
 - **[04 — Phase D: useful features → v0.1](04-phase-D.md)** — Stack pane, scopes, breakpoint UI, config. M12–M15.
-- **[05 — Phase E: beyond v0.1](05-phase-E.md)** — Watches, REPL, second adapter. M16–M18.
+- **[05 — Phase E: beyond v0.1](05-phase-E.md)** — Watches, REPL, more adapters, packaging, docs site, attach. M16–M24.
 
 ## How to use these docs
 

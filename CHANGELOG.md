@@ -128,9 +128,9 @@ Only codelldb advertises DAP's `supportTerminateDebuggee`, and only codelldb hon
 
 **`0` means "no limit" on `--levels`, `--count` and `--max`,** the way it already did on `--timeout`. `stack --levels 0` used to return an empty list of frames under exit 0.
 
-**Protocol v7 → v8.** `frame_id` and `variables_reference` are lazydap's own handles rather than the adapter's numbers, `Response::Continued` gained `already_running`, `Response::Variables` became a struct with `truncated`, the `--wait` blob gained `user_frame` and `locals`, and `ErrorCode` gained `StaleHandle`.
-
 **Protocol v5 → v7.** v6 added the `delve` adapter — a new `AdapterKind` variant, which an older daemon cannot decode at all. v7 changed four things about what the daemon reports: `threads` may omit a thread's `name`, the `--wait` blob and the `Stopped` event gained `adapter_thread_id`, `capabilities` gained `supports_variable_paging`, and a variable gained `evaluate_name`.
+
+**Protocol v7 → v8.** `frame_id` and `variables_reference` are lazydap's own handles rather than the adapter's numbers, `Response::Continued` gained `already_running`, `Response::Variables` became a struct with `truncated`, the `--wait` blob gained `user_frame` and `locals`, and `ErrorCode` gained `StaleHandle`.
 
 **`lazydap variables --start` and `--count` now work against every adapter.** codelldb does not implement DAP's variable paging and silently ignored both, so `--start 100 --count 5` on a 2000-element array returned all of it from `[0]`. lazydap applies the window itself when the adapter has not claimed it. `--filter` is passed through to the debugger and *not* emulated: nothing on the wire says which children are indexed, and guessing from how a name is spelled would return the wrong rows against an adapter that spells them differently.
 

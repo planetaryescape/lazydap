@@ -162,7 +162,7 @@ State files:
 
 **Status:** decided.
 
-**Why:** Inherited from mxr. A `FakeAdapter` exists (in-process, deterministic) for fast unit-style tests. Integration tests run real codelldb against tiny fixture binaries. Mocks of `DebugAdapter` are last-resort — they pass unit tests but miss real adapter quirks.
+**Why:** Inherited from mxr. Integration tests run real adapters against tiny fixture binaries. Mocks of `DebugAdapter` are last-resort — they pass unit tests but miss real adapter quirks. *(As built: no `FakeAdapter` was ever written. `AdapterHandle::detached()` — `#[cfg(test)]`, every request answers `Gone` — is what session-lifecycle tests use, and `lazydap-dap` scripts a transport where the test is about the wire.)*
 
 ---
 
@@ -663,13 +663,13 @@ These need user input.
 
 *(O01–O04 were answered on 2026-07-30 and became D024, D025, D026 and D027.)*
 
-None outstanding. One question is parked for M15: whether to publish crates to crates.io. Default is no — `publish = false` stays, matching mxr.
+None outstanding. The crates.io question that was parked for M15 was answered on 2026-07-31 and is **D051** below: no, `publish = false` stays on all seven crates.
 
 ---
 
 ## Decisions to revisit at v0.1 → v0.2 boundary
 
-- D013 (codelldb-only) → **debugpy landed at M18**; js-debug + delve still open.
+- D013 (codelldb-only) → **debugpy landed at M18 and delve at M22**; js-debug (M23) still open.
 - D007 (single-session enforcement) → multi-session lift.
 - D023 (AI external) → re-evaluate. May want to ship a thin `lazydap-mcp` server crate as an officially-maintained client.
 

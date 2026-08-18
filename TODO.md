@@ -11,48 +11,51 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
 
 ## Now
 
-- **Every milestone through v0.1 is done. The next move is a decision, not a milestone: cut
-  `v0.1.0`, or hold.** M15 landed the config file, `launch.json` import, `lazydap launches`, and
-  quirk 8's fix; the `[0.1.0]` CHANGELOG section is dated and finalised, which is precisely what
-  `.github/workflows/product-release.yml` refuses to publish without. Everything below is what a
-  tag needs, and none of it is code:
-  1. **Decide the crates.io question** (see "Open decisions" in
-     [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md)). Default is no —
-     `publish = false` stays on all seven crates, and the workflow has no publish job. Deciding it
-     is a D-entry, not a change of plan.
-  2. **Confirm the CHANGELOG date.** It reads `## [0.1.0] — 2026-07-30`. If the tag is cut on a
-     different day, change that line in the same commit that precedes the tag.
-  3. **Tag and push:** `git tag v0.1.0 && git push origin v0.1.0`. The workflow re-runs every gate
-     against the tagged commit, checks the tag matches the workspace version, builds macOS
-     arm64/x86_64 and Linux x86_64, and publishes a GitHub Release with tarballs, SHA-256 sums and
-     `lazydap.skill` attached, with notes taken from the CHANGELOG section. A `v0.*` tag goes out
-     as a prerelease.
-  4. **Rehearse first if you want to**: `workflow_dispatch` runs the gates and the builds and stops
-     before publishing, deliberately.
-  5. **The demo GIF** is still missing (M15's step 4). It is not a release blocker; the README
-     works without it.
-- **Wave 7 candidates, once the tag is out:** M16 (watches), M17 (REPL pane), then M18 (debugpy) which is the first real test of the adapter seam (D029).
-  Smaller items worth folding in: conditional breakpoints from the TUI, and the config schema
-  fields the blueprint documents that nothing reads yet.
-- New decisions from Phase D's TUI lane: **D040** (the reducer numbers its own requests and drops
-  answers that have been overtaken), **D041** (`Cmd::Batch`), **D042** (the TUI reconnects by
-  calling back into the CLI rather than learning to spawn), **D043** (a breakpoint change is either
-  an adapter's opinion or the project's, and the event says which — **protocol v2 → v3**), **D044**
-  (a reconnecting TUI never gives up, and every attempt is identified).
-- A review round after M12–M14/M19 found eight defects, all fixed; the per-milestone task files
-  carry a "Review round" section describing each. A ninth, found by counting processes rather
-  than by reading code, was a **product** bug: a debuggee outlived its debugger whenever the
-  adapter died uncleanly (**D045**). Check for orphans with `pgrep -f target/debug/c-fixtures`,
-  not only `pgrep -x codelldb` — that blind spot is how 46 of them survived five waves of
-  review. The theme was staleness applied to answers but
-  not to what stays on screen while one is outstanding, and session-scoped facts treated as
-  project-global.
-- Open decisions O01–O04 resolved 2026-07-30 and recorded as D024–D027 in
-  [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md), alongside D028 (codec),
-  D029 (adapter seam), D030 (`SessionId` form), D031–D036 from M6/M7 (breakpoint ids, protocol
-  v2, the two codelldb normalisations, skill generation, and what `--dry-run` means per command),
-  and D037–D039 from Phase C (the daemon→TUI dependency arrow, what `Subscribe` answers with, and
-  how the TUI is verified)
+- **Next milestone: [M24 — Attach to a running process](docs/implementation/tasks/M24-attach.md).**
+  The segment's most-needed feature and no competitor has it; chosen over js-debug on
+  2026-07-31. [M23 — js-debug](docs/implementation/tasks/M23-jsdebug-adapter.md) is blocked at
+  its own scope gate behind it: the parent session debugs nothing, and a single-level
+  child-session milestone has to come first.
+- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.4 shipped 2026-08-18.** All five went out
+  through [.github/workflows/product-release.yml](.github/workflows/product-release.yml) as
+  prereleases, with macOS arm64/x86_64 and Linux x86_64 tarballs, SHA-256 sums and
+  `lazydap.skill` attached. `install.sh` and the Homebrew tap (M21) are both live; the docs
+  site is deployed to <https://lazydap.sh> (M20). crates.io is answered and is **no** — D051,
+  `publish = false` stays on all seven crates.
+- **The 2026-08-18 defect campaign.** An audit of the whole surface found defects in every part
+  of it; they were fixed in parallel packages and released the same day, one release per area:
+  startup, the store and project-root detection (v0.2.0); breakpoints (v0.2.1); `--wait` and the
+  execution queue (v0.2.2); the CLI surface, `doctor` and the paths errors (v0.2.3); adapter
+  lifecycle (v0.2.4). The protocol went **v8 → v9** on the way (D086). Decisions **D084–D095** record
+  the rules that changed; the CHANGELOG sections say what a user sees. The theme: answers that
+  were confidently wrong rather than absent — a `--wait` reporting `timeout` for a program that
+  had stopped, a `break --condition` silently dropping the condition, `--no-terminate` killing
+  the program and saying it had not, and one leaked adapter process per session that ended on
+  its own.
+- **Follow-ups the campaign left, none of them a milestone yet:**
+  - **An event pushed to a subscriber can still be unframeable.** D091 fixed it for replies —
+    a reply over the codec's 16 MiB limit is answered `BadRequest` instead of closing the
+    connection — but `serve_client`'s subscription arm sends events, which have no request to
+    refuse. A single enormous `Output` chunk still breaks that connection. It needs a way to
+    say an event was dropped, which is the hole D072 exists to close.
+  - **`lazydap completions <shell>` still panics on `EPIPE`.** Every other command writes
+    through `output::print_line`, which treats a closed pipe as a quiet exit 0; `clap_complete`
+    writes to stdout itself, as does clap's own error path.
+  - **`Request::Doctor { check_adapters, check_state }` has no in-tree caller** since D093
+    moved both checks to the client. The fields stay on the wire because removing them is a
+    frame-shape change; retire them at the next protocol bump.
+  - **`install.sh` has no `GITHUB_TOKEN` passthrough.** Its release lookup uses the
+    unauthenticated GitHub API, which rate-limits at 60/hour — enough to 403 a run of install
+    verifications for an hour.
+  - **The TUI asks for `Variables { max: 0 }`** — no cap — every time it expands a node, so a
+    container with thousands of children crosses the socket whole to fill a pane a few rows
+    tall. The CLI's default cap is 200 (D080).
+  - **`ProjectStore`'s merge replaces `state.unknown` wholesale** with the file's copy
+    (`crates/store/src/lib.rs:643`) rather than three-way merging it the way breakpoints and
+    watches are merged. Harmless today, because lazydap never writes into `unknown` — but it
+    is where `[[launch_configs]]` lives, so the day anything does write there, a concurrent
+    hand edit wins silently.
+  - **The demo GIF** is still missing (M15's step 4). Not a blocker; the README works without it.
 
 ### Repo state notes (for cold-start agent)
 
@@ -61,7 +64,8 @@ The `chapter-*` tags/releases and [.github/workflows/release.yml](.github/workfl
 are teaching-era machinery: tags mark the *start state* of book chapters. Leave them alone; new
 chapter tags are cut from `lazydap-learn`, not here. Product releases (v0.1+) have their own
 workflow, [.github/workflows/product-release.yml](.github/workflows/product-release.yml), which
-runs on `v*` tags and has never fired.
+runs on `v*` tags and has published every release from `v0.1.0` on. The full release flow is
+the "Release shorthand" section of [`/AGENTS.md`](AGENTS.md).
 
 ## Workspace setup (prerequisite to M0)
 
@@ -110,23 +114,24 @@ runs on `v*` tags and has never fired.
 
 ## Known follow-ups (post-v0.1, no milestone yet)
 
+*(debugpy landed at M18, delve at M22. The campaign's own follow-ups are under "Now".)*
+
 - Multi-session support (currently single-session-per-daemon enforced; protocol uses session IDs from M5 to keep this option open)
-- `js-debug` adapter for Node/TS
-- `delve` adapter for Go
+- `js-debug` adapter for Node/TS — has a milestone (M23) and is blocked at its scope gate
 - Conditional breakpoints in the TUI (the CLI already ships them — `break --condition`, discovered working 2026-07-30; only the TUI can't set one)
 - Restart / disconnect-and-relaunch
 - Theming + mouse support
 - HTTP bridge (separate crate, optional binary)
 - AI advisor extension points (see [`docs/blueprint/12-ai-future.md`](docs/blueprint/12-ai-future.md))
-- Auto-context in the `--wait` blob: inline source snippet with a current-line marker and top-frame locals, so a stop costs zero follow-up calls (bake-off: dap does this well)
+- Auto-context in the `--wait` blob: an inline source snippet with a current-line marker. The locals half of this shipped at v0.2.0 — the blob carries `locals` and `user_frame` (D078)
 - Double-continue semantics review: queueing a second `continue` silently carries past a breakpoint; a clean rejection may be safer against agent double-fire (bake-off finding; touches D021)
-- Install-hint error prose: adapter-missing errors name the exact env var/URL fix (bake-off: dap's messages are better than ours)
+- Install-hint error prose — *done for `lazydap doctor` at D093, which names the install command per adapter. Deliberately not on the launch path: somebody whose launch just failed is not being told how to install a debugger they have.*
 - Daemon-restart race test: stop then immediate relaunch raced to a transport EOF in the rival CLI; assert lazydap's path
 - Cargo "locator": resolve `cargo build` artifacts into codelldb launch configs without a launch.json (Zed-style)
 
 ## Open decisions awaiting input
 
 Tracked in [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md) under "Open" status.
-O01–O04 answered 2026-07-30. One question remains, and it now blocks nothing but the tag: whether
-to publish the crates to crates.io (default: no — `publish = false` stays, matching mxr's stance).
-Decide it before tagging, because crates.io versions are immutable and names are permanent.
+**None.** O01–O04 were answered 2026-07-30 and became D024–D027; the crates.io question was
+answered 2026-07-31 and is D051 — no, `publish = false` stays on all seven crates and the
+release workflow has no publish job.

@@ -76,7 +76,7 @@ Structure:
 - [`docs/implementation/README.md`](docs/implementation/README.md) — index of phases
 - [`docs/implementation/00-workspace-setup.md`](docs/implementation/00-workspace-setup.md) — prerequisite to M0
 - [`docs/implementation/01-phase-A.md`](docs/implementation/01-phase-A.md) through `05-phase-E.md` — phase docs (groups of milestones)
-- [`docs/implementation/tasks/M00-...`](docs/implementation/tasks/) through `M18-...` — one MD file per milestone
+- [`docs/implementation/tasks/M00-...`](docs/implementation/tasks/) through `M24-...` — one MD file per milestone
 
 **How agents work with tasks:**
 
@@ -245,7 +245,7 @@ These are paid for in pain (mostly mxr's). Violating them creates work for every
 4. **Mutations are dry-runnable.** `--dry-run` must use the same selection logic as the real mutation.
 5. **DAP details stay in adapter crates.** The daemon depends on the `DebugAdapter` trait, not raw DAP messages.
 6. **Don't pipeline requests to one adapter.** Queue them.
-7. **Tests cross real boundaries.** A `FakeAdapter` exists for unit-style speed; the canonical tests run real codelldb.
+7. **Tests cross real boundaries.** There is no `FakeAdapter`; `AdapterHandle::detached()` (`#[cfg(test)]`) stands in for one where the thing under test is session bookkeeping. The canonical tests run real codelldb, debugpy and delve.
 8. **`tracing` from the first line of `main`.** No `println!` debug calls.
 
 ### What "small blast radius" means here
@@ -330,10 +330,10 @@ release — only for wire-shape changes (see D032/D043/D050/D056 for what counts
 - Don't bypass `lazydap.skill`'s CLI surface to call internal APIs. If the agent UX is wrong, fix the CLI.
 - Don't add AI features into the core. AI is an external client — same as the TUI, same as everything else.
 
-## Current state (verified 2026-07-30)
+## Current state (verified 2026-08-18)
 
-**Pre-alpha, but the CLI above is now real.** The agent loop documented in this file works
-end to end against a C binary. What exists today:
+**Prerelease — every `v0.*` tag ships as one — but the CLI above is real.** The agent loop
+documented in this file works end to end against C, Python and Go programs. What exists today:
 
 - **Cargo workspace**, edition 2024, `rust-version = "1.85"`, seven crates: `lazydap-core`, `lazydap-protocol`, `lazydap-config`, `lazydap-dap`, `lazydap-store`, `lazydap-tui`, `lazydap-daemon`.
 - **One binary: `lazydap`** (built from `crates/daemon`). `cargo install --path crates/daemon` installs it.
@@ -345,14 +345,15 @@ end to end against a C binary. What exists today:
 - **Persistent breakpoints** in `.lazydap/state.toml` (D006), applied during each launch's configuration phase and surviving both the session and the daemon.
 - **Persistent watch expressions**, in the same file and with the same discipline (D056). `lazydap watch add/list/remove` sets them without a session; the TUI's watches pane re-evaluates every one of them at each stop, and again when you select another frame. Only the *expressions* are stored — a value belongs to one stop, and a file claiming `pos = 4` tomorrow would be lying.
 - **The agent skill**, `lazydap.skill` at the repository root, built by `scripts/build-skill.sh` from `skill/`.
+- **Three adapters:** codelldb for C, C++ and Rust, debugpy for Python, delve for Go. The program's extension picks one — `.py` debugpy, `.go` delve, anything else codelldb — and `lazydap launch --adapter <name>` overrides it. All three live in `crates/daemon/src/adapter/` behind the `DebugAdapter` trait (D052), and each has its own quirks file under [`docs/reference/`](docs/reference/).
 - **Two adapter normalisations you should know about:** `--stop-on-entry` reports `reason: "entry"` with the adapter's `"exception"` kept in `raw_reason` (D033), and `eval` defaults to the `watch` context because `repl` runs an LLDB *command* (D034). Both are in [`docs/reference/codelldb-quirks.md`](docs/reference/codelldb-quirks.md).
 - **`Subscribe` and live event streaming.** A subscribed connection is pushed event frames as they happen, filtered to the kinds it asked for, interleaved with its own replies. It is answered with a `Response::Status` snapshot taken at the moment the stream starts, and replays nothing (D038).
 - **Launch configurations, read from two files.** `lazydap launches list` merges `.lazydap/state.toml`'s `[[launch_configs]]` with `.vscode/launch.json` (JSONC: comments and trailing commas), expands `${workspaceFolder}` and friends, and marks each one runnable or not with the reason. `lazydap launches run <name>` sends the same `Launch` request `lazydap launch` does — resolution is client-side, because both files are found by walking up from *your* working directory, not the daemon's (D047).
-- **A user config file** at `~/.config/lazydap/config.toml`, `$XDG_CONFIG_HOME/lazydap/config.toml`, or `LAZYDAP_CONFIG_PATH` — first that exists wins, platform config dir searched last (D049). Two settings are consumed: `[adapter.codelldb] command` (D026's first discovery tier, ahead of `PATH`) and `[general] wait_timeout_seconds`. Everything else in the blueprint's schema parses and is ignored — deliberately, rather than being modelled as fields nothing reads.
+- **A user config file** at `~/.config/lazydap/config.toml`, `$XDG_CONFIG_HOME/lazydap/config.toml`, or `LAZYDAP_CONFIG_PATH` — first that exists wins, platform config dir searched last (D049). Two settings are consumed: `[adapter.<name>] command` — `codelldb`, `debugpy` or `delve`, D026's first discovery tier, ahead of `PATH` — and `[general] wait_timeout_seconds`. Everything else in the blueprint's schema parses and is ignored — deliberately, rather than being modelled as fields nothing reads.
 - **Breakpoints bind under symlinked paths.** A file whose breakpoints the adapter declines while naming a location it could have used is re-sent under that name, once, when nothing in it bound and the suggestion resolves to the same file (D048, quirk 8). This is what makes a debuggee under `/tmp` on macOS work.
-- **Not yet:** `attach`, `until`, `source`, `restart`, conditional breakpoints from the TUI, the rest of the config schema.
+- **Not yet:** `attach` (M24, next), `until`, `source`, `restart`, conditional breakpoints from the TUI, js-debug for Node (M23, blocked at its own scope gate), the rest of the config schema.
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
-- **Milestones complete:** workspace setup, M0–M17, M19 and M20. Phases A, B, C and D are done; v0.1.0 is tagged, and M16/M17 land after it.
+- **Milestones complete:** workspace setup and M0–M22. Phases A, B, C and D are done. M23 and M24 are the two open ones. Released: `v0.1.0` on 2026-07-31, then `v0.2.0`–`v0.2.4` on 2026-08-18 out of a defect campaign; every one of them went out through `.github/workflows/product-release.yml`.
 
 Note the protocol is at **v9** (D086: `action` on a breakpoint report gained
 `updated` and `unchanged`, because setting a location that already has a
@@ -377,7 +378,7 @@ current one — and the TUI now does that for itself.
 
 The full per-command JSON is `skill/references/output-schemas.md`, which is **hand-written
 and therefore the thing most likely to have drifted** — check it against
-`crates/protocol/src/types.rs` when it matters. `commands.md` next to it is generated from
+`crates/protocol/src/types.rs` when it matters. Last swept against the binary 2026-08-18. `commands.md` next to it is generated from
 the real `Cli` type and does not drift.
 
 If a user asks you to debug something lazydap cannot do yet, say which subcommands exist and
