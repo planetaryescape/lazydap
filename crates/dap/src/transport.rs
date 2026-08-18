@@ -4,7 +4,9 @@ use serde::de::DeserializeOwned;
 use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 
@@ -110,17 +112,43 @@ pub struct DapTransport {
 /// slower cold start (a large adapter binary paging in) still fits.
 const SPAWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Largest DAP message body this will allocate for, from a `Content-Length` it
+/// has not verified. Generous by two orders of magnitude: the biggest real
+/// message is a `variables` answer for a large container, which is megabytes at
+/// the very worst.
+const MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+
+/// One line off a child's log stream, decoded lossily.
+///
+/// Nothing guarantees an adapter's log is UTF-8: codelldb runs with
+/// `RUST_LOG=debug` and relays bytes the debuggee produced, and LLDB's own
+/// diagnostics carry whatever a symbol name happens to contain. `read_line`
+/// fails the whole read on the first byte that is not, and every caller here
+/// treated that failure as end-of-stream — so one such byte stopped the drain,
+/// the pipe filled, and the adapter blocked in a log call answered no more
+/// requests. A garbled character costs one `?` instead.
+///
+/// `None` is the end of the stream. An I/O error is still an error: a pipe that
+/// is genuinely broken must not be re-read in a loop.
+async fn next_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<String>> {
+    let mut line = Vec::new();
+    if reader.read_until(b'\n', &mut line).await? == 0 {
+        return Ok(None);
+    }
+    while let Some(b'\n' | b'\r') = line.last() {
+        line.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+}
+
 /// Read lines until one carries the port marker, returning the port, or `None`
 /// if the stream ends first.
 ///
 /// The two spellings the adapters use: codelldb's `Listening on port 1234` and
 /// an address, `127.0.0.1:1234`, which is what codelldb's other builds and
 /// delve both print.
-async fn read_announced_port(
-    lines: &mut tokio::io::Lines<BufReader<Source>>,
-    marker: &str,
-) -> Result<Option<u16>> {
-    while let Some(line) = lines.next_line().await? {
+async fn read_announced_port(reader: &mut BufReader<Source>, marker: &str) -> Result<Option<u16>> {
+    while let Some(line) = next_line(reader).await? {
         tracing::debug!(target: "dap.adapter.announce", "{line}");
         if let Some((_, rest)) = line.split_once(marker) {
             let port_str = rest
@@ -139,8 +167,8 @@ async fn read_announced_port(
 /// requests.
 fn drain(stream: impl AsyncRead + Send + Unpin + 'static) {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stream).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stream);
+        while let Ok(Some(line)) = next_line(&mut reader).await {
             tracing::debug!(target: "dap.adapter.stderr", "{line}");
         }
     });
@@ -190,7 +218,7 @@ impl DapTransport {
             }
             AdapterStream::Stderr => Box::new(child.stderr.take().expect("stderr piped")),
         };
-        let mut lines = BufReader::new(announcing).lines();
+        let mut announcing = BufReader::new(announcing);
 
         // Bound the wait for the announcement, not just the reads inside the
         // handshake that follows it. The launch deadline in the daemon only
@@ -203,7 +231,7 @@ impl DapTransport {
         // error like any other launch failure.
         let announced = match tokio::time::timeout(
             deadline,
-            read_announced_port(&mut lines, spawn.port_marker),
+            read_announced_port(&mut announcing, spawn.port_marker),
         )
         .await
         {
@@ -228,7 +256,7 @@ impl DapTransport {
         };
 
         tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
+            while let Ok(Some(line)) = next_line(&mut announcing).await {
                 tracing::debug!(target: "dap.adapter.announce", "{line}");
             }
         });
@@ -438,6 +466,18 @@ impl DapReader {
         }
         let len =
             content_length.ok_or_else(|| TransportError::Header("no Content-Length".into()))?;
+        // A header is the adapter's word for how much to allocate, and this
+        // allocates it before a single byte of the body has arrived. A
+        // desynchronised stream — a reverse request answered late, a frame read
+        // half way — puts arbitrary bytes where the length belongs, and
+        // `Content-Length: 9999999999999` then takes the daemon down with an
+        // allocation failure rather than with an error anybody can read. No DAP
+        // message is anywhere near this size.
+        if len > MAX_MESSAGE_BYTES {
+            return Err(TransportError::Header(format!(
+                "Content-Length {len} exceeds the {MAX_MESSAGE_BYTES}-byte cap",
+            )));
+        }
         let mut body = vec![0u8; len];
         self.stream.read_exact(&mut body).await?;
         Ok(body)
@@ -458,8 +498,29 @@ pub struct DapWriter {
 impl DapWriter {
     /// Write a request and return its `seq` without waiting for the response.
     pub async fn send_request<T: Serialize>(&mut self, command: &str, args: &T) -> Result<i64> {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self.next_seq();
+        self.send_request_with_seq(seq, command, args).await?;
+        Ok(seq)
+    }
 
+    /// The `seq` the next request may carry.
+    ///
+    /// Split from the write for one caller: the daemon registers a waiter for
+    /// the response *before* writing, and holding the map that the read pump
+    /// delivers into across a write the adapter may be slow to accept is how a
+    /// busy socket deadlocks a session. Ordering is still the writer's:
+    /// `&mut self` means nothing else can write between this and the send.
+    pub fn next_seq(&mut self) -> i64 {
+        self.seq.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Write a request under a `seq` already taken from [`next_seq`](Self::next_seq).
+    pub async fn send_request_with_seq<T: Serialize>(
+        &mut self,
+        seq: i64,
+        command: &str,
+        args: &T,
+    ) -> Result<()> {
         let outbound = serde_json::json!({
             "seq": seq,
             "type": "request",
@@ -469,7 +530,7 @@ impl DapWriter {
         self.write_message(&outbound).await?;
         tracing::debug!(target: "dap.send", seq, command, "request");
 
-        Ok(seq)
+        Ok(())
     }
 
     /// Answer a reverse request with "no".
@@ -515,6 +576,18 @@ impl DapWriter {
     /// Whether the adapter process has already exited, without blocking.
     pub fn has_exited(&mut self) -> Result<bool> {
         Ok(self.child.try_wait()?.is_some())
+    }
+
+    /// Wait for the adapter to exit of its own accord.
+    ///
+    /// For the caller that asked it to leave and would rather it went by
+    /// itself: an adapter killed mid-`disconnect` never gets to detach from its
+    /// debuggee. Cancellation-safe, so a caller can bound it with a timeout and
+    /// pull the plug when the patience runs out. Closing stdin is part of
+    /// going: a stdio adapter is waiting on it.
+    pub async fn wait(&mut self) -> Result<()> {
+        self.child.wait().await?;
+        Ok(())
     }
 
     /// Kill the adapter process.
@@ -604,6 +677,44 @@ mod tests {
             "it must give up at the deadline, not hang: {:?}",
             started.elapsed(),
         );
+    }
+
+    #[tokio::test]
+    async fn a_content_length_bigger_than_the_cap_is_refused_rather_than_allocated() {
+        // The header is the adapter's word for how much to allocate, and a
+        // desynchronised stream can put anything there. Reserving it first and
+        // asking questions later takes the daemon out with an allocation
+        // failure rather than an error.
+        let header = format!("Content-Length: {}\r\n\r\n", u32::MAX);
+        let source: Source = Box::new(std::io::Cursor::new(header.into_bytes()));
+        let mut reader = DapReader {
+            stream: BufReader::new(source),
+        };
+
+        match reader.read_message_body().await {
+            Err(TransportError::Header(detail)) => {
+                assert!(detail.contains("cap"), "should name the cap: {detail}")
+            }
+            other => unreachable!("expected a header error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_line_that_is_not_utf8_does_not_end_the_drain() {
+        // codelldb runs with `RUST_LOG=debug` and relays bytes it was given.
+        // `read_line` fails the whole read on the first one that is not UTF-8,
+        // and the loop that treated that as end-of-stream stopped draining —
+        // after which the pipe fills and the adapter blocks in a log call.
+        let mut reader = BufReader::new(&b"first\n\xff\xfe not text\nafter\n"[..]);
+
+        let mut lines = Vec::new();
+        while let Some(line) = next_line(&mut reader).await.expect("no io error") {
+            lines.push(line);
+        }
+
+        assert_eq!(lines.len(), 3, "got: {lines:?}");
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[2], "after", "the drain kept going: {lines:?}");
     }
 
     #[tokio::test]
