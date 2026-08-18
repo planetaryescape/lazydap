@@ -10,7 +10,7 @@ description: |
   suggests. Debugs C, C++ and Rust binaries via codelldb, Python via debugpy
   and Go via delve. The program's extension picks the adapter — `.py` debugpy,
   `.go` delve, anything else codelldb — and `--adapter` overrides it.
-lazydap_min_version: "0.2.7"
+lazydap_min_version: "0.2.8"
 ---
 
 # lazydap

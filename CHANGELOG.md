@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.8] — 2026-08-18
+
 ### Fixed
 
 **One enormous event dropped a subscriber's whole connection.** The daemon refuses to frame anything over 16 MiB, and a reply that big has been answered with an error rather than a hang-up since v0.2.2 — but an event pushed to a subscriber has no request to refuse, so the connection was closed instead. A TUI watching a program that printed one gigantic line lost its event stream and reconnected. The event is now dropped on its own, with a `warn!` in the daemon log naming the kind and the size, and the connection keeps serving (D091, amended).

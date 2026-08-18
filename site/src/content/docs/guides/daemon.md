@@ -11,7 +11,7 @@ $ lazydap status --format json
 {
   "daemon_pid": 12102,
   "instance": "lazydap-demo-13cc8efcde46",
-  "lazydap_version": "0.2.7",
+  "lazydap_version": "0.2.8",
   "protocol_version": 9,
   "session": {
     "adapter": "codelldb",
