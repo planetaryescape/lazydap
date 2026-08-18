@@ -12,7 +12,8 @@
 //!
 //! Every test skips, loudly, when codelldb or a C compiler is missing, so a
 //! machine without them still gets a green `cargo test` rather than a wall of
-//! unrelated failures.
+//! unrelated failures. Set `LAZYDAP_REQUIRE_ADAPTERS` to turn that skip into a
+//! failure — CI does, because a suite that skips itself proves nothing.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -35,11 +36,35 @@ const LAZYDAP: &str = env!("CARGO_BIN_EXE_lazydap");
 /// whose failures mean something.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Claim the machine and check it can run this at all.
+/// Skip loudly — or fail, when the run was promised an adapter.
 ///
-/// Skips, loudly, when codelldb or a C compiler is missing. The thread name is
-/// the test's own name under the default harness, which is what makes the skip
-/// line say which test went quiet.
+/// A skip and a pass are the same colour in a CI log, which is how
+/// non-negotiable #7, "the canonical tests run real codelldb", came to hold
+/// only on the maintainer's laptop: CI installed no adapter, so the suite went
+/// quiet and the build went green. The `adapters` job installs them and sets
+/// `LAZYDAP_REQUIRE_ADAPTERS`, which makes a missing one a failure there while
+/// a laptop without codelldb, setting nothing, still gets a green
+/// `cargo test`.
+///
+/// The thread name is the test's own name under the default harness, which is
+/// what makes the line say which test went quiet.
+macro_rules! skip_or_fail {
+    ($reason:expr) => {{
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("this test")
+            .to_string();
+        assert!(
+            std::env::var_os("LAZYDAP_REQUIRE_ADAPTERS").is_none(),
+            "{test}: {} — LAZYDAP_REQUIRE_ADAPTERS is set, so this cannot be skipped",
+            $reason,
+        );
+        eprintln!("skipping {test}: {}", $reason);
+        return;
+    }};
+}
+
+/// Claim the machine and check it can run this at all.
 macro_rules! require_toolchain {
     () => {{
         // Held for the rest of the test: the guard is returned alongside the
@@ -49,13 +74,7 @@ macro_rules! require_toolchain {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match Toolchain::find() {
             Some(toolchain) => (toolchain, guard),
-            None => {
-                eprintln!(
-                    "skipping {}: needs codelldb on PATH and a C compiler",
-                    std::thread::current().name().unwrap_or("this test"),
-                );
-                return;
-            }
+            None => skip_or_fail!("needs codelldb on PATH and a C compiler"),
         }
     }};
 }

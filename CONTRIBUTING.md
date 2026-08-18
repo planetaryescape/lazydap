@@ -39,8 +39,18 @@ CI additionally sets `RUSTFLAGS: -Dwarnings`; locally you'll want the same befor
 | `crates/daemon/tests/ipc_server.rs` | The socket contract, driven in-process. |
 | `crates/daemon/tests/cli_lifecycle.rs` | Daemon auto-spawn, staying up, and shutting down, through the real binary. Each test gets its own instance name plus its own `LAZYDAP_RUNTIME_DIR` and `LAZYDAP_DATA_DIR`, so it never touches your actual daemon. No debuggee is launched. |
 | `crates/daemon/tests/wait_codelldb.rs` | `--wait` against real codelldb and real debuggees. The case list comes from [`docs/blueprint/10-async-to-sync.md`](docs/blueprint/10-async-to-sync.md). |
+| `crates/daemon/tests/wait_debugpy.rs`, `wait_delve.rs` | The same cases against debugpy and delve. Where an assertion differs from its codelldb twin, that difference is the finding and it is commented. |
 
 **Why `wait_codelldb.rs` serialises itself.** Every test there spawns a codelldb, which loads LLDB, maps a debuggee and opens a TCP socket. `cargo test` runs a file's tests in parallel, so a dozen of those start at once and fight over the machine — and the launch handshake has a 15-second deadline. Under that contention the deadline lands before the adapter is ready, and the suite fails for reasons that have nothing to do with lazydap: 12 of 13 timed out on a reviewer's machine while every one passed in isolation. A file-level mutex makes them take turns. It costs a few seconds of wall clock and buys a suite whose failures mean something. If you add a test there, take the same lock.
+
+**Making a skip a failure.** The three `wait_*.rs` suites skip themselves when their adapter is missing, and a skip is the same colour as a pass. Set `LAZYDAP_REQUIRE_ADAPTERS=1` and a missing adapter fails the test instead, naming what it wanted:
+
+```bash
+LAZYDAP_REQUIRE_ADAPTERS=1 cargo test -p lazydap-daemon \
+  --test wait_codelldb --test wait_debugpy --test wait_delve
+```
+
+CI's `adapters` job installs codelldb, debugpy and dlv and runs exactly that, so "the canonical tests run real codelldb" is now checked rather than trusted. The plain `test` job installs nothing, which keeps the skip path honest. Use the variable locally when you want to know that your run really exercised an adapter.
 
 **What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. A `FakeAdapter` exists for speed where the thing under test genuinely isn't adapter behaviour; anything that is a claim about what an adapter does belongs in `wait_codelldb.rs` against the real one.
 

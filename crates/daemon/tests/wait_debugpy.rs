@@ -9,7 +9,9 @@
 //! it is commented.
 //!
 //! Every test skips, loudly, when there is no Python that can import debugpy,
-//! so a machine without one still gets a green `cargo test`.
+//! so a machine without one still gets a green `cargo test`. Set
+//! `LAZYDAP_REQUIRE_ADAPTERS` to turn that skip into a failure — CI does,
+//! because a suite that skips itself proves nothing.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,29 @@ const LAZYDAP: &str = env!("CARGO_BIN_EXE_lazydap");
 /// each cleans up after itself.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Skip loudly — or fail, when the run was promised an adapter.
+///
+/// The same discipline `wait_codelldb.rs` explains: a skip and a pass are the
+/// same colour in a CI log, so a suite nothing installed an adapter for proved
+/// nothing while looking green. CI sets `LAZYDAP_REQUIRE_ADAPTERS` and a
+/// missing adapter fails there; a laptop without one sets nothing and still
+/// gets a green `cargo test`.
+macro_rules! skip_or_fail {
+    ($reason:expr) => {{
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("this test")
+            .to_string();
+        assert!(
+            std::env::var_os("LAZYDAP_REQUIRE_ADAPTERS").is_none(),
+            "{test}: {} — LAZYDAP_REQUIRE_ADAPTERS is set, so this cannot be skipped",
+            $reason,
+        );
+        eprintln!("skipping {test}: {}", $reason);
+        return;
+    }};
+}
+
 /// Claim the machine and check it can run this at all.
 macro_rules! require_python {
     () => {{
@@ -44,13 +69,7 @@ macro_rules! require_python {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match find_python() {
             Some(python) => (python, guard),
-            None => {
-                eprintln!(
-                    "skipping {}: needs a python3 on PATH that can import debugpy",
-                    std::thread::current().name().unwrap_or("this test"),
-                );
-                return;
-            }
+            None => skip_or_fail!("needs a python3 on PATH that can import debugpy"),
         }
     }};
 }
