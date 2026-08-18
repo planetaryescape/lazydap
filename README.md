@@ -6,7 +6,7 @@ lazydap turns a real debugger into shell subcommands that answer in JSON you can
 
 It exists for the work where a debugger is not optional: memory you manage by hand, crashes that destroy their own evidence, races you cannot printf around, and the native library underneath your Python.
 
-> **Early.** `v0.2.4` is a prerelease. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
+> **Early.** `v0.2.5` is a prerelease. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
 
 ## The loop
 

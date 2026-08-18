@@ -16,7 +16,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   2026-07-31. [M23 — js-debug](docs/implementation/tasks/M23-jsdebug-adapter.md) is blocked at
   its own scope gate behind it: the parent session debugs nothing, and a single-level
   child-session milestone has to come first.
-- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.4 shipped 2026-08-18.** All six went out
+- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.5 shipped 2026-08-18.** All seven went out
   through [.github/workflows/product-release.yml](.github/workflows/product-release.yml) as
   prereleases, with macOS arm64/x86_64 and Linux x86_64 tarballs, SHA-256 sums and
   `lazydap.skill` attached. `install.sh` and the Homebrew tap (M21) are both live; the docs
@@ -26,12 +26,12 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   of it; they were fixed in parallel packages and released the same day, one release per area:
   startup, the store and project-root detection (v0.2.0); breakpoints (v0.2.1); `--wait` and the
   execution queue (v0.2.2); the CLI surface, `doctor` and the paths errors (v0.2.3); adapter
-  lifecycle (v0.2.4). The protocol went **v8 → v9** on the way (D086). Decisions **D084–D095** record
-  the rules that changed; the CHANGELOG sections say what a user sees. The theme: answers that
-  were confidently wrong rather than absent — a `--wait` reporting `timeout` for a program that
-  had stopped, a `break --condition` silently dropping the condition, `--no-terminate` killing
-  the program and saying it had not, and one leaked adapter process per session that ended on
-  its own.
+  lifecycle (v0.2.4); the TUI (v0.2.5). The protocol went **v8 → v9** on the way (D086), and
+  decisions **D084–D097** record the rules that changed; the CHANGELOG sections say what a
+  user sees. The theme: answers that were confidently wrong rather than absent — a `--wait`
+  reporting `timeout` for a program that had stopped, a `break --condition` silently dropping
+  the condition, `--no-terminate` killing the program and saying it had not, and one leaked
+  adapter process per session that ended on its own.
 - **Follow-ups the campaign left, none of them a milestone yet:**
   - **An event pushed to a subscriber can still be unframeable.** D091 fixed it for replies —
     a reply over the codec's 16 MiB limit is answered `BadRequest` instead of closing the
