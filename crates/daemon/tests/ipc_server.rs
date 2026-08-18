@@ -6,16 +6,18 @@
 //! covered by the milestone's manual verification.
 
 use lazydap_core::{
-    BreakpointId, BreakpointSelector, NewBreakpoint, OutputCategory, OutputChunk, PauseReason,
-    SessionId,
+    AdapterKind, BreakpointId, BreakpointSelector, NewBreakpoint, OutputCategory, OutputChunk,
+    PauseReason, SessionId,
 };
 use lazydap_daemon::client::DaemonClient;
 use lazydap_daemon::server::serve_client;
 use lazydap_daemon::state::{DaemonState, SeqEvent};
 use lazydap_protocol::{
     ErrorCode, Event, EventKind, IpcConnection, IpcMessage, IpcPayload, LAZYDAP_PROTOCOL_VERSION,
-    Request, Response,
+    LaunchRequest, Request, Response,
 };
+use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -68,6 +70,46 @@ impl TestDaemon {
     /// A connection with no handshake, for saying things a client never would.
     async fn raw(&self) -> IpcConnection<UnixStream> {
         IpcConnection::new(UnixStream::connect(&self.socket).await.expect("connect"))
+    }
+
+    /// A request that takes a few hundred milliseconds and needs no session.
+    ///
+    /// Everything else the daemon answers resolves on its first poll, which
+    /// makes it useless for testing what happens to a *second* frame while a
+    /// first is still in flight — the read-ahead branch never runs at all.
+    /// This launches with the adapter binary pointed at a script that sleeps
+    /// and then exits without announcing a port, so the handshake fails
+    /// honestly after a known interval. The script stands in for an external
+    /// process, never for anything lazydap owns.
+    fn slow_request(&self) -> Request {
+        let script = self.dir.join("dawdling-adapter.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 0.3\n").expect("write the fake adapter");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make the fake adapter executable");
+
+        Request::Launch(LaunchRequest {
+            adapter: AdapterKind::Codelldb,
+            program: self.dir.join("no-such-program"),
+            args: Vec::new(),
+            cwd: self.dir.clone(),
+            env: BTreeMap::new(),
+            stop_on_entry: false,
+            adapter_command: Some(script),
+        })
+    }
+
+    /// A connection with every frame already on the wire, so what the daemon
+    /// does with the second while the first is in flight is a fact rather than
+    /// a race.
+    async fn with_frames_waiting(&self, frames: &[Vec<u8>]) -> IpcConnection<UnixStream> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut stream = UnixStream::connect(&self.socket).await.expect("connect");
+        for frame in frames {
+            stream.write_all(frame).await.expect("write a frame");
+        }
+        stream.flush().await.expect("flush");
+        IpcConnection::new(stream)
     }
 
     /// A connection that has already asked for these event kinds.
@@ -125,6 +167,31 @@ impl Subscriber {
     async fn reply(&mut self) -> IpcPayload {
         self.next().await.payload
     }
+}
+
+/// One length-delimited frame, built the way the codec builds them.
+fn frame(message: &IpcMessage) -> Vec<u8> {
+    framed(&serde_json::to_vec(message).expect("serialise"))
+}
+
+/// A frame with an honest length prefix and a body that is not a message.
+fn unreadable_frame() -> Vec<u8> {
+    framed(b"{ not a message at all }")
+}
+
+fn framed(body: &[u8]) -> Vec<u8> {
+    let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// The next frame, or a failure that says the daemon went quiet.
+async fn next_frame(connection: &mut IpcConnection<UnixStream>) -> IpcMessage {
+    tokio::time::timeout(std::time::Duration::from_secs(10), connection.recv())
+        .await
+        .expect("the daemon should answer every frame it read")
+        .expect("recv")
+        .expect("a frame, not a closed connection")
 }
 
 fn stopped(session_id: SessionId) -> Event {
@@ -408,40 +475,81 @@ async fn a_frame_the_daemon_cannot_read_is_answered_before_it_hangs_up() {
     }
 }
 
-/// Two requests written before either is answered are both answered, in order.
+/// A request read while another is still in flight is answered, after it.
 ///
-/// The daemon now reads ahead while a request is in flight, so it can notice a
-/// client hanging up on a `--wait` and stop holding the session's execution
-/// permit for it (D-WP3-5). Reading ahead must not cost anybody a request: the
-/// frame it finds waits its turn rather than being dropped, which would hang
-/// the client on a reply that never comes.
+/// The daemon reads ahead while a request runs, so it can notice a client
+/// hanging up on a `--wait` and stop holding the session's execution permit
+/// for it (D-WP3-5). Reading ahead must not cost anybody a request: the frame
+/// it finds waits its turn rather than being dropped, which would hang the
+/// client on a reply that never comes.
+///
+/// The first request has to be genuinely slow or this proves nothing. A
+/// `Status` resolves on its first poll and the read-ahead branch never runs,
+/// which is how an earlier version of this test passed just as happily against
+/// a daemon that had no read-ahead in it at all.
 #[tokio::test]
-async fn a_request_read_while_another_is_in_flight_still_gets_its_answer() {
+async fn a_request_read_while_another_is_in_flight_is_answered_after_it() {
     let daemon = TestDaemon::start().await;
-    let mut connection = daemon.raw().await;
+    let mut connection = daemon
+        .with_frames_waiting(&[
+            frame(&IpcMessage::request(1, daemon.slow_request())),
+            frame(&IpcMessage::request(2, Request::Status)),
+        ])
+        .await;
 
-    for id in [1, 2, 3] {
-        connection
-            .send(IpcMessage::request(id, Request::Status))
-            .await
-            .expect("send");
+    let first = next_frame(&mut connection).await;
+    assert_eq!(first.id, 1, "the slow request is answered first");
+    assert!(
+        matches!(first.payload, IpcPayload::Error(_)),
+        "the fake adapter never announces a port, so the launch fails: {:?}",
+        first.payload,
+    );
+
+    let second = next_frame(&mut connection).await;
+    assert_eq!(second.id, 2, "and the frame read behind it is not lost");
+    assert!(matches!(
+        second.payload,
+        IpcPayload::Response(Response::Status(_))
+    ));
+}
+
+/// A frame the daemon cannot decode, arriving mid-request, is not a hang-up.
+///
+/// The read that watches for a client going away also sees malformed frames
+/// and `Request` variants from newer builds. Treating one as a hang-up ended
+/// the request in flight — a `--wait` came back `state: "timeout"` after a
+/// second, on `--timeout 0` — and swallowed the bad frame without the
+/// `BadRequest` on id 0 that an unreadable frame has always been answered
+/// with. The peer is still there, and both answers are owed, in order.
+#[tokio::test]
+async fn an_unreadable_frame_mid_request_costs_neither_answer() {
+    let daemon = TestDaemon::start().await;
+    let mut connection = daemon
+        .with_frames_waiting(&[
+            frame(&IpcMessage::request(1, daemon.slow_request())),
+            unreadable_frame(),
+        ])
+        .await;
+
+    let first = next_frame(&mut connection).await;
+    assert_eq!(first.id, 1, "the request in flight is still answered");
+    assert!(
+        matches!(first.payload, IpcPayload::Error(_)),
+        "on its own terms — the fake adapter never announces a port: {:?}",
+        first.payload,
+    );
+
+    let second = next_frame(&mut connection).await;
+    assert_eq!(second.id, 0, "an unreadable frame has no id to answer on");
+    match second.payload {
+        IpcPayload::Error(error) => assert_eq!(error.code, ErrorCode::BadRequest, "got: {error}"),
+        other => unreachable!("expected a bad-request error, got: {other:?}"),
     }
 
-    for id in [1, 2, 3] {
-        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), connection.recv())
-            .await
-            .expect("the daemon should answer every request it read")
-            .expect("recv")
-            .expect("a frame");
-        assert_eq!(
-            reply.id, id,
-            "answers come back in the order they were asked"
-        );
-        assert!(matches!(
-            reply.payload,
-            IpcPayload::Response(Response::Status(_))
-        ));
-    }
+    assert!(
+        connection.recv().await.expect("recv").is_none(),
+        "and then it hangs up, as it always has for a frame it cannot read",
+    );
 }
 
 /// A client that vanishes mid-request does not take the daemon with it.

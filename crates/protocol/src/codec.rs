@@ -15,20 +15,27 @@ const LENGTH_FIELD_BYTES: usize = 4;
 /// that does not fit down this socket. Public so the sender can say so.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-/// Whether a failure means the message could never have become a frame, as
-/// opposed to the socket going away.
+/// Whether [`IpcCodec`] refused the bytes, as opposed to the socket failing.
 ///
 /// The distinction is worth a function because the two want opposite
-/// reactions. A frame that cannot be encoded — too large, or holding
+/// reactions, in both directions.
+///
+/// **Encoding.** A reply that cannot become a frame — too large, or holding
 /// something `serde_json` refuses — never reaches the wire at all, so the
-/// request that produced it can still be answered, with an error saying why.
+/// request that produced it can still be answered with an error saying why.
 /// Treating that as a dead peer is what made an over-sized reply look like
 /// "the daemon closed the connection before answering" (D-WP3-4).
 ///
-/// Both kinds come out of [`IpcCodec`] itself: `InvalidInput` from the length
-/// prefix refusing an over-long body, `InvalidData` from serialisation. A
-/// Unix-socket write produces neither.
-pub fn is_unframeable(error: &std::io::Error) -> bool {
+/// **Decoding.** A frame that cannot become a message means the peer is still
+/// there and still owed an answer — on id `0`, because a frame nobody can read
+/// has no id to answer on. Treating *that* as a hang-up cut short whatever was
+/// already in flight and swallowed the bad frame without a word (D-WP3-5).
+///
+/// Both kinds come out of the codec itself: `InvalidInput` from the length
+/// prefix refusing an over-long body, `InvalidData` from serialisation either
+/// way. A Unix-socket read or write produces neither — a peer that vanishes
+/// mid-frame is `UnexpectedEof`, and a dead one is `BrokenPipe`.
+pub fn is_frame_error(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
@@ -160,6 +167,26 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_the_codec_cannot_read_is_told_apart_from_a_dead_socket() {
+        // The decoding half of the same question. A frame that will not parse
+        // leaves the peer alive and owed an answer; a peer that vanished
+        // mid-frame is `UnexpectedEof` and is owed nothing (D-WP3-5).
+        let body = b"{ this is not json }";
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        buffer.extend_from_slice(body);
+
+        let unreadable = IpcCodec::new()
+            .decode(&mut buffer)
+            .expect_err("malformed JSON must not decode");
+        assert!(is_frame_error(&unreadable), "got: {unreadable:?}");
+        assert!(
+            !is_frame_error(&std::io::Error::from(ErrorKind::UnexpectedEof)),
+            "a peer that vanished mid-frame is not a frame this build cannot read",
+        );
+    }
+
+    #[test]
     fn a_frame_of_malformed_json_is_invalid_data_not_a_hang_up() {
         let body = b"{ this is not json }";
         let mut buffer = BytesMut::new();
@@ -190,9 +217,9 @@ mod tests {
             )
             .expect_err("a body past the cap must not encode");
 
-        assert!(is_unframeable(&oversized), "got: {oversized:?}");
+        assert!(is_frame_error(&oversized), "got: {oversized:?}");
         assert!(
-            !is_unframeable(&std::io::Error::from(ErrorKind::BrokenPipe)),
+            !is_frame_error(&std::io::Error::from(ErrorKind::BrokenPipe)),
             "a peer that went away is not an encoding failure",
         );
     }

@@ -19,19 +19,22 @@ use tokio::sync::{broadcast, watch};
 /// Slack for live subscribers — the TUI, and every `--wait`. A subscriber that
 /// reads more slowly than the session produces loses the oldest events rather
 /// than blocking the session.
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// How many events a session holds for a client that has not asked for them
 /// yet. Between two CLI invocations a chatty debuggee can produce a lot of
-/// output; keeping the newest thousand-odd bounds memory without losing the
+/// output; keeping the newest few thousand bounds memory without losing the
 /// part anybody reads.
 ///
-/// Derived rather than chosen, because the two numbers are compared and not
-/// merely each "big enough". A `--wait` that falls behind the channel
-/// reconciles against this buffer (D-WP3-1), so a buffer smaller than the
-/// channel leaves a band of events that fell out of both and the reconciliation
-/// cannot see. Equal is the smallest size with no such band.
-const EVENT_BUFFER_CAPACITY: usize = EVENT_CHANNEL_CAPACITY;
+/// Derived rather than chosen, and **strictly larger** than the channel. A
+/// `--wait` that falls behind reconciles against this buffer (D-WP3-1), and
+/// that recovers something only where the buffer still holds events the channel
+/// has dropped. On a lag tokio rewinds the receiver to the oldest message the
+/// channel still holds, so a buffer the same size holds exactly what the
+/// receiver is about to be handed anyway — a band of nothing. The multiple is
+/// how far back the reconciliation can reach: a wait has to fall four channels
+/// behind before an event is beyond recovering.
+pub(crate) const EVENT_BUFFER_CAPACITY: usize = EVENT_CHANNEL_CAPACITY * 4;
 
 /// Everything one daemon owns.
 pub struct DaemonState {

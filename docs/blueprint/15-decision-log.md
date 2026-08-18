@@ -1901,10 +1901,18 @@ The arithmetic that made a wait fall behind in the first place is also gone. The
 re-summed every chunk already kept for every chunk that arrived — quadratic, and about a
 billion operations for one megabyte of output arriving in small pieces. The total is carried.
 
-**The buffer is now sized off the channel rather than beside it.** They were 1000 and 1024,
-which left a 24-event band that had fallen out of both and that no reconciliation could
-recover. `EVENT_BUFFER_CAPACITY` is derived from `EVENT_CHANNEL_CAPACITY` so the two cannot
-drift apart again: whatever the channel drops, the buffer still holds.
+**The buffer has to be strictly larger than the channel, and now is.** They were 1000 and
+1024, chosen independently, which meant the buffer held *less* than the channel and there was
+nothing to reconcile against. Equal is no better: on a lag tokio rewinds the receiver to the
+oldest message the channel still holds, so a same-sized buffer holds exactly what the receiver
+is about to be handed anyway. `EVENT_BUFFER_CAPACITY` is `EVENT_CHANNEL_CAPACITY * 4`, derived
+so the two cannot drift apart again, and the multiple is how far back the reconciliation
+reaches: a wait must fall four channels behind before an event is beyond recovering.
+
+**The reconciliation is the safety net, not the fix.** What stops a wait falling behind in the
+first place is the removal of the quadratic re-sum above; reconciliation is what makes the
+remaining cases — a daemon under real load, an adapter emitting faster than a task can be
+scheduled — end in an answer rather than in a false `timeout`.
 
 **Measured, honestly:** `floods.c` — 1500 lines of a kilobyte each — produces about 1510
 `output` events against codelldb, which is more than the channel holds, and the wait still

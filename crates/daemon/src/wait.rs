@@ -762,8 +762,15 @@ mod tests {
     /// A session with no adapter behind it. Everything below exercises the
     /// event arithmetic, which is where the subtle bugs live; the adapter
     /// round trips are covered against real codelldb in `tests/`.
+    ///
+    /// The broadcast is the daemon's own size, not a convenient small one. The
+    /// lag tests below are *about* the relationship between this channel and
+    /// the session's ring buffer, and a 64-slot channel against a 4096-event
+    /// ring is a ratio production never has — it made those tests pass against
+    /// a buffer that could not have recovered anything (D-WP3-1).
     fn session() -> Arc<Session> {
-        let (event_tx, _keep_open) = tokio::sync::broadcast::channel(64);
+        let (event_tx, _keep_open) =
+            tokio::sync::broadcast::channel(crate::state::EVENT_CHANNEL_CAPACITY);
         Arc::new(Session::new(
             SessionId::new(),
             AdapterKind::Codelldb,
@@ -1219,7 +1226,7 @@ mod tests {
         // The blob then carried a suffix and said `output_truncated: false` —
         // the same lie as a spliced middle, from the other end (D072).
         let session = session();
-        for line in 0..1_200 {
+        for line in 0..(crate::state::EVENT_BUFFER_CAPACITY + 200) {
             session.emit(output(&session, &format!("line {line}\n")));
         }
 
@@ -1266,7 +1273,7 @@ mod tests {
         // The count resets when a wait commits delivery, or every later blob
         // in the session repeats a gap that has already been accounted for.
         let session = session();
-        for line in 0..1_200 {
+        for line in 0..(crate::state::EVENT_BUFFER_CAPACITY + 200) {
             session.emit(output(&session, &format!("line {line}\n")));
         }
 
@@ -1320,10 +1327,11 @@ mod tests {
         let wait = Wait::begin(&session);
 
         session.emit(stopped(&session, 1, true));
-        // Enough to push the stop out of the broadcast channel, which the test
-        // session sizes at 64. Nothing polls the receiver until `collect`, so
-        // the lag is a certainty rather than a race.
-        for line in 0..300 {
+        // Past the broadcast's capacity, so the stop is certainly outside the
+        // window tokio rewinds the receiver to — and inside the ring buffer,
+        // which is four times the size. Nothing polls the receiver until
+        // `collect`, so the lag is a certainty rather than a race.
+        for line in 0..(crate::state::EVENT_CHANNEL_CAPACITY + 200) {
             session.emit(output(&session, &format!("line {line}\n")));
         }
 
@@ -1344,7 +1352,7 @@ mod tests {
 
         session.set_exit_code(Some(0));
         session.end_once(EndReason::Exited { exit_code: Some(0) });
-        for line in 0..300 {
+        for line in 0..(crate::state::EVENT_CHANNEL_CAPACITY + 200) {
             session.emit(output(&session, &format!("line {line}\n")));
         }
 

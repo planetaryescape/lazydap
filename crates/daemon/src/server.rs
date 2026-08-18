@@ -8,7 +8,7 @@ use crate::wait::Abandoned;
 use lazydap_core::EndReason;
 use lazydap_protocol::{
     ErrorCode, Event, EventKind, IpcConnection, IpcError, IpcMessage, IpcPayload,
-    LAZYDAP_PROTOCOL_VERSION, MAX_FRAME_BYTES, Request, Response, is_unframeable,
+    LAZYDAP_PROTOCOL_VERSION, MAX_FRAME_BYTES, Request, Response, is_frame_error,
 };
 use lazydap_store::ProjectStore;
 use std::collections::{HashSet, VecDeque};
@@ -209,30 +209,23 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
             Ok(Some(message)) => message,
             Ok(None) => break,
             Err(error) => {
-                // A frame we cannot read is not a frame we can answer in
-                // context, so say what happened on id 0 and hang up rather
-                // than leaving the client waiting for a reply that will never
-                // correlate.
-                tracing::warn!(target: "daemon.ipc", %error, "unreadable frame from a client");
-                let _ = connection
-                    .send(IpcMessage::error(
-                        0,
-                        IpcError::new(ErrorCode::BadRequest, error.to_string()),
-                    ))
-                    .await;
+                let _ = connection.send(unreadable_frame(&error)).await;
                 break;
             }
         };
 
         // Subscribing is the one request that changes the connection rather
         // than the daemon, so it is answered here instead of in `dispatch`.
-        let reply = match subscribe_request(&message) {
-            Some(channels) => subscribe(&state, &mut subscription, channels, message.id),
+        let (reply, unreadable) = match subscribe_request(&message) {
+            Some(channels) => (
+                subscribe(&state, &mut subscription, channels, message.id),
+                None,
+            ),
             None => answer(&state, message, &mut connection, &mut queued).await,
         };
         let id = reply.id;
         if let Err(error) = connection.send(reply).await {
-            if is_unframeable(&error) {
+            if is_frame_error(&error) {
                 // Nothing reached the wire — the frame was never built — so
                 // the socket is fine and the request can still be answered.
                 // Hanging up instead is what a client read as "the daemon
@@ -252,7 +245,27 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
             tracing::debug!(target: "daemon.ipc", %error, "client went away mid-reply");
             break;
         }
+
+        // A frame read while the reply above was still being produced, that
+        // this build cannot decode. The reply it interrupted was owed first;
+        // this is the same refusal the idle path sends, in the same place in
+        // the conversation (D-WP3-5).
+        if let Some(error) = unreadable {
+            let _ = connection.send(unreadable_frame(&error)).await;
+            break;
+        }
     }
+}
+
+/// The refusal for a frame the daemon could not read, and the end of the
+/// conversation.
+///
+/// Answered on id `0`, because a frame nobody can decode carries no id to
+/// answer on, and followed by a hang-up: a client left waiting for a reply
+/// that can never correlate is worse than a closed socket.
+fn unreadable_frame(error: &std::io::Error) -> IpcMessage {
+    tracing::warn!(target: "daemon.ipc", %error, "unreadable frame from a client");
+    IpcMessage::error(0, IpcError::new(ErrorCode::BadRequest, error.to_string()))
 }
 
 /// Answer one request, giving up on it if the client that asked goes away.
@@ -270,24 +283,53 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
 /// what gets abandoned: those run to completion and are answered into a socket
 /// that is no longer read, which is what the reply's send failure then ends
 /// the connection on (D-WP3-5).
+///
+/// Only three things can come back from that read, and the difference between
+/// them is the whole of this function:
+///
+/// - **Another request.** It waits its turn in `queued`. Dropping it would
+///   hang a client on a reply that never comes.
+/// - **A frame this build cannot decode** — malformed, or a `Request` variant
+///   from a newer client. The peer is still there and the reply in flight is
+///   still owed, so this is *not* a hang-up: it is handed back for the caller
+///   to answer on id `0` after that reply. Reading it as one cut a `--wait`
+///   short with a fabricated `timeout` and swallowed the bad frame in silence.
+/// - **Anything else** — a clean end of stream, a vanished peer, a real I/O
+///   failure. That is the hang-up, and the only thing that ends the wait.
+///
+/// The second of the pair is a decode failure to answer after the reply.
 async fn answer(
     state: &Arc<DaemonState>,
     message: IpcMessage,
     connection: &mut IpcConnection<UnixStream>,
     queued: &mut VecDeque<IpcMessage>,
-) -> IpcMessage {
+) -> (IpcMessage, Option<std::io::Error>) {
     let (hangup, abandoned) = tokio::sync::oneshot::channel();
     let mut handled = std::pin::pin!(handle_message(state, message, abandoned));
 
     loop {
+        // One frame ahead and no further. Reading is what notices a hang-up,
+        // and one frame is all that takes; draining the socket for as long as
+        // a `--wait` runs would take the kernel's own backpressure off a
+        // client that never stops sending and let `queued` grow unbounded.
+        //
+        // The cost is that a client which pipelines *behind* a `--wait` is not
+        // noticed hanging up until that wait ends on its own. No lazydap
+        // client does — a `--wait` is the last thing its caller says — and an
+        // unbounded read is a worse thing to be wrong about.
+        if !queued.is_empty() {
+            return (handled.await, None);
+        }
+
         tokio::select! {
             biased;
-            reply = &mut handled => return reply,
+            reply = &mut handled => return (reply, None),
             read = connection.recv() => match read {
                 Ok(Some(message)) => queued.push_back(message),
+                Err(error) if is_frame_error(&error) => return (handled.await, Some(error)),
                 _ => {
                     drop(hangup);
-                    return handled.await;
+                    return (handled.await, None);
                 }
             },
         }
