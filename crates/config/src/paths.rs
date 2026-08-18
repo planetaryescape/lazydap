@@ -137,9 +137,16 @@ pub fn project_root(start: &Path) -> PathBuf {
 
 /// [`project_root`] with the ceiling passed in, so it can be tested without
 /// moving the real `$HOME`.
+///
+/// The ceiling is canonicalised here: `start` is `current_dir()`, which the
+/// kernel hands back with every symlink already resolved, so a `$HOME` that is
+/// itself a link — `/home/me` → `/mnt/users/me`, or macOS's `/tmp` →
+/// `/private/tmp` — would never appear among its ancestors, and the ceiling
+/// would silently not apply to the people most likely to have one.
 fn project_root_below(start: &Path, home: Option<&Path>) -> PathBuf {
+    let home = home.and_then(|home| home.canonicalize().ok());
     for markers in ROOT_MARKERS {
-        if let Some(root) = nearest_ancestor_containing(start, markers, home) {
+        if let Some(root) = nearest_ancestor_containing(start, markers, home.as_deref()) {
             return root;
         }
     }
@@ -416,7 +423,10 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir");
-            Self(path)
+            // Resolved, because that is how `current_dir()` hands a path to
+            // `project_root`, and the home-directory ceiling is a path
+            // comparison.
+            Self(path.canonicalize().expect("canonicalise temp dir"))
         }
 
         fn path(&self) -> &Path {
@@ -507,6 +517,26 @@ mod tests {
         let scratch = temp.mkdirs("home/scratch/notes");
 
         assert_eq!(project_root_below(&scratch, Some(&home)), scratch);
+    }
+
+    #[test]
+    fn a_symlinked_home_directory_still_stops_the_walk() {
+        // `project_root` is asked about `current_dir()`, which the kernel
+        // hands back resolved. A `$HOME` that is a symlink never appears in
+        // those ancestors, so it has to be canonicalised before it can be
+        // compared — this is what that guards.
+        let temp = TempDir::new("symlinkhome");
+        let real_home = temp.mkdirs("real");
+        fs::create_dir_all(real_home.join(".git")).expect("create dotfiles repo");
+        let linked_home = temp.path().join("home");
+        std::os::unix::fs::symlink(&real_home, &linked_home).expect("link");
+        let scratch = temp.mkdirs("real/scratch");
+
+        assert_eq!(
+            project_root_below(&scratch, Some(&linked_home)),
+            scratch,
+            "the ceiling must survive $HOME being a symlink",
+        );
     }
 
     #[test]
