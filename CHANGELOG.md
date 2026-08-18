@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.6] — 2026-08-18
+
 ### Changed
 
 **CI runs the debugger against real adapters.** codelldb, debugpy and dlv are installed in the pipeline and the suites that drive them fail rather than skip when one is missing, on every pull request and again on the tagged commit a release is built from. They had been skipping themselves in CI since the day they were written, so "tested against three real adapters" rested on a maintainer running them by hand.
