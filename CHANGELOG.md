@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v8*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — 2026-08-18
+
 ### Added
 
 **Watch expressions.** `lazydap watch add <expression>`, `watch list` and `watch remove`, with `--dry-run` on both mutations and `--format ids` for piping. A watch is project state, recorded in `.lazydap/state.toml` beside your breakpoints: you can set one before anything is running, and it is still there after the daemon has gone. What it *evaluates to* is not recorded, because that is only true while the program is sitting still.

@@ -9,7 +9,7 @@ description: |
   line, or what actually happens at runtime rather than what the source
   suggests. Debugs C, C++ and Rust binaries via codelldb, and Python via
   debugpy. `.py` picks debugpy on its own; anything else defaults to codelldb.
-lazydap_min_version: "0.1.0"
+lazydap_min_version: "0.2.0"
 ---
 
 # lazydap

@@ -28,13 +28,6 @@ export default defineConfig({
           preserveIndent: false,
         },
       },
-      components: {
-        // Starlight's Banner only renders when a page sets `banner` frontmatter.
-        // The pre-release notice belongs on every page, so it is an override
-        // rather than 20 copies of the same frontmatter. Delete this entry when
-        // v0.1.0 is tagged.
-        Banner: './src/components/Banner.astro',
-      },
       head: [
         { tag: 'meta', attrs: { name: 'theme-color', content: '#0d1117' } },
         // Starlight already emits canonical, og:title/type/url/locale/description/

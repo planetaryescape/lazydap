@@ -6,7 +6,7 @@ lazydap turns a real debugger into shell subcommands that answer in JSON you can
 
 It exists for the work where a debugger is not optional: memory you manage by hand, crashes that destroy their own evidence, races you cannot printf around, and the native library underneath your Python.
 
-> **Early.** `v0.1.0` is a prerelease and everything past it ships with the next tag. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
+> **Early.** `v0.2.0` is a prerelease. Every command on this page was run against this commit and every reply is the one lazydap gave, reflowed and elided where it was long. [What isn't built yet](#what-works-today) is listed near the bottom.
 
 ## The loop
 
@@ -268,7 +268,7 @@ For agents working *on* this repo rather than with it, [`AGENTS.md`](AGENTS.md) 
 
 Launch, breakpoints (set, list, remove, toggle, conditions, hit counts, log points), continue, step over, step in, step out, pause, stack, scopes, variables, eval, threads, watches, captured output, launches, status, disconnect, shutdown, doctor, version, logs, completions. `--wait` and `--timeout` on everything that moves the program. Output as `table`, `json`, `jsonl`, `csv` or `ids`, chosen automatically from the tty and overridable with `--format`. Persistent breakpoints and watches. A config file for adapter pins and the default timeout, and `.vscode/launch.json` import. A daemon per project with a live event stream clients can subscribe to. A TUI with source, stack, scopes, watches and REPL panes that reconnects on its own.
 
-Scope today: **C, C++ and Rust via codelldb, Python via debugpy, Go via delve**, **one session at a time**, **macOS and Linux**. (The v0.1.0 release is codelldb-only; Python, Go, watches and the REPL landed after that tag and ship with the next one. Build from source for everything on this page.)
+Scope today: **C, C++ and Rust via codelldb, Python via debugpy, Go via delve**, **one session at a time**, **macOS and Linux**. (All of it ships in the v0.2.0 release; v0.1.0 was codelldb-only.)
 
 Not built, in rough order: `attach`; restart; conditional breakpoints from the TUI; the rest of the config schema. After that, js-debug for Node, then multi-session. [`TODO.md`](TODO.md) is the live list and [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) is the plan behind it.
 
