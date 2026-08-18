@@ -21,7 +21,7 @@
 //! Every test skips, loudly, when there is no `dlv` on `PATH`, so a machine
 //! without one still gets a green `cargo test`. Set `LAZYDAP_REQUIRE_ADAPTERS`
 //! to turn that skip into a failure — CI does, because a suite that skips
-//! itself proves nothing.
+//! itself proves nothing. Empty and `0` count as unset.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -57,8 +57,13 @@ macro_rules! skip_or_fail {
             .name()
             .unwrap_or("this test")
             .to_string();
+        // Empty and `0` count as unset. `FOO= cargo test` is how a shell
+        // clears a variable it has already exported, and a run that meant to
+        // switch the requirement off should not be failed by it.
+        let required = std::env::var("LAZYDAP_REQUIRE_ADAPTERS")
+            .is_ok_and(|value| !matches!(value.trim(), "" | "0"));
         assert!(
-            std::env::var_os("LAZYDAP_REQUIRE_ADAPTERS").is_none(),
+            !required,
             "{test}: {} — LAZYDAP_REQUIRE_ADAPTERS is set, so this cannot be skipped",
             $reason,
         );
@@ -134,9 +139,10 @@ struct Sandbox {
     /// crash left behind. The file-leak check subtracts these so it flags only
     /// what *this* session created, never pre-existing clutter.
     preexisting_artifacts: std::collections::HashSet<PathBuf>,
-    /// This sandbox's daemon, once it has one. What both leak checks key on;
-    /// see [`Sandbox::record_daemon_pid`] for why it is read at launch.
-    daemon_pid: std::cell::Cell<Option<u64>>,
+    /// Every daemon this sandbox has had. What both leak checks key on; see
+    /// [`Sandbox::record_daemon_pid`] for why they are read at launch, and why
+    /// there can be more than one.
+    daemon_pids: std::cell::RefCell<std::collections::BTreeSet<u64>>,
     /// Whether anything has been launched here. Only so [`Sandbox::strays`]
     /// can tell "nothing ran" from "a launch went unrecorded".
     launched: std::cell::Cell<bool>,
@@ -164,7 +170,7 @@ impl Sandbox {
             project,
             instance,
             preexisting_artifacts: artifact_files(),
-            daemon_pid: std::cell::Cell::new(None),
+            daemon_pids: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             launched: std::cell::Cell::new(false),
         }
     }
@@ -215,13 +221,26 @@ impl Sandbox {
     /// `Drop` shuts it down before it checks for strays, and asking then would
     /// spawn a *fresh* daemon and learn the wrong pid. The recursion stops at
     /// one level: these arguments carry no `launch`.
+    ///
+    /// A set rather than one pid, and re-read on **every** launch. A sandbox
+    /// that shuts its daemon down and launches again gets a new one, whose
+    /// compiled binaries carry a different pid in their names — remembering
+    /// only the first would take both leak checks blind for the second
+    /// session while leaving the tripwire below satisfied.
     fn record_daemon_pid(&self) {
-        if self.daemon_pid.get().is_some() {
-            return;
-        }
         let pid = self.json(&["--format", "json", "status"])["daemon_pid"].as_u64();
-        assert!(pid.is_some(), "a running daemon reports its pid");
-        self.daemon_pid.set(pid);
+        let pid = pid.expect("a running daemon reports its pid");
+        self.daemon_pids.borrow_mut().insert(pid);
+    }
+
+    /// The name prefix every binary *this* sandbox's delve compiles wears
+    /// (quirk 5), one per daemon it has had.
+    fn artifact_prefixes(&self) -> Vec<String> {
+        self.daemon_pids
+            .borrow()
+            .iter()
+            .map(|pid| format!("lazydap-delve-{pid}-"))
+            .collect()
     }
 
     /// Launch a fixture. No `--adapter`: which one to use is read off the
@@ -297,26 +316,24 @@ impl Sandbox {
     /// Both checks are scoped to this sandbox, because `pgrep` and the
     /// temporary directory are machine-wide and this repository is routinely
     /// checked out several times at once. Files present when this sandbox
-    /// started are subtracted; the process match is narrowed by the daemon pid
-    /// the compiled binary's name carries, which is the only thing tying an
-    /// orphan — a process whose parents are all dead — back to the session
-    /// that made it. Without that, a neighbouring worktree mid-test fails this
-    /// one.
+    /// started are subtracted, and both matches are narrowed to the daemon
+    /// pids the compiled binaries' names carry — the only thing tying an
+    /// orphan, a process whose parents are all dead, back to the session that
+    /// made it. Without that, a neighbouring worktree mid-test fails this one.
     fn strays(&self) -> Vec<String> {
         let fixtures = repo_root().join("examples/go-fixtures");
         let mut patterns = vec![fixtures.display().to_string()];
-        match self.daemon_pid.get() {
-            Some(pid) => patterns.push(format!("lazydap-delve-{pid}-")),
-            // A launch that recorded no pid would narrow this check to
-            // nothing and say so to nobody, which is exactly the gap the pid
-            // was added to close. Not while already unwinding, for the reason
-            // `Drop` gives above.
-            None => assert!(
-                !self.launched.get() || std::thread::panicking(),
-                "a session was launched without recording its daemon pid, so \
-                 the process check cannot see this session at all",
-            ),
-        }
+        let prefixes = self.artifact_prefixes();
+        // A launch that recorded no pid would narrow this check to nothing and
+        // say so to nobody, which is exactly the gap the pids were added to
+        // close. Not while already unwinding, for the reason `Drop` gives
+        // above.
+        assert!(
+            !prefixes.is_empty() || !self.launched.get() || std::thread::panicking(),
+            "a session was launched without recording its daemon pid, so the \
+             process check cannot see this session at all",
+        );
+        patterns.extend(prefixes.iter().cloned());
 
         let mut strays: Vec<String> = patterns
             .iter()
@@ -354,18 +371,17 @@ impl Sandbox {
     /// already there; the pid drops a neighbouring checkout's file appearing
     /// *during* this test, which subtraction cannot.
     fn new_artifacts(&self) -> Vec<PathBuf> {
-        let ours = self
-            .daemon_pid
-            .get()
-            .map(|pid| format!("lazydap-delve-{pid}-"));
+        let ours = self.artifact_prefixes();
         artifact_files()
             .difference(&self.preexisting_artifacts)
-            .filter(
-                |path| match (&ours, path.file_name().and_then(|name| name.to_str())) {
-                    (Some(prefix), Some(name)) => name.starts_with(prefix),
-                    _ => true,
-                },
-            )
+            .filter(|path| {
+                if ours.is_empty() {
+                    return true;
+                }
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| ours.iter().any(|prefix| name.starts_with(prefix)))
+            })
             .cloned()
             .collect()
     }

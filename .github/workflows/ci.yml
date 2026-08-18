@@ -72,6 +72,9 @@ jobs:
   adapters:
     name: Real adapters
     runs-on: ubuntu-latest
+    # Three adapters, each with a launch handshake that waits. A hung one
+    # should cost half an hour, not the six-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

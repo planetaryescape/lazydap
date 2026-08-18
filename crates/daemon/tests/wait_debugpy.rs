@@ -11,7 +11,8 @@
 //! Every test skips, loudly, when there is no Python that can import debugpy,
 //! so a machine without one still gets a green `cargo test`. Set
 //! `LAZYDAP_REQUIRE_ADAPTERS` to turn that skip into a failure — CI does,
-//! because a suite that skips itself proves nothing.
+//! because a suite that skips itself proves nothing. Empty and `0` count as
+//! unset.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -49,8 +50,13 @@ macro_rules! skip_or_fail {
             .name()
             .unwrap_or("this test")
             .to_string();
+        // Empty and `0` count as unset. `FOO= cargo test` is how a shell
+        // clears a variable it has already exported, and a run that meant to
+        // switch the requirement off should not be failed by it.
+        let required = std::env::var("LAZYDAP_REQUIRE_ADAPTERS")
+            .is_ok_and(|value| !matches!(value.trim(), "" | "0"));
         assert!(
-            std::env::var_os("LAZYDAP_REQUIRE_ADAPTERS").is_none(),
+            !required,
             "{test}: {} — LAZYDAP_REQUIRE_ADAPTERS is set, so this cannot be skipped",
             $reason,
         );

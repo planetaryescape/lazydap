@@ -128,7 +128,10 @@ unique per launch because delve deletes it on disconnect, and a shared name woul
 let one session's cleanup remove the file another was about to run.
 
 This also makes leaked Go debuggees findable: they run under a
-`lazydap-delve-` prefix, which is what the suite's stray check greps for.
+`lazydap-delve-<daemon pid>-` name, and the suite's stray check greps for the
+pids of the daemons its own sandbox has had. The pid is what makes the check
+usable at all — `pgrep` is machine-wide, and the bare prefix matches a debuggee
+belonging to any other checkout of this repository on the same machine.
 
 ## 6. The entry stop has no goroutine, so there is no stack
 

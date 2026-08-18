@@ -115,7 +115,8 @@ reaper at whatever matches.
   `__debug_bin<random>` in the *adapter's* working directory — the daemon's, so a user's
   repository. It cleans up on `disconnect`, but not on a hard death. Pointing it at a
   temporary path keeps the leak out of working trees and gives leaked Go debuggees a
-  greppable `lazydap-delve-` prefix, which is what the suite's stray check uses.
+  greppable `lazydap-delve-<daemon pid>-` name, which is what the suite's stray check
+  uses — scoped to its own sandbox's daemons, because `pgrep` is machine-wide.
 - **The entry stop has no stack.** delve stops before the Go runtime has scheduled anything,
   so `threads` returns a placeholder named `Dummy` and `stackTrace` fails outright. Left as
   an honest error rather than papered over as an empty stack; asserted in the suite and

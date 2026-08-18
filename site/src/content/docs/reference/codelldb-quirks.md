@@ -54,7 +54,7 @@ not announce themselves. `variables --reference` is the data.
 
 ### Symptom
 
-Running `codelldb --port 0` (or any invocation) panics on startup:
+Running `codelldb --port 0` — the invocation lazydap makes — panics on startup:
 
 ```
 thread 'main' panicked at src/codelldb/bin/main.rs:56:49:
@@ -63,6 +63,8 @@ called Result::unwrap() on an Err value:
 ```
 
 The path codelldb is searching (`~/.local/lldb/lib/liblldb.dylib`) doesn't exist. The actual `liblldb.dylib` is somewhere else, typically `~/.local/opt/codelldb/extension/lldb/lib/liblldb.dylib`.
+
+**`codelldb --help` does not show this**, and exits 0 through an install this broken: the argument parser answers `--help` and exits before anything loads `liblldb`. Any check that an install works has to make an invocation that reaches `main` — `--port 0`, left running for a moment — or it is checking clap.
 
 ### Root cause
 

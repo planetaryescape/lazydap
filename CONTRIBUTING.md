@@ -50,7 +50,7 @@ LAZYDAP_REQUIRE_ADAPTERS=1 cargo test -p lazydap-daemon \
   --test wait_codelldb --test wait_debugpy --test wait_delve
 ```
 
-CI's `adapters` job installs codelldb, debugpy and dlv and runs exactly that, so "the canonical tests run real codelldb" is now checked rather than trusted. The plain `test` job installs nothing, which keeps the skip path honest. Use the variable locally when you want to know that your run really exercised an adapter.
+Empty and `0` count as unset, so `LAZYDAP_REQUIRE_ADAPTERS= cargo test` is how you switch it back off in a shell that has exported it. CI's `adapters` job installs codelldb, debugpy and dlv and runs exactly that, so "the canonical tests run real codelldb" is now checked rather than trusted. The plain `test` job installs nothing, which keeps the skip path honest. Use the variable locally when you want to know that your run really exercised an adapter.
 
 **What not to mock.** The daemon, the store, and the `DebugAdapter` trait are lazydap's own. Mocking them tests the mock. A `FakeAdapter` exists for speed where the thing under test genuinely isn't adapter behaviour; anything that is a claim about what an adapter does belongs in `wait_codelldb.rs` against the real one.
 

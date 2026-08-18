@@ -266,8 +266,18 @@ mod tests {
         std::fs::write(&script, "import time\ntime.sleep(60)\n").expect("write the script");
 
         let Ok(mut child) = tokio::process::Command::new("python3").arg(&script).spawn() else {
-            eprintln!("skipping: needs python3 on PATH");
             let _ = std::fs::remove_file(&script);
+            // The same bargain the `wait_*` suites make: skip on a machine
+            // without the interpreter, fail where one was promised. Empty and
+            // `0` count as unset. The release gates set this, and they are the
+            // run where a quiet skip costs the most.
+            let required = std::env::var("LAZYDAP_REQUIRE_ADAPTERS")
+                .is_ok_and(|value| !matches!(value.trim(), "" | "0"));
+            assert!(
+                !required,
+                "needs python3 on PATH — LAZYDAP_REQUIRE_ADAPTERS is set, so this cannot be skipped",
+            );
+            eprintln!("skipping: needs python3 on PATH");
             return;
         };
         let pid = child.id().expect("a pid");

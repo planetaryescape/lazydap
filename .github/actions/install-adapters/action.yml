@@ -22,23 +22,32 @@ runs:
   using: composite
   steps:
     # 55 MB of vsix per run otherwise, and the contents are immutable for a
-    # given tag, so the key needs nothing but the version.
+    # given tag. The platform is in the key because the bundle is per-platform
+    # and the cache is not.
     - name: Cache codelldb
       id: codelldb-cache
       uses: actions/cache@v4
       with:
         path: ~/.local/opt/codelldb
-        key: codelldb-linux-x64-${{ inputs.codelldb-version }}
+        key: codelldb-${{ inputs.codelldb-version }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Download codelldb
       if: steps.codelldb-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail
-        curl -fsSL -o /tmp/codelldb.vsix \
+        # Retried: this is the one step that reaches outside GitHub, and a
+        # release must not fail on somebody else's five seconds of 502.
+        curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o /tmp/codelldb.vsix \
           "https://github.com/vadimcn/codelldb/releases/download/v${{ inputs.codelldb-version }}/codelldb-linux-x64.vsix"
-        mkdir -p ~/.local/opt/codelldb
-        unzip -q -o /tmp/codelldb.vsix -d ~/.local/opt/codelldb
+        # Unpacked beside the destination and moved into place only once it is
+        # whole: the cache is saved from that path under a stable key, so a
+        # half-finished unzip would be cached as if it were the real thing and
+        # every later run would restore the broken copy.
+        rm -rf /tmp/codelldb-unpack ~/.local/opt/codelldb
+        unzip -q /tmp/codelldb.vsix -d /tmp/codelldb-unpack
+        mkdir -p ~/.local/opt
+        mv /tmp/codelldb-unpack ~/.local/opt/codelldb
 
     - name: Put codelldb on PATH
       shell: bash
@@ -54,10 +63,24 @@ runs:
         WRAPPER
         chmod +x ~/.local/bin/codelldb
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        # `--help` is the version that exists (quirk 4), and running it here
-        # turns a broken bundle into a failure with a name rather than two
-        # dozen adapter timeouts.
-        ~/.local/bin/codelldb --help > /dev/null
+
+    # `--help` proves nothing: clap answers it and exits before main, so it
+    # returns 0 through an install whose liblldb cannot be found (quirk 1).
+    # `--port 0` is the invocation that dlopens it — the one lazydap makes — so
+    # start that, and see that it is still alive a moment later. Turns a broken
+    # bundle into a failure with a name rather than two dozen adapter timeouts.
+    - name: Check codelldb can load liblldb
+      shell: bash
+      run: |
+        set -euo pipefail
+        ~/.local/bin/codelldb --port 0 &
+        adapter=$!
+        sleep 3
+        if ! kill -0 "$adapter" 2>/dev/null; then
+          echo "::error::codelldb --port 0 died on startup; the bundle is broken"
+          exit 1
+        fi
+        kill "$adapter"
 
     - uses: actions/setup-python@v5
       with:
@@ -69,12 +92,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 -m pip install --disable-pip-version-check "debugpy==${{ inputs.debugpy-version }}"
+        python3 -m pip install --disable-pip-version-check --retries 5 \
+          "debugpy==${{ inputs.debugpy-version }}"
         python3 -c 'import debugpy; print(debugpy.__version__)'
 
+    # Pinned, and pinned *with* delve: dlv refuses a toolchain newer than it
+    # knows ("version of Delve is too old for Go version"), and lazydap never
+    # passes `--check-go-version=false`. `stable` would break this job the week
+    # Go releases. Bump the two together.
     - uses: actions/setup-go@v5
       with:
-        go-version: 'stable'
+        go-version: '1.26'
         # There is no go.sum in this repository — the Go fixtures depend on
         # nothing — and setup-go's cache has no key to build without one.
         cache: false
@@ -84,7 +112,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/go/bin/dlv
-        key: dlv-${{ inputs.delve-version }}-${{ runner.os }}
+        key: dlv-${{ inputs.delve-version }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Install dlv
       if: steps.dlv-cache.outputs.cache-hit != 'true'
