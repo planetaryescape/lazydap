@@ -317,8 +317,9 @@ If the user says `ship it`, run the full release flow:
    `~/.dotfiles/.agents/skills/lazydap/` — same directory through the symlink chain).
 10. Report: tag, release URL, per-channel verification output, and anything skipped.
 
-Source of truth: [`.github/workflows/product-release.yml`](.github/workflows/product-release.yml)
-and the tag-time checklist in `TODO.md`. The protocol version does not need bumping for a
+Source of truth: the steps above and
+[`.github/workflows/product-release.yml`](.github/workflows/product-release.yml), which is
+what actually runs from the tag. The protocol version does not need bumping for a
 release — only for wire-shape changes (see D032/D043/D050/D056 for what counts).
 
 ## What you (the agent) should NOT do

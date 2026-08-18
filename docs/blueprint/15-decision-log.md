@@ -1995,6 +1995,18 @@ answer from a request's, because there is no request to refuse: the event has to
 replaced with something that says one was, and a subscriber that silently loses an event is the
 kind of hole D072 exists to close. Left as follow-up rather than guessed at here.
 
+**Amended 2026-08-18 (WP9): covered now, by dropping the event and staying up.** The
+subscription arm tells an encode failure from a write failure the same way the reply path does,
+and on the first it logs a `warn!` naming the event kind and the size the codec refused, drops
+that one event, and goes on serving. Nothing was added to the wire to say so: a variant for
+"an event was dropped" is a protocol bump, and no adapter produces the case — codelldb chunks
+its output at about a kilobyte, so a 16 MiB event is a hypothetical rather than a symptom.
+What the choice buys is the difference between losing one event and losing every later one:
+a subscriber already re-reads its state after a `Lagged`, and that is the same recovery.
+`crates/daemon/tests/ipc_server.rs::an_event_that_cannot_be_framed_does_not_take_the_subscription_with_it`
+pushes a 16 MiB `Output` chunk at a live subscriber and asserts the next event still arrives.
+D072 is still the entry that would say so on the wire.
+
 ---
 
 ## D092 — a client hanging up ends its `--wait`, and nothing else
@@ -2067,6 +2079,14 @@ That leaves `Request::Doctor { check_adapters, check_state }` with no in-tree ca
 either — the CLI now sends both as `false` and the daemon answers only for itself. The fields
 stay on the wire rather than being removed, because taking them off would change the frame's
 shape for a version bump nothing else needs; they are retirable at the next one.
+
+**Amended 2026-08-18 (WP9): the daemon accepts the flags and ignores them.** The branches they
+gated were still in `handlers::doctor`, reachable only from a test written to reach them —
+code that looks like the daemon's answer to a question the daemon no longer answers, and the
+next reader would have had to work out which of the two implementations was live. They are
+gone; `handlers::doctor` now reports the one check the client cannot make for itself, and the
+dispatch arm decodes the flags without reading them. The wire is untouched, so the retirement
+at the next bump is unchanged — the fields go then, and nothing has to be un-written first.
 
 ---
 
@@ -2324,3 +2344,32 @@ than a wrong one.
 dropped rather than invented into the map. After this change that means only what it always
 should have: a breakpoint lazydap never set — the adapter's own, or one from an earlier
 session.
+
+---
+
+## D-WP9-1 — the daemon canonicalises a breakpoint's source, so every client agrees what file it is
+
+**Status:** decided (2026-08-18, defect campaign WP9).
+
+A file has more than one true name. On macOS `/tmp/p/main.c` and `/private/tmp/p/main.c` are
+the same file, and `.lazydap/state.toml` compares source paths for equality and nothing else —
+so two spellings of one line are two breakpoints, `break --remove` takes one of them, and the
+adapter is handed a list that still has the other in it.
+
+The CLI has always avoided this by resolving the path in the process that typed it
+(`commands::resolve_source`), and the TUI started doing the same with D097. But that is each
+client's courtesy, paid separately, and lazydap's whole shape is that the protocol is the
+product — a client somebody else writes gets breakpoints that do not dedupe against the CLI's,
+and nothing tells them why.
+
+**The rule.** The daemon canonicalises the source on `BreakpointAdd`, and on the `Location` and
+`Source` selectors of `BreakpointRemove` and `BreakpointToggle`, before the store sees it. The
+store therefore holds one spelling per file whatever a client sends.
+
+**A path that will not canonicalise is kept exactly as it arrived**, which is the half worth
+stating. It almost always means the file is not there *yet* — generated, or on a branch not
+checked out — and a breakpoint waiting for it is a reasonable thing to have persisted;
+refusing it in the daemon would turn a breakpoint the store already holds into an error on the
+next `toggle`. The CLI still refuses a missing file at the point where the user typed it, which
+is both where the better error message is and where the user can do something about it. The two
+are not redundant: the client's check is a message, the daemon's is an invariant.

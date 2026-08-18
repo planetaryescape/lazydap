@@ -8,7 +8,19 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+**One enormous event dropped a subscriber's whole connection.** The daemon refuses to frame anything over 16 MiB, and a reply that big has been answered with an error rather than a hang-up since v0.2.2 — but an event pushed to a subscriber has no request to refuse, so the connection was closed instead. A TUI watching a program that printed one gigantic line lost its event stream and reconnected. The event is now dropped on its own, with a `warn!` in the daemon log naming the kind and the size, and the connection keeps serving (D091, amended).
+
+**`lazydap completions bash | head` exited 101 with a panic.** `clap_complete` writes the script to stdout itself instead of going through the printer that treats a closed pipe as the reader having finished on purpose, so paging or truncating a completion script — which is a normal thing to do while installing one — ended in `Broken pipe` across stderr. The same was true of a usage error whose stderr was folded into a closed pipe: `lazydap --format json nosuch 2>&1 | true` exited 101 rather than 2. Both are quiet now.
+
+**Two spellings of one file made two breakpoints for any client but the CLI.** The daemon stored the source path exactly as it arrived, and the store compares paths for equality — so on macOS, where `/tmp/p/main.c` and `/private/tmp/p/main.c` are the same file, a client that did not canonicalise for itself got a second breakpoint on a line that already had one, and could not remove the first. `lazydap break` and the TUI both resolved their own paths and were unaffected; the daemon now makes it the rule rather than each client's courtesy (D-WP9-1). A path that will not resolve — a file not generated or checked out yet — is still stored as sent.
+
+### Changed
+
+**`install.sh` uses `GITHUB_TOKEN` when there is one.** Its release lookup goes to GitHub's anonymous API, which allows 60 requests an hour per address; a few installs in a row and it answers 403 for the rest of the hour. `GITHUB_TOKEN` or `GH_TOKEN`, if set, now authenticates that one request. It is sent to `api.github.com` and nowhere else — never to the asset download, which is a different host and needs no credentials — passed to curl through a config file on stdin so it stays out of the process list, and never printed.
+
+**The daemon no longer implements the `doctor` checks it stopped being asked for.** `doctor`'s adapter and state checks moved into the CLI in v0.2.3, because both describe the machine and directory you typed the command in rather than the daemon's. The daemon-side versions stayed behind, reachable only from a test — two implementations of one answer, with nothing saying which was live. The request's `check_adapters` and `check_state` fields are still decoded, and ignored; they come off the wire at the next protocol bump (D093, amended).
 
 ## [0.2.7] — 2026-08-18
 

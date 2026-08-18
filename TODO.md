@@ -33,23 +33,9 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   reporting `timeout` for a program that had stopped, a `break --condition` silently dropping
   the condition, `--no-terminate` killing the program and saying it had not, and one leaked
   adapter process per session that ended on its own.
-- **Follow-ups the campaign left, none of them a milestone yet:**
-  - **An event pushed to a subscriber can still be unframeable.** D091 fixed it for replies —
-    a reply over the codec's 16 MiB limit is answered `BadRequest` instead of closing the
-    connection — but `serve_client`'s subscription arm sends events, which have no request to
-    refuse. A single enormous `Output` chunk still breaks that connection. It needs a way to
-    say an event was dropped, which is the hole D072 exists to close.
-  - **`lazydap completions <shell>` still panics on `EPIPE`.** Every other command writes
-    through `output::print_line`, which treats a closed pipe as a quiet exit 0; `clap_complete`
-    writes to stdout itself, as does clap's own error path.
-  - **Nothing sets `Request::Doctor`'s flags any more.** D093 moved the adapter and state
-    checks into the client, so the one production caller
-    (`crates/daemon/src/commands/diagnostics.rs:251`) sends both `false` and the daemon-side
-    branches they gate are reached only by tests. The fields stay on the wire because
-    removing them is a frame-shape change; retire them at the next protocol bump.
-  - **`install.sh` has no `GITHUB_TOKEN` passthrough.** Its release lookup uses the
-    unauthenticated GitHub API, which rate-limits at 60/hour — enough to 403 a run of install
-    verifications for an hour.
+- **Follow-ups the campaign left**, less the four v0.2.8 fixed — the unframeable subscriber
+  event, `completions` panicking on `EPIPE`, `Request::Doctor`'s dead daemon-side flags, and
+  `install.sh`'s missing `GITHUB_TOKEN` passthrough. Neither of the two left is a milestone yet:
   - **`ProjectStore`'s merge replaces `state.unknown` wholesale** with the file's copy
     (`crates/store/src/lib.rs:643`) rather than three-way merging it the way breakpoints and
     watches are merged. Harmless today, because lazydap never writes into `unknown` — but it
