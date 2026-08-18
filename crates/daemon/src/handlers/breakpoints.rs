@@ -237,7 +237,7 @@ async fn apply(state: &Arc<DaemonState>, sources: &[PathBuf]) -> Result<bool> {
         // What the adapter made of them is deliberately not recorded here: the
         // pump has already recorded this same answer as it went past, which is
         // what stops a `breakpoint` event arriving right behind it being
-        // reported under an id nobody can match (D-WP7-2). Recording it again
+        // reported under an id nobody can match (D099). Recording it again
         // would be a whole-entry overwrite of a map that event has since
         // refreshed — putting the adapter's first word back over its second.
         session

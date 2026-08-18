@@ -179,7 +179,7 @@ pub(crate) type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<DapResponse<ser
 ///
 /// Shared with the pump, which is what lets it map the adapter's breakpoint
 /// ids to ours as the answer goes past rather than after the caller that sent
-/// it has been scheduled again (D-WP7-2). A `std` mutex on purpose: it is held
+/// it has been scheduled again (D099). A `std` mutex on purpose: it is held
 /// for a single map operation, never across an await, so an async one would
 /// buy nothing and cost a suspension point in the read loop.
 pub(crate) type BreakpointRequests = Arc<std::sync::Mutex<HashMap<i64, Vec<Breakpoint>>>>;
@@ -755,7 +755,7 @@ impl AdapterHandle {
     /// dispatch whatever followed it on the wire, including the `breakpoint`
     /// event codelldb sends microseconds later. Leaving the pairing here, for
     /// the pump to apply as the answer passes, is what stops that event being
-    /// reported under an id no caller can match (D-WP7-2).
+    /// reported under an id no caller can match (D099).
     async fn send_breakpoints(
         &self,
         source: &Path,

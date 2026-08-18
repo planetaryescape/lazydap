@@ -1611,7 +1611,7 @@ macOS the second event, arriving after the mapping existed, coalesced over the b
 the `--wait` blob looked correct. On Linux there was nothing to coalesce over, and
 `crates/daemon/tests/wait_codelldb.rs`'s
 `continuing_to_a_breakpoint_reports_where_and_why_it_stopped` failed on CI while passing on
-every developer machine. See D-WP7-2.
+every developer machine. See D099.
 
 ### Fix or workaround
 
@@ -1622,7 +1622,7 @@ past, so the first event is already correlatable.
 
 ### Cross-references
 
-- D-WP7-2 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
+- D099 in [`docs/blueprint/15-decision-log.md`](https://github.com/planetaryescape/lazydap/blob/main/docs/blueprint/15-decision-log.md)
 - Quirk 23 — the other `setBreakpoints` answer that needs correcting a moment later
 - `crates/daemon/src/adapter/pump.rs::record_breakpoint_ids`
 

@@ -1167,7 +1167,7 @@ impl BreakpointMap {
     /// caller awaiting the `setBreakpoints` answer and the event beat it. The
     /// pump records the mapping as the answer goes past, so by the time any
     /// event that follows it is dispatched, the id is either ours or nobody's
-    /// (D-WP7-2).
+    /// (D099).
     fn update(&mut self, update: &AdapterBreakpoint) {
         let Some(adapter_id) = update.adapter_id else {
             return;

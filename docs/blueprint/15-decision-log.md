@@ -2233,7 +2233,7 @@ the only client that matches a frame against a breakpoint.
 
 ---
 
-## D-WP7-1 — the real-adapter suites are required in CI, and a skip there is a failure
+## D098 — the real-adapter suites are required in CI, and a skip there is a failure
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -2267,7 +2267,7 @@ with the quirk entry it settles.
 
 ---
 
-## D-WP7-2 — the adapter's breakpoint ids are mapped to ours in the pump, as the answer goes past
+## D099 — the adapter's breakpoint ids are mapped to ours in the pump, as the answer goes past
 
 **Status:** decided (2026-08-18, defect campaign WP7).
 

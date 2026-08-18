@@ -467,7 +467,7 @@ fn adapter_breakpoint(body: &serde_json::Value) -> AdapterBreakpoint {
 /// event codelldb sends microseconds later — before the caller awaiting the
 /// answer is scheduled again. Recorded from the caller, the mapping arrived
 /// after the event that needed it, and the update went out with a `null` id no
-/// caller could match against `break --list` (D-WP7-2).
+/// caller could match against `break --list` (D099).
 ///
 /// Called for every response, not only successful ones: an entry left behind
 /// by a request the adapter rejected is an entry nothing else will ever
