@@ -1805,3 +1805,70 @@ the ceiling is about the home directory specifically, not about depth.
 `exists()`, so a file of that name stopped the walk at a root whose state file could never
 be written. `.git` deliberately keeps `exists()`: it is a plain file in a worktree or a
 submodule.
+
+---
+
+## D-WP4-1 — setting a location that already has a breakpoint edits it, and says which
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** `lazydap break x.c:5` followed by `lazydap break x.c:5 --condition 'x > 5' --disabled`
+answered `"action": "added"`, `enabled: true`, no condition, exit 0 — and sent the adapter the
+old unconditional breakpoint. The store deduped on `(source, line)` and returned the existing
+breakpoint untouched, so every modifier a caller passed the second time was dropped on the floor
+while the report said it had worked. `--dry-run` previewed the same lie, consistently.
+
+**Decision:** a location holds at most one breakpoint, and setting it again *edits* that one.
+
+- **The id survives.** Ids are never reused (D031), and a re-set location is the same breakpoint
+  with different modifiers rather than a second one — a script holding the id keeps a valid one.
+- **The whole request wins, including what it left out.** No `--condition` on the second call
+  means no condition, exactly as it does on the first. The alternative — merging, so an absent
+  flag means "keep what was there" — makes `lazydap break x.c:5` un-say nothing and leaves no way
+  to clear a condition short of removing the breakpoint and adding it back under a new id.
+- **The report distinguishes three outcomes,** `added` / `updated` / `unchanged`, because a
+  script re-applying a list of breakpoints wants to know which of them it actually changed and
+  `added` for all three is what hid this defect. `unchanged` is deliberately not folded into
+  `updated`: they differ in whether anything was written.
+- **`--dry-run` goes through the same rule.** `ProjectStore::add` and
+  `ProjectStore::preview_add` both call one `decide`, so the preview cannot promise an update the
+  mutation would not make (non-negotiable #4).
+- **An unchanged re-set is still sent to a live adapter,** because re-running the command is how
+  a caller retries a breakpoint the adapter did not take. It is not *announced* — nothing about
+  the project's list changed.
+
+**Protocol v8 → v9.** `BreakpointAction` is an enum on the wire, so `updated` and `unchanged` are
+new variants a v8 client cannot decode at all — it fails the whole envelope, the same break a new
+`AdapterKind` had in D061 and a new `ErrorCode` in D075. The bump moves that failure back to the
+handshake, where `lazydap shutdown` clears it.
+
+---
+
+## D-WP4-2 — the store commits first, the adapter is told second, and a refusal says so
+
+**Status:** decided (2026-08-18, defect campaign).
+
+**Why:** every breakpoint mutation ran `store` → `apply to adapter` → `announce`. When
+`setBreakpoints` failed the caller got an error, the store had already changed, and *no*
+`BreakpointUpdated` was emitted — so a TUI went on drawing a breakpoint that had been removed.
+That is the D043 bug the `announce` comment describes, reintroduced by the ordering around it.
+
+**Decision:** the order is **store, announce, adapter**, and the store is not rolled back.
+
+A breakpoint list belongs to the project, not to whichever session happens to be running (D006).
+An adapter that refuses `setBreakpoints` — in practice one that has just died; all three adapters
+answer an unbindable location with `verified: false` rather than a rejection — has not made the
+user's intent untrue, and the list is re-sent in full at the next launch. Undoing the edit would
+lose the user's change to a failure that is about the session, and re-adding a *removed*
+breakpoint would have to invent an id or reuse one, both of which D031 forbids.
+
+What that leaves is a caller holding an error for a change that did happen, so two things carry
+it honestly: the announcement goes out **before** the adapter is told, so no subscriber is ever
+left drawing the old list; and the error names what was recorded —
+`recorded_breakpoint_ids`, `applied_to_session: false`, and a message saying it applies at the
+next `lazydap launch`. The exit code stays non-zero, because the adapter really did not take it.
+
+**Selection and mutation now happen under one lock,** the way `remove_watches` already did.
+`not_found` derived from a selection taken earlier let two clients removing the same id both
+report success: the loser removed nothing and answered with an empty `not_found` under exit 0.
+`ProjectStore::remove` and `ProjectStore::toggle` return both halves of the answer together.

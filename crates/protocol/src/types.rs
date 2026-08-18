@@ -79,7 +79,14 @@ use std::path::PathBuf;
 /// anyway would be sending back integers this daemon reads against a different
 /// table. Both failures are silent without the bump, and a `VersionMismatch`
 /// `lazydap shutdown` clears is the better one.
-pub const LAZYDAP_PROTOCOL_VERSION: u32 = 8;
+///
+/// v9 (D-WP4-1): [`BreakpointAction`] gained `Updated` and `Unchanged`, so that
+/// setting a location that already has a breakpoint can say which of the three
+/// things it did. Two more variants on the daemon's side of the wire, and a v8
+/// client fails the whole envelope on either of them — the same break D061's
+/// `AdapterKind` and D075's `ErrorCode` had, and the same reason for a bump:
+/// the failure belongs at the handshake, where `lazydap shutdown` clears it.
+pub const LAZYDAP_PROTOCOL_VERSION: u32 = 9;
 
 /// The envelope. Every frame on the socket is exactly one of these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -599,6 +606,13 @@ pub struct BreakpointReport {
 pub enum BreakpointAction {
     Listed,
     Added,
+    /// A location that already had a breakpoint, set again with different
+    /// modifiers. The id is the one it already had (D-WP4-1).
+    Updated,
+    /// A location set again with exactly what it already said. Distinct from
+    /// `Updated` because a script re-applying a list of breakpoints wants to
+    /// know which of them it actually changed.
+    Unchanged,
     Removed,
     Toggled,
 }
@@ -608,6 +622,8 @@ impl BreakpointAction {
         match self {
             Self::Listed => "listed",
             Self::Added => "added",
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
             Self::Removed => "removed",
             Self::Toggled => "toggled",
         }
@@ -618,6 +634,8 @@ impl BreakpointAction {
         match self {
             Self::Listed => "would list",
             Self::Added => "would add",
+            Self::Updated => "would update",
+            Self::Unchanged => "would leave unchanged",
             Self::Removed => "would remove",
             Self::Toggled => "would toggle",
         }

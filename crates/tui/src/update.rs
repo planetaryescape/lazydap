@@ -1224,7 +1224,10 @@ fn reconcile(state: &mut AppState, action: BreakpointAction, breakpoints: Vec<Br
     match action {
         // The whole truth, so it replaces rather than merges.
         BreakpointAction::Listed => state.breakpoints = breakpoints,
-        BreakpointAction::Added | BreakpointAction::Toggled => {
+        BreakpointAction::Added
+        | BreakpointAction::Updated
+        | BreakpointAction::Unchanged
+        | BreakpointAction::Toggled => {
             for status in breakpoints {
                 upsert(&mut state.breakpoints, status);
             }

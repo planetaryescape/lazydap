@@ -204,15 +204,11 @@ fn note(report: &BreakpointReport) -> Option<String> {
                 .join(", "),
         ));
     }
-    // Only worth saying when something changed: a plain `--list` has no
-    // session to apply to and nobody expects it to.
-    if !report.dry_run
-        && !report.applied_to_session
-        && matches!(
-            report.action,
-            BreakpointAction::Added | BreakpointAction::Removed | BreakpointAction::Toggled
-        )
-    {
+    // Only worth saying when the command was about a breakpoint taking effect:
+    // a plain `--list` has no session to apply to and nobody expects it to.
+    // `Unchanged` is included because re-setting a location is how you retry
+    // one the adapter never took.
+    if !report.dry_run && !report.applied_to_session && report.action != BreakpointAction::Listed {
         notes.push("recorded; it will apply to the next `lazydap launch`".to_string());
     }
 

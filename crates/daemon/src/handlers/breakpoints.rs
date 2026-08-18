@@ -8,17 +8,22 @@
 //!
 //! Every mutation supports `--dry-run` (non-negotiable #4), and the preview is
 //! not a separate code path: it calls `store.select` with the same selector
-//! the mutation would, so the two cannot disagree about what is about to
-//! happen.
+//! the mutation would, or `store.preview_add` with the same rule `store.add`
+//! follows, so the two cannot disagree about what is about to happen.
+//!
+//! The order of those two things is fixed: **store, announce, then adapter.**
+//! The store is what the project actually holds, so a subscriber has to hear
+//! about the change whether or not the adapter accepts it — see
+//! [`recorded_anyway`].
 
 use super::Result;
 use crate::adapter::AdapterError;
 use crate::state::DaemonState;
 use lazydap_core::{
-    AdapterBreakpoint, Breakpoint, BreakpointId, BreakpointSelector, BreakpointStatus,
-    NewBreakpoint,
+    AdapterBreakpoint, Breakpoint, BreakpointSelector, BreakpointStatus, NewBreakpoint,
 };
-use lazydap_protocol::{BreakpointAction, BreakpointReport, Event, Response};
+use lazydap_protocol::{BreakpointAction, BreakpointReport, Event, IpcError, Response};
+use lazydap_store::AddOutcome;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,51 +41,50 @@ pub fn list(state: &Arc<DaemonState>) -> Result<Response> {
 
 pub async fn add(state: &Arc<DaemonState>, new: NewBreakpoint, dry_run: bool) -> Result<Response> {
     if dry_run {
-        // Adding is the one mutation whose preview cannot come from the
-        // selector: there is nothing to select yet. What it can do is answer
-        // the question the caller is actually asking — is this a new
-        // breakpoint, or one I already have?
-        let existing = state.store.select(&BreakpointSelector::Location {
-            source: new.source.clone(),
-            line: new.line,
-        });
-        let preview = match existing.into_iter().next() {
-            Some(existing) => existing,
-            // Id `0` is deliberately not a real one: nothing has been
-            // allocated, and printing the id the breakpoint *would* get would
-            // be a promise this command has no way to keep.
-            None => Breakpoint {
-                id: BreakpointId(0),
-                source: new.source,
-                line: new.line,
-                column: new.column,
-                condition: new.condition,
-                hit_condition: new.hit_condition,
-                log_message: new.log_message,
-                enabled: new.enabled,
-            },
-        };
+        // Adding is the one mutation whose preview cannot come from a
+        // selector: there is nothing to select yet. `preview_add` answers the
+        // question the caller is actually asking — would this make a
+        // breakpoint, change one, or do nothing? — from the same rule the
+        // mutation follows.
+        let preview = state.store.preview_add(new);
         return Ok(Response::Breakpoints(BreakpointReport {
-            action: BreakpointAction::Added,
+            action: action_for(preview.outcome),
             dry_run: true,
-            breakpoints: decorate(state, vec![preview]),
+            breakpoints: decorate(state, vec![preview.breakpoint]),
             not_found: Vec::new(),
             applied_to_session: false,
         }));
     }
 
     let source = new.source.clone();
-    let breakpoint = state.store.add(new);
-    let applied = apply(state, &[source]).await?;
-    announce(state, std::slice::from_ref(&breakpoint));
+    let added = state.store.add(new);
+    // Nothing to announce when nothing moved: a subscriber redrawing on a
+    // no-op learns nothing, and would be told a change happened that did not.
+    if added.outcome != AddOutcome::Unchanged {
+        announce(state, std::slice::from_ref(&added.breakpoint));
+    }
+    // Sent even when unchanged, so that re-running the command is how you
+    // retry a breakpoint the adapter refused the first time.
+    let applied = apply(state, &[source])
+        .await
+        .map_err(|error| recorded_anyway(error, std::slice::from_ref(&added.breakpoint)))?;
 
     Ok(Response::Breakpoints(BreakpointReport {
-        action: BreakpointAction::Added,
+        action: action_for(added.outcome),
         dry_run: false,
-        breakpoints: decorate(state, vec![breakpoint]),
+        breakpoints: decorate(state, vec![added.breakpoint]),
         not_found: Vec::new(),
         applied_to_session: applied,
     }))
+}
+
+/// How a store outcome is reported on the wire.
+fn action_for(outcome: AddOutcome) -> BreakpointAction {
+    match outcome {
+        AddOutcome::Created => BreakpointAction::Added,
+        AddOutcome::Updated => BreakpointAction::Updated,
+        AddOutcome::Unchanged => BreakpointAction::Unchanged,
+    }
 }
 
 pub async fn remove(
@@ -88,10 +92,8 @@ pub async fn remove(
     selector: BreakpointSelector,
     dry_run: bool,
 ) -> Result<Response> {
-    let picked = state.store.select(&selector);
-    let not_found = missing(&selector, &picked);
-
     if dry_run {
+        let (picked, not_found) = state.store.select(&selector);
         return Ok(Response::Breakpoints(BreakpointReport {
             action: BreakpointAction::Removed,
             dry_run: true,
@@ -101,9 +103,16 @@ pub async fn remove(
         }));
     }
 
+    // Selection and mutation under one lock, with `not_found` derived from
+    // what this call actually removed. Selecting first and mutating after let
+    // two clients removing the same id both see it there: the winner removed
+    // it, and the loser removed nothing while reporting an empty `not_found` —
+    // success, for work it did not do.
     let removed = state.store.remove(&selector);
-    let applied = apply(state, &sources_of(&removed)).await?;
-    announce(state, &removed);
+    announce(state, &removed.breakpoints);
+    let applied = apply(state, &sources_of(&removed.breakpoints))
+        .await
+        .map_err(|error| recorded_anyway(error, &removed.breakpoints))?;
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: BreakpointAction::Removed,
@@ -111,10 +120,11 @@ pub async fn remove(
         // Deliberately what was removed, not what is left: a caller that
         // piped ids in wants to know which of them went.
         breakpoints: removed
+            .breakpoints
             .into_iter()
             .map(BreakpointStatus::unverified)
             .collect(),
-        not_found,
+        not_found: removed.not_found,
         applied_to_session: applied,
     }))
 }
@@ -124,13 +134,11 @@ pub async fn toggle(
     selector: BreakpointSelector,
     dry_run: bool,
 ) -> Result<Response> {
-    let picked = state.store.select(&selector);
-    let not_found = missing(&selector, &picked);
-
     if dry_run {
         // Show them as they *would* be, which is the only useful preview of a
         // toggle — echoing the current state would answer a question nobody
         // asked.
+        let (picked, not_found) = state.store.select(&selector);
         let flipped: Vec<Breakpoint> = picked
             .into_iter()
             .map(|breakpoint| Breakpoint {
@@ -147,15 +155,19 @@ pub async fn toggle(
         }));
     }
 
+    // Under one lock, and `not_found` from what was actually flipped — see
+    // [`remove`].
     let toggled = state.store.toggle(&selector);
-    let applied = apply(state, &sources_of(&toggled)).await?;
-    announce(state, &toggled);
+    announce(state, &toggled.breakpoints);
+    let applied = apply(state, &sources_of(&toggled.breakpoints))
+        .await
+        .map_err(|error| recorded_anyway(error, &toggled.breakpoints))?;
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: BreakpointAction::Toggled,
         dry_run: false,
-        breakpoints: decorate(state, toggled),
-        not_found,
+        breakpoints: decorate(state, toggled.breakpoints),
+        not_found: toggled.not_found,
         applied_to_session: applied,
     }))
 }
@@ -231,21 +243,35 @@ async fn apply(state: &Arc<DaemonState>, sources: &[PathBuf]) -> Result<bool> {
     Ok(true)
 }
 
-/// Ids the selector named that matched nothing.
+/// Say that the project's list changed even though the adapter would not take
+/// it.
 ///
-/// Only meaningful for an id selector: a file with no breakpoints in it is not
-/// a mistake, but an id that no longer exists usually is — it means a script
-/// is holding a stale one.
-fn missing(selector: &BreakpointSelector, picked: &[Breakpoint]) -> Vec<BreakpointId> {
-    let BreakpointSelector::Ids(asked) = selector else {
-        return Vec::new();
-    };
-    let found: Vec<BreakpointId> = picked.iter().map(|breakpoint| breakpoint.id).collect();
-    asked
-        .iter()
-        .filter(|id| !found.contains(id))
-        .copied()
-        .collect()
+/// **The store is deliberately not rolled back.** A breakpoint list belongs to
+/// the project, not to whichever session happens to be running (D006), and an
+/// adapter that refuses `setBreakpoints` — usually because it has just died —
+/// has not made the user's intent untrue: the list is re-sent in full at the
+/// next launch. Undoing the edit would lose it for a failure that is about the
+/// session.
+///
+/// What that leaves is a caller holding an error for a change that did happen,
+/// which is why the announcement goes out *before* the adapter is told (so a
+/// subscriber is never left drawing the old list — the D043 bug) and why the
+/// error names what was recorded rather than reading as "nothing happened".
+fn recorded_anyway(mut error: IpcError, changed: &[Breakpoint]) -> IpcError {
+    let ids: Vec<u32> = changed.iter().map(|breakpoint| breakpoint.id.0).collect();
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "recorded_breakpoint_ids".to_string(),
+            serde_json::json!(ids),
+        );
+        details.insert("applied_to_session".to_string(), serde_json::json!(false));
+    }
+    error.message = format!(
+        "{} — the change to the project's breakpoints is recorded and will \
+         apply to the next `lazydap launch`",
+        error.message,
+    );
+    error
 }
 
 /// The distinct sources a set of breakpoints touches.
@@ -272,8 +298,12 @@ fn decorate(state: &Arc<DaemonState>, breakpoints: Vec<Breakpoint>) -> Vec<Break
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::AdapterHandle;
     use crate::handlers::tests::state;
-    use lazydap_protocol::{Request, Response};
+    use crate::state::Session;
+    use lazydap_core::{AdapterKind, BreakpointId, SessionId, SessionState};
+    use lazydap_protocol::{ErrorCode, Request, Response};
+    use std::sync::atomic::AtomicU64;
 
     fn new_breakpoint(source: &str, line: u32) -> NewBreakpoint {
         NewBreakpoint {
@@ -411,6 +441,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_removals_of_the_same_id_do_not_both_report_success() {
+        // What two clients racing on one id reach. The loser used to answer
+        // with an empty `breakpoints` *and* an empty `not_found` under exit 0
+        // — success, for work it did not do — because `not_found` came from a
+        // selection made before the lock the removal took.
+        let state = state();
+        let added = report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 19),
+                dry_run: false,
+            },
+        )
+        .await;
+        let id = added.breakpoints[0].breakpoint.id;
+        let remove = || Request::BreakpointRemove {
+            selector: BreakpointSelector::Ids(vec![id]),
+            dry_run: false,
+        };
+
+        let winner = report(&state, remove()).await;
+        let loser = report(&state, remove()).await;
+
+        assert_eq!(winner.breakpoints.len(), 1);
+        assert!(winner.not_found.is_empty());
+        assert!(loser.breakpoints.is_empty(), "it removed nothing");
+        assert_eq!(loser.not_found, vec![id], "and has to say so");
+    }
+
+    #[tokio::test]
     async fn a_dry_run_toggle_shows_the_state_it_would_leave_behind() {
         let state = state();
         let added = report(
@@ -439,6 +499,141 @@ mod tests {
         assert!(
             state.store.breakpoints()[0].enabled,
             "and it must not have actually toggled anything",
+        );
+    }
+
+    /// A live session whose adapter has already gone — every request to it
+    /// fails, which is the shape of an adapter refusing `setBreakpoints`.
+    fn live_session_with_a_dead_adapter(state: &Arc<DaemonState>) {
+        let session_id = SessionId::new();
+        let reservation = state.reserve(session_id).expect("the slot is free");
+        reservation.promote(Arc::new(Session::new(
+            session_id,
+            AdapterKind::Codelldb,
+            PathBuf::from("/tmp/hello"),
+            SessionState::Running,
+            AdapterHandle::detached(),
+            state.events(),
+            Arc::new(AtomicU64::new(0)),
+        )));
+    }
+
+    #[tokio::test]
+    async fn re_setting_a_location_with_a_condition_updates_it_and_keeps_its_id() {
+        let state = state();
+        let added = report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 10),
+                dry_run: false,
+            },
+        )
+        .await;
+        assert_eq!(added.action, BreakpointAction::Added);
+
+        let conditional = NewBreakpoint {
+            condition: Some("i > 5".to_string()),
+            enabled: false,
+            ..new_breakpoint("/p/main.c", 10)
+        };
+        let preview = report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: conditional.clone(),
+                dry_run: true,
+            },
+        )
+        .await;
+        let updated = report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: conditional,
+                dry_run: false,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            preview.action,
+            BreakpointAction::Updated,
+            "the preview must not promise an add it will not make",
+        );
+        assert_eq!(updated.action, BreakpointAction::Updated);
+        assert_eq!(
+            updated.breakpoints[0].breakpoint.id, added.breakpoints[0].breakpoint.id,
+            "a re-set location is the same breakpoint, not a second one",
+        );
+        assert_eq!(
+            updated.breakpoints[0].breakpoint.condition.as_deref(),
+            Some("i > 5"),
+            "the modifiers used to be dropped silently",
+        );
+        assert!(!updated.breakpoints[0].breakpoint.enabled);
+    }
+
+    #[tokio::test]
+    async fn setting_a_location_to_what_it_already_says_reports_no_change() {
+        let state = state();
+        for _ in 0..2 {
+            report(
+                &state,
+                Request::BreakpointAdd {
+                    breakpoint: new_breakpoint("/p/main.c", 10),
+                    dry_run: false,
+                },
+            )
+            .await;
+        }
+        let again = report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 10),
+                dry_run: false,
+            },
+        )
+        .await;
+
+        assert_eq!(again.action, BreakpointAction::Unchanged);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_set_breakpoints_is_reported_and_announced() {
+        // The store and the adapter are not one transaction: the breakpoint
+        // list belongs to the project and survives the session that would not
+        // take it. What must not survive is a subscriber drawing the old list
+        // (D043), so the change is announced before the adapter is told.
+        let state = state();
+        live_session_with_a_dead_adapter(&state);
+        let mut events = state.events().subscribe();
+
+        let error = crate::handlers::dispatch(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 19),
+                dry_run: false,
+            },
+        )
+        .await
+        .expect_err("the adapter is gone, so applying it cannot succeed");
+
+        assert_eq!(error.code, ErrorCode::AdapterCrashed, "got: {error}");
+        assert!(
+            error.message.contains("recorded"),
+            "an error reading as `nothing happened` would be a lie: {error}",
+        );
+        assert_eq!(error.details["recorded_breakpoint_ids"][0], 1);
+        assert_eq!(error.details["applied_to_session"], false);
+
+        assert_eq!(
+            state.store.breakpoints().len(),
+            1,
+            "the project keeps what the user asked for; it applies at the next launch",
+        );
+        let announced = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|seq| matches!(seq.event, Event::BreakpointUpdated { .. }));
+        assert!(
+            announced,
+            "without the announcement a TUI goes on drawing the old list",
         );
     }
 

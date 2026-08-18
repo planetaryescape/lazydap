@@ -503,3 +503,70 @@ fn removing_a_watch_two_ways_at_once_is_a_usage_error() {
     let output = sandbox.run_in_project(&["watch", "remove", "x", "--all"]);
     assert_eq!(output.status.code(), Some(2), "usage errors exit 2");
 }
+
+// --- Breakpoints ------------------------------------------------------------
+
+#[test]
+fn re_setting_a_location_updates_it_and_says_so() {
+    // The defect: the modifiers were dropped on the floor and the command
+    // still reported `added`, so a script that set a condition on a line it
+    // had already broken on debugged with an unconditional breakpoint and no
+    // sign anything had gone wrong (D-WP4-1).
+    let sandbox = Sandbox::new("bpupd");
+    let source = sandbox.project().join("f.c");
+    std::fs::write(&source, "int main(void) { return 0; }\n").expect("write the fixture");
+    let location = format!("{}:1", source.display());
+
+    let added = sandbox.json_in_project(&["--format", "json", "break", &location]);
+    assert_eq!(added["action"], "added", "got: {added}");
+    let id = added["breakpoints"][0]["id"].clone();
+
+    let preview = sandbox.json_in_project(&[
+        "--format",
+        "json",
+        "break",
+        &location,
+        "--condition",
+        "i > 5",
+        "--disabled",
+        "--dry-run",
+    ]);
+    let updated = sandbox.json_in_project(&[
+        "--format",
+        "json",
+        "break",
+        &location,
+        "--condition",
+        "i > 5",
+        "--disabled",
+    ]);
+
+    for report in [&preview, &updated] {
+        assert_eq!(report["action"], "updated", "got: {report}");
+        assert_eq!(report["breakpoints"][0]["id"], id, "got: {report}");
+        assert_eq!(
+            report["breakpoints"][0]["condition"], "i > 5",
+            "got: {report}"
+        );
+        assert_eq!(report["breakpoints"][0]["enabled"], false, "got: {report}");
+    }
+
+    let listed = sandbox.json_in_project(&["--format", "json", "break", "--list"]);
+    let breakpoints = listed["breakpoints"].as_array().expect("an array");
+    assert_eq!(breakpoints.len(), 1, "one line, one breakpoint: {listed}");
+    assert_eq!(breakpoints[0]["condition"], "i > 5", "got: {listed}");
+
+    let again = sandbox.json_in_project(&[
+        "--format",
+        "json",
+        "break",
+        &location,
+        "--condition",
+        "i > 5",
+        "--disabled",
+    ]);
+    assert_eq!(
+        again["action"], "unchanged",
+        "asking for what is already there changed nothing: {again}",
+    );
+}

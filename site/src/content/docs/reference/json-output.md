@@ -197,7 +197,7 @@ Same shape as one variable, minus the name.
 
 | Field | Notes |
 |---|---|
-| `action` | `added`, `removed`, `toggled`, or `listed` |
+| `action` | `added`, `updated`, `unchanged`, `removed`, `toggled`, or `listed`. Setting a location that already has a breakpoint edits it in place and reports `updated` (or `unchanged`) |
 | `applied_to_session` | Whether a live session was updated as well as the state file |
 | `breakpoints` | The set acted on. Under `--dry-run`, the set that *would* be |
 | `not_found` | Ids you selected that do not exist |

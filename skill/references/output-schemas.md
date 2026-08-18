@@ -141,6 +141,17 @@ was the next stop.
 `break`, `break --list`, `break --remove` and `break --toggle` all return the
 same shape, so you parse it once.
 
+Setting a location is idempotent and last-write-wins: `break x.c:10 --condition
+'i == 3'` on a line you already broke on updates that breakpoint rather than
+adding a second one, and the modifiers you *omit* are cleared. Read `action` to
+tell the three cases apart.
+
+If a mutation succeeds in the store but the debugger will not take it — an
+adapter that has just died — the command **fails** (exit 1) and the error says
+so: `details.recorded_breakpoint_ids` names what the project kept, and
+`details.applied_to_session` is `false`. The change is real and applies at the
+next `launch`; only the running session missed it.
+
 ```json
 {
   "action": "added",
@@ -156,7 +167,7 @@ same shape, so you parse it once.
 
 | Field | Notes |
 |---|---|
-| `action` | `listed`, `added`, `removed`, `toggled`. |
+| `action` | `listed`, `added`, `updated`, `unchanged`, `removed`, `toggled`. Setting a location that already has a breakpoint **edits** it, keeping its id: `updated` when the modifiers now differ, `unchanged` when you asked for what was already there. |
 | `dry_run` | `true` when `--dry-run` was given: nothing changed, and `breakpoints` is what *would* change. |
 | `breakpoints` | For `list`, all of them. Otherwise the ones affected. |
 | `not_found` | Ids you named that no longer exist — a stale id from an earlier listing. Empty on success. |

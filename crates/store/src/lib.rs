@@ -94,6 +94,85 @@ pub struct Removed {
     pub not_found: Vec<WatchId>,
 }
 
+/// What a breakpoint removal or toggle did: the ones it changed, and the ids
+/// that matched nothing.
+///
+/// One value rather than two calls, for the same reason as [`Removed`] — the
+/// two have to be decided under the same lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changed {
+    pub breakpoints: Vec<Breakpoint>,
+    pub not_found: Vec<BreakpointId>,
+}
+
+/// What [`ProjectStore::add`] did with a location, and the breakpoint that is
+/// there now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Addition {
+    pub breakpoint: Breakpoint,
+    pub outcome: AddOutcome,
+}
+
+/// The three things setting a location can mean.
+///
+/// Distinguished because "added" was reported for all three, which made
+/// `lazydap break x.c:5 --condition 'i > 5'` on a line that already had a
+/// breakpoint look like it had taken when the modifiers were being dropped
+/// (D-WP4-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddOutcome {
+    /// Nothing was there; a new id was minted.
+    Created,
+    /// One was there and its modifiers now differ.
+    Updated,
+    /// One was there and the request asked for exactly what it already says.
+    Unchanged,
+}
+
+/// What setting `new` at its location means, given whatever is already there.
+///
+/// The one place that decision is made, so [`ProjectStore::add`] and
+/// [`ProjectStore::preview_add`] cannot disagree about it (non-negotiable #4).
+/// `new_id` is used only when there is nothing there to keep the id of.
+fn decide(existing: Option<&Breakpoint>, new_id: BreakpointId, new: NewBreakpoint) -> Addition {
+    let breakpoint = Breakpoint {
+        id: existing.map_or(new_id, |breakpoint| breakpoint.id),
+        source: new.source,
+        line: new.line,
+        column: new.column,
+        condition: new.condition,
+        hit_condition: new.hit_condition,
+        log_message: new.log_message,
+        enabled: new.enabled,
+    };
+    let outcome = match existing {
+        None => AddOutcome::Created,
+        Some(existing) if *existing == breakpoint => AddOutcome::Unchanged,
+        Some(_) => AddOutcome::Updated,
+    };
+    Addition {
+        breakpoint,
+        outcome,
+    }
+}
+
+/// Which of the breakpoint ids a selector named matched nothing. The
+/// [`unmatched`] rule, for the other kind of selector.
+fn unmatched_breakpoints(
+    selector: &BreakpointSelector,
+    picked: &[Breakpoint],
+) -> Vec<BreakpointId> {
+    let BreakpointSelector::Ids(asked) = selector else {
+        return Vec::new();
+    };
+    let found: Vec<BreakpointId> = picked.iter().map(|breakpoint| breakpoint.id).collect();
+    asked
+        .iter()
+        .filter(|id| !found.contains(id))
+        .copied()
+        .collect()
+}
+
 /// Which of the ids a selector named matched nothing.
 ///
 /// Only meaningful for an id selector: every other kind describes a set, and a
@@ -226,56 +305,97 @@ impl ProjectStore {
         sources
     }
 
-    /// Which breakpoints a selector picks out.
+    /// Which breakpoints a selector picks out, and which of the ids it named
+    /// matched nothing.
     ///
     /// The one place selection is decided, so `--dry-run` and the real
-    /// mutation cannot drift apart (non-negotiable #4). Both call this.
-    pub fn select(&self, selector: &BreakpointSelector) -> Vec<Breakpoint> {
+    /// mutation cannot drift apart (non-negotiable #4). The preview calls this
+    /// directly, the mutation through [`Self::remove`] and [`Self::toggle`],
+    /// which run it inside the lock they mutate under.
+    pub fn select(&self, selector: &BreakpointSelector) -> (Vec<Breakpoint>, Vec<BreakpointId>) {
         let state = lock(&self.state);
-        selector.pick(&state.breakpoints)
+        let picked = selector.pick(&state.breakpoints);
+        let not_found = unmatched_breakpoints(selector, &picked);
+        (picked, not_found)
     }
 
-    /// Add a breakpoint, or return the existing one at that location.
+    /// Set a breakpoint at a location, whether or not one is already there.
     ///
-    /// Setting the same line twice is something a script does by accident all
-    /// the time; making it a duplicate rather than a no-op would mean two
-    /// entries the user has to remove separately for one visible breakpoint.
-    pub fn add(&self, new: NewBreakpoint) -> Breakpoint {
+    /// A location holds at most one breakpoint: setting the same line twice is
+    /// something a script does by accident all the time, and two entries for
+    /// one visible breakpoint are two things to remove. So the second call
+    /// *edits* the first rather than adding beside it, keeping its id — ids
+    /// are never reused (D031), and a re-set location is the same breakpoint
+    /// with different modifiers rather than a new one (D-WP4-1).
+    ///
+    /// The whole request wins, including the parts that were not given: a
+    /// `--condition` that is absent means "no condition", the same way it does
+    /// on the first call. Which is why this can also report that nothing
+    /// changed — see [`AddOutcome`].
+    pub fn add(&self, new: NewBreakpoint) -> Addition {
         let mut state = lock(&self.state);
 
-        if let Some(existing) = state
+        let existing = state
             .breakpoints
             .iter()
-            .find(|breakpoint| breakpoint.source == new.source && breakpoint.line == new.line)
-        {
-            return existing.clone();
-        }
+            .position(|breakpoint| breakpoint.source == new.source && breakpoint.line == new.line);
 
-        let id = BreakpointId(state.next_id);
-        state.next_id += 1;
-        let breakpoint = Breakpoint {
-            id,
-            source: new.source,
-            line: new.line,
-            column: new.column,
-            condition: new.condition,
-            hit_condition: new.hit_condition,
-            log_message: new.log_message,
-            enabled: new.enabled,
+        let addition = match existing {
+            Some(index) => {
+                let existing = &state.breakpoints[index];
+                let addition = decide(Some(existing), existing.id, new);
+                if addition.outcome == AddOutcome::Unchanged {
+                    return addition;
+                }
+                state.breakpoints[index] = addition.breakpoint.clone();
+                addition
+            }
+            None => {
+                let id = BreakpointId(state.next_id);
+                state.next_id += 1;
+                let addition = decide(None, id, new);
+                state.breakpoints.push(addition.breakpoint.clone());
+                addition
+            }
         };
-        state.breakpoints.push(breakpoint.clone());
         drop(state);
 
         self.touch();
-        breakpoint
+        addition
     }
 
-    /// Remove everything the selector picks. Returns what went.
-    pub fn remove(&self, selector: &BreakpointSelector) -> Vec<Breakpoint> {
+    /// What [`Self::add`] would do, without doing it.
+    ///
+    /// The same decision from the same rule, so `--dry-run` cannot promise
+    /// something the mutation does not deliver (non-negotiable #4). Both call
+    /// [`decide`].
+    pub fn preview_add(&self, new: NewBreakpoint) -> Addition {
+        let state = lock(&self.state);
+        let existing = state
+            .breakpoints
+            .iter()
+            .find(|breakpoint| breakpoint.source == new.source && breakpoint.line == new.line);
+        // Id `0` is deliberately not a real one: nothing has been allocated,
+        // and printing the id the breakpoint *would* get would be a promise a
+        // preview has no way to keep.
+        decide(existing, BreakpointId(0), new)
+    }
+
+    /// Remove everything the selector picks, and say what it did *not* find.
+    ///
+    /// Both under one lock, for the reason spelled out on
+    /// [`Self::remove_watches`]: a `not_found` derived from a selection made
+    /// under an earlier lock lets the loser of a race report success for work
+    /// it did not do.
+    pub fn remove(&self, selector: &BreakpointSelector) -> Changed {
         let mut state = lock(&self.state);
         let doomed = selector.pick(&state.breakpoints);
+        let not_found = unmatched_breakpoints(selector, &doomed);
         if doomed.is_empty() {
-            return doomed;
+            return Changed {
+                breakpoints: doomed,
+                not_found,
+            };
         }
 
         let removing: Vec<BreakpointId> = doomed.iter().map(|breakpoint| breakpoint.id).collect();
@@ -285,22 +405,27 @@ impl ProjectStore {
         drop(state);
 
         self.touch();
-        doomed
+        Changed {
+            breakpoints: doomed,
+            not_found,
+        }
     }
 
     /// Flip `enabled` on everything the selector picks. Returns them as they
-    /// are now.
-    pub fn toggle(&self, selector: &BreakpointSelector) -> Vec<Breakpoint> {
+    /// are now, and the ids that matched nothing — decided under the same lock
+    /// as the flip, for the reason [`Self::remove`] gives.
+    pub fn toggle(&self, selector: &BreakpointSelector) -> Changed {
         let mut state = lock(&self.state);
-        let picked: Vec<BreakpointId> = selector
-            .pick(&state.breakpoints)
-            .iter()
-            .map(|breakpoint| breakpoint.id)
-            .collect();
+        let picked = selector.pick(&state.breakpoints);
+        let not_found = unmatched_breakpoints(selector, &picked);
         if picked.is_empty() {
-            return Vec::new();
+            return Changed {
+                breakpoints: picked,
+                not_found,
+            };
         }
 
+        let picked: Vec<BreakpointId> = picked.iter().map(|breakpoint| breakpoint.id).collect();
         let mut toggled = Vec::with_capacity(picked.len());
         for breakpoint in &mut state.breakpoints {
             if picked.contains(&breakpoint.id) {
@@ -311,7 +436,10 @@ impl ProjectStore {
         drop(state);
 
         self.touch();
-        toggled
+        Changed {
+            breakpoints: toggled,
+            not_found,
+        }
     }
 
     // --- Watches (M16) ------------------------------------------------------
@@ -688,7 +816,7 @@ mod tests {
         let source = project.root.join("main.c");
 
         let store = project.store();
-        let added = store.add(new_breakpoint(&source, 19));
+        let added = store.add(new_breakpoint(&source, 19)).breakpoint;
         store.flush_now().expect("flush");
 
         let reloaded = project.store();
@@ -742,11 +870,78 @@ mod tests {
         let source = project.root.join("main.c");
         let store = project.store();
 
-        let first = store.add(new_breakpoint(&source, 19));
-        let second = store.add(new_breakpoint(&source, 19));
+        let first = store.add(new_breakpoint(&source, 19)).breakpoint;
+        let second = store.add(new_breakpoint(&source, 19)).breakpoint;
 
         assert_eq!(first.id, second.id);
         assert_eq!(store.breakpoints().len(), 1, "one line, one breakpoint");
+    }
+
+    #[test]
+    fn re_adding_a_location_with_a_new_condition_updates_it_rather_than_dropping_it() {
+        // The bug: the second call returned the breakpoint that was already
+        // there, untouched, and the caller was told it had been added — so
+        // `lazydap break x.c:10 --condition ...` reported success while the
+        // debugger went on stopping every time (D-WP4-1).
+        let project = TempProject::new("recondition");
+        let source = project.root.join("main.c");
+        let store = project.store();
+
+        let first = store.add(new_breakpoint(&source, 10));
+        assert_eq!(first.outcome, AddOutcome::Created);
+
+        let second = store.add(NewBreakpoint {
+            condition: Some("i > 5".to_string()),
+            enabled: false,
+            ..new_breakpoint(&source, 10)
+        });
+
+        assert_eq!(second.outcome, AddOutcome::Updated);
+        assert_eq!(
+            second.breakpoint.id, first.breakpoint.id,
+            "it is the same breakpoint with different modifiers, not a new one",
+        );
+        let stored = store.breakpoints();
+        assert_eq!(stored.len(), 1, "one line, one breakpoint");
+        assert_eq!(stored[0].condition.as_deref(), Some("i > 5"));
+        assert!(!stored[0].enabled);
+    }
+
+    #[test]
+    fn setting_a_location_to_exactly_what_it_already_says_reports_no_change() {
+        let project = TempProject::new("unchanged");
+        let source = project.root.join("main.c");
+        let store = project.store();
+
+        store.add(new_breakpoint(&source, 10));
+        let again = store.add(new_breakpoint(&source, 10));
+
+        assert_eq!(again.outcome, AddOutcome::Unchanged);
+    }
+
+    #[test]
+    fn a_dry_run_add_previews_the_change_the_add_makes() {
+        // Non-negotiable #4 for the one mutation with no selector: both go
+        // through `decide`, so the preview cannot promise an update the real
+        // call would not make.
+        let project = TempProject::new("preview-add");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        store.add(new_breakpoint(&source, 10));
+
+        let asked = || NewBreakpoint {
+            condition: Some("i == 3".to_string()),
+            ..new_breakpoint(&source, 10)
+        };
+        let previewed = store.preview_add(asked());
+        assert_eq!(
+            store.breakpoints()[0].condition,
+            None,
+            "a preview that wrote to the state file would not be a preview",
+        );
+
+        let added = store.add(asked());
+        assert_eq!(previewed, added, "the preview promised something else");
     }
 
     #[test]
@@ -755,9 +950,9 @@ mod tests {
         let source = project.root.join("main.c");
         let store = project.store();
 
-        let first = store.add(new_breakpoint(&source, 1));
+        let first = store.add(new_breakpoint(&source, 1)).breakpoint;
         store.remove(&BreakpointSelector::Ids(vec![first.id]));
-        let second = store.add(new_breakpoint(&source, 2));
+        let second = store.add(new_breakpoint(&source, 2)).breakpoint;
 
         assert_ne!(
             first.id, second.id,
@@ -789,13 +984,13 @@ mod tests {
         let project = TempProject::new("toggle");
         let source = project.root.join("main.c");
         let store = project.store();
-        let added = store.add(new_breakpoint(&source, 19));
+        let added = store.add(new_breakpoint(&source, 19)).breakpoint;
 
         let selector = BreakpointSelector::Ids(vec![added.id]);
         let off = store.toggle(&selector);
-        assert!(!off[0].enabled);
+        assert!(!off.breakpoints[0].enabled);
         let on = store.toggle(&selector);
-        assert!(on[0].enabled);
+        assert!(on.breakpoints[0].enabled);
     }
 
     #[test]
@@ -810,11 +1005,48 @@ mod tests {
         store.add(new_breakpoint(&project.root.join("other.c"), 3));
 
         let selector = BreakpointSelector::Source(source.clone());
-        let previewed = store.select(&selector);
+        let (previewed, previewed_missing) = store.select(&selector);
         let removed = store.remove(&selector);
 
-        assert_eq!(previewed, removed);
+        assert_eq!(previewed, removed.breakpoints);
+        assert_eq!(previewed_missing, removed.not_found);
         assert_eq!(store.breakpoints().len(), 1, "the other file is untouched");
+    }
+
+    #[test]
+    fn a_breakpoint_removal_reports_what_it_removed_rather_than_what_it_once_saw() {
+        // Two clients racing on the same id. Selecting in one lock and
+        // mutating in another let both see it there: the winner removed it,
+        // and the loser removed nothing while reporting an empty `not_found` —
+        // success, for work it did not do.
+        let project = TempProject::new("bp-race");
+        let source = project.root.join("main.c");
+        let store = project.store();
+        let doomed = store.add(new_breakpoint(&source, 19)).breakpoint;
+        let selector = BreakpointSelector::Ids(vec![doomed.id]);
+
+        let winner = store.remove(&selector);
+        assert_eq!(winner.breakpoints, vec![doomed.clone()]);
+        assert!(winner.not_found.is_empty());
+
+        let loser = store.remove(&selector);
+        assert!(loser.breakpoints.is_empty(), "it removed nothing");
+        assert_eq!(
+            loser.not_found,
+            vec![doomed.id],
+            "and says so, rather than reporting a removal it did not make",
+        );
+    }
+
+    #[test]
+    fn a_toggle_that_matches_nothing_names_the_id_it_was_given() {
+        let project = TempProject::new("bp-toggle-missing");
+        let store = project.store();
+
+        let toggled = store.toggle(&BreakpointSelector::Ids(vec![BreakpointId(42)]));
+
+        assert!(toggled.breakpoints.is_empty());
+        assert_eq!(toggled.not_found, vec![BreakpointId(42)]);
     }
 
     #[test]
@@ -970,8 +1202,8 @@ mod tests {
         let project = TempProject::new("ourremoval");
         let source = project.root.join("main.c");
         let store = project.store();
-        let first = store.add(new_breakpoint(&source, 19));
-        let doomed = store.add(new_breakpoint(&source, 20));
+        let first = store.add(new_breakpoint(&source, 19)).breakpoint;
+        let doomed = store.add(new_breakpoint(&source, 20)).breakpoint;
         store.flush_now().expect("flush");
 
         store.remove(&BreakpointSelector::Ids(vec![doomed.id]));
@@ -1116,7 +1348,9 @@ mod tests {
         .expect("write");
 
         let store = project.store();
-        let added = store.add(new_breakpoint(&project.root.join("b.c"), 2));
+        let added = store
+            .add(new_breakpoint(&project.root.join("b.c"), 2))
+            .breakpoint;
         assert_eq!(
             added.id,
             BreakpointId(42),

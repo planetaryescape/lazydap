@@ -1184,3 +1184,47 @@ fn continuing_a_program_that_is_already_running_reports_it_and_invents_no_thread
         "nothing was resumed, so no thread was: {answer}",
     );
 }
+
+#[test]
+fn a_condition_added_to_an_existing_breakpoint_reaches_the_debugger() {
+    // The claim being checked is about the *adapter*: re-setting a location
+    // that already has a breakpoint has to send the new condition, not the old
+    // unconditional one. Before D-WP4-1 the store returned the breakpoint that
+    // was already there, so codelldb was re-sent exactly what it already had
+    // and the program stopped on the first iteration.
+    let (toolchain, _turn) = require_toolchain!();
+    let sandbox = Sandbox::new("bpcond");
+    let program = toolchain.build("inspects.c");
+
+    sandbox.launch(&program);
+    let added = sandbox.breakpoint("inspects.c", 14);
+    assert_eq!(added["action"], "added", "got: {added}");
+
+    let source = repo_root()
+        .join("examples/c-fixtures/inspects.c")
+        .display()
+        .to_string();
+    let updated = sandbox.json(&[
+        "--format",
+        "json",
+        "break",
+        &format!("{source}:14"),
+        "--condition",
+        "i == 3",
+    ]);
+    assert_eq!(updated["action"], "updated", "got: {updated}");
+    assert_eq!(
+        updated["applied_to_session"], true,
+        "a live session has to be told: {updated}",
+    );
+
+    let blob = sandbox.wait("30");
+    assert_eq!(blob["state"], "paused", "got: {blob}");
+    assert_eq!(blob["frame"]["line"], 14, "got: {blob}");
+
+    let value = sandbox.json(&["--format", "json", "eval", "i"]);
+    assert_eq!(
+        value["value"], "3",
+        "the loop should have run three times before stopping: {value}",
+    );
+}
