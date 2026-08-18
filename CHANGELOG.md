@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.3] — 2026-08-18
+
 ### Changed
 
 **`lazydap doctor` passes when at least one adapter is usable.** It exited `1` if *any* adapter was missing, so a Mac with codelldb and no Go toolchain failed the check that the README, `install.sh` and the Homebrew formula all end with. A missing adapter is now reported per adapter as `missing`, with where to get it, and only fails the run when it was the last one. Everything else — the config file, the state file, the daemon — still has to pass (`D093`).
