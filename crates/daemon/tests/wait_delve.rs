@@ -134,6 +134,9 @@ struct Sandbox {
     /// crash left behind. The file-leak check subtracts these so it flags only
     /// what *this* session created, never pre-existing clutter.
     preexisting_artifacts: std::collections::HashSet<PathBuf>,
+    /// This sandbox's daemon, once it has one. What the process-leak check
+    /// keys on; see [`Sandbox::strays`] for why it is read at launch.
+    daemon_pid: std::cell::Cell<Option<u64>>,
 }
 
 impl Sandbox {
@@ -158,6 +161,7 @@ impl Sandbox {
             project,
             instance,
             preexisting_artifacts: artifact_files(),
+            daemon_pid: std::cell::Cell::new(None),
         }
     }
 
@@ -194,13 +198,19 @@ impl Sandbox {
     /// Launch a fixture. No `--adapter`: which one to use is read off the
     /// `.go`, and a test that passed it explicitly would not be testing that.
     fn launch(&self, program: &Path) -> Value {
-        self.json(&[
+        let launched = self.json(&[
             "--format",
             "json",
             "launch",
             &program.to_string_lossy(),
             "--stop-on-entry",
-        ])
+        ]);
+        // Read now, while the daemon that minted the name is certainly alive.
+        // `Drop` shuts it down before it checks for strays, and asking then
+        // would spawn a *fresh* daemon and learn the wrong pid.
+        self.daemon_pid
+            .set(self.json(&["--format", "json", "status"])["daemon_pid"].as_u64());
+        launched
     }
 
     fn breakpoint(&self, source: &str, line: u32) -> Value {
@@ -261,11 +271,20 @@ impl Sandbox {
     /// strays, so the adapter-kill test's poll-until-clean loop and the `Drop`
     /// assertion cover files as well as processes with no extra machinery.
     ///
-    /// Files present when this sandbox started are subtracted: another run's
-    /// debris is not this test's leak.
+    /// Both checks are scoped to this sandbox, because `pgrep` and the
+    /// temporary directory are machine-wide and this repository is routinely
+    /// checked out several times at once. Files present when this sandbox
+    /// started are subtracted; the process match is narrowed by the daemon pid
+    /// the compiled binary's name carries, which is the only thing tying an
+    /// orphan — a process whose parents are all dead — back to the session
+    /// that made it. Without that, a neighbouring worktree mid-test fails this
+    /// one.
     fn strays(&self) -> Vec<String> {
         let fixtures = repo_root().join("examples/go-fixtures");
-        let patterns = [fixtures.display().to_string(), "lazydap-delve-".to_string()];
+        let mut patterns = vec![fixtures.display().to_string()];
+        if let Some(pid) = self.daemon_pid.get() {
+            patterns.push(format!("lazydap-delve-{pid}-"));
+        }
 
         let mut strays: Vec<String> = patterns
             .iter()
@@ -330,9 +349,10 @@ fn could_be_a_debuggee(line: &str) -> bool {
 
 /// Every `lazydap-delve-` file currently directly in the temp directory.
 ///
-/// A set so a sandbox can subtract the ones that were already there. The name
-/// carries the daemon's pid, not the test's, so there is nothing tighter than
-/// the prefix to key on — the baseline subtraction is what makes that safe.
+/// A set so a sandbox can subtract the ones that were already there. This runs
+/// before the sandbox has a daemon, so there is no pid to narrow the prefix
+/// with the way [`Sandbox::strays`] narrows the process match — the baseline
+/// subtraction is what makes that safe.
 fn artifact_files() -> std::collections::HashSet<PathBuf> {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return std::collections::HashSet::new();
