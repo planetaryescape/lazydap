@@ -8,7 +8,15 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+**One adapter process leaked per session that ended on its own.** codelldb, debugpy and delve all hold their DAP socket open after they report the program terminated, waiting to be disconnected from — and the daemon, which only ever read from that socket, kept the adapter alive with it. Three `launch` + `continue --wait` cycles left three codelldb processes running, each with its own copy of LLDB, until `lazydap shutdown`. The daemon now disconnects an adapter as soon as its session ends and pulls the plug if it will not go, so an agent can loop launch-and-continue without a closing `lazydap disconnect`.
+
+**`lazydap disconnect --no-terminate` killed the program it promised to keep, and said it had not.** Against codelldb the daemon killed the adapter before it had finished detaching, then read that killed adapter as one that had crashed — which is the case that reaps an orphaned debuggee (D045) — so the program died and the response said `terminated_debuggee: false`. The other two adapters cannot detach at all: delve's debuggee is its own child and dies with it, and debugpy simply never answers a disconnect that asks it to detach, so the command sat for twelve seconds and then killed the program anyway. Both still reported `false`.
+
+Only codelldb advertises DAP's `supportTerminateDebuggee`, and only codelldb honours it. `--no-terminate` is now honoured where it can be — the debuggee is released before anything that could look like a crash, and the adapter is given time to leave — and carried out as an ordinary terminate where it cannot, in 0.06 s rather than 12, with `terminated_debuggee: true` saying what happened and a one-line warning on stderr saying why. `--dry-run` makes the same decision, so the preview cannot promise what the mutation will not do.
+
+**Adapter output that is not UTF-8 no longer wedges the adapter.** One such byte on a log stream ended the loop that drains it; the pipe then filled, and an adapter blocked writing a log line answers no requests. A `Content-Length` larger than 256 MiB is also refused now rather than allocated on the adapter's say-so, and a failed launch reaps a debuggee the adapter had already started instead of orphaning it.
 
 ## [0.2.3] — 2026-08-18
 
@@ -39,14 +47,6 @@ Nothing yet.
 **`lazydap doctor --check-state` no longer needs a daemon.** It reads `.lazydap/state.toml` itself and reports a parse error with its line and column — which matters because a state file the daemon refuses to start on is exactly the case the check exists for. A plain `lazydap doctor` also reports a daemon that will not start as a failed check rather than aborting, so one command names the reason.
 
 **Every `PathsError` said `InvalidProjectRoot`.** A socket path over the length limit, a runtime directory owned by somebody else, a missing home directory — all of them are about the directories lazydap keeps its own socket, lock, pid and log in, and none is about the project root. They now report `DaemonUnreachable` and exit `3`, which is the retryable code a script should see.
-
-**One adapter process leaked per session that ended on its own.** codelldb, debugpy and delve all hold their DAP socket open after they report the program terminated, waiting to be disconnected from — and the daemon, which only ever read from that socket, kept the adapter alive with it. Three `launch` + `continue --wait` cycles left three codelldb processes running, each with its own copy of LLDB, until `lazydap shutdown`. The daemon now disconnects an adapter as soon as its session ends and pulls the plug if it will not go, so an agent can loop launch-and-continue without a closing `lazydap disconnect`.
-
-**`lazydap disconnect --no-terminate` killed the program it promised to keep, and said it had not.** Against codelldb the daemon killed the adapter before it had finished detaching, then read that killed adapter as one that had crashed — which is the case that reaps an orphaned debuggee (D045) — so the program died and the response said `terminated_debuggee: false`. The other two adapters cannot detach at all: delve's debuggee is its own child and dies with it, and debugpy simply never answers a disconnect that asks it to detach, so the command sat for twelve seconds and then killed the program anyway. Both still reported `false`.
-
-Only codelldb advertises DAP's `supportTerminateDebuggee`, and only codelldb honours it. `--no-terminate` is now honoured where it can be — the debuggee is released before anything that could look like a crash, and the adapter is given time to leave — and carried out as an ordinary terminate where it cannot, in 0.06 s rather than 12, with `terminated_debuggee: true` saying what happened and a one-line warning on stderr saying why. `--dry-run` makes the same decision, so the preview cannot promise what the mutation will not do.
-
-**Adapter output that is not UTF-8 no longer wedges the adapter.** One such byte on a log stream ended the loop that drains it; the pipe then filled, and an adapter blocked writing a log line answers no requests. A `Content-Length` larger than 256 MiB is also refused now rather than allocated on the adapter's say-so, and a failed launch reaps a debuggee the adapter had already started instead of orphaning it.
 
 ## [0.2.2] — 2026-08-18
 
