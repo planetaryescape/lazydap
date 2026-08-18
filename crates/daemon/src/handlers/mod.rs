@@ -45,10 +45,11 @@ pub async fn dispatch(
             lazydap: env!("CARGO_PKG_VERSION").to_string(),
             protocol: LAZYDAP_PROTOCOL_VERSION,
         }),
-        Request::Doctor {
-            check_adapters,
-            check_state,
-        } => Ok(Response::Doctor(doctor(state, check_adapters, check_state))),
+        // The two flags are decoded and ignored (D093): the adapter and state
+        // checks are the client's, because both answer questions about *your*
+        // machine and *your* working directory rather than the daemon's. They
+        // stay on the wire until a protocol bump can take them off it.
+        Request::Doctor { .. } => Ok(Response::Doctor(doctor(state))),
         Request::Shutdown => shutdown(state),
 
         // --- Session lifecycle ---
@@ -204,56 +205,16 @@ fn shutdown(state: &Arc<DaemonState>) -> Result<Response> {
     Ok(Response::ShuttingDown { sessions })
 }
 
-/// What is set up and what is not. Writes nothing anywhere (D025).
-fn doctor(state: &Arc<DaemonState>, check_adapters: bool, check_state: bool) -> DoctorReport {
-    let mut checks = Vec::new();
-
-    if check_adapters {
-        // Every adapter lazydap ships, whether or not this machine has it.
-        // Reporting only the ones that are installed would make a missing one
-        // indistinguishable from one lazydap cannot drive at all, which is the
-        // question `doctor` exists to answer.
-        //
-        // Read off `AdapterKind::ALL` rather than listed here: a literal is
-        // the one place the compiler cannot notice a new adapter, and an
-        // adapter missing from `doctor` is invisible rather than broken.
-        for &kind in lazydap_core::AdapterKind::ALL {
-            let name = format!("adapter.{kind}");
-            checks.push(match crate::adapter::discover(kind) {
-                Ok(path) => DoctorCheck {
-                    name,
-                    ok: true,
-                    detail: path.display().to_string(),
-                },
-                Err(error) => DoctorCheck {
-                    name,
-                    ok: false,
-                    detail: error.to_string(),
-                },
-            });
-        }
-    }
-
-    if check_state {
-        let path = state.store.path();
-        checks.push(DoctorCheck {
-            name: "state.file".to_string(),
-            // A state file that does not exist yet is fine — most projects
-            // never have one. What is worth reporting is where it would go.
-            ok: true,
-            detail: format!(
-                "{} ({})",
-                path.display(),
-                if path.exists() {
-                    format!("{} breakpoints", state.store.breakpoints().len())
-                } else {
-                    "not created yet".to_string()
-                },
-            ),
-        });
-    }
-
-    checks.push(DoctorCheck {
+/// What the daemon itself can say about how it is set up. Writes nothing
+/// anywhere (D025).
+///
+/// One check, and only one: the daemon is the only part of a `doctor` run that
+/// the client cannot see for itself. The adapter and state checks moved to the
+/// client with D093 — a daemon resolves adapters against its own environment
+/// and reads the state file of the project root it was started for, neither of
+/// which is necessarily the caller's.
+fn doctor(state: &Arc<DaemonState>) -> DoctorReport {
+    let checks = vec![DoctorCheck {
         name: "daemon".to_string(),
         ok: true,
         detail: format!(
@@ -261,7 +222,7 @@ fn doctor(state: &Arc<DaemonState>, check_adapters: bool, check_state: bool) -> 
             state.instance,
             std::process::id(),
         ),
-    });
+    }];
 
     DoctorReport {
         ok: checks.iter().all(|check| check.ok),
@@ -480,12 +441,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn doctor_reports_where_the_state_file_would_go_even_before_there_is_one() {
+    async fn doctor_answers_for_the_daemon_and_ignores_the_flags_it_still_decodes() {
+        // `check_adapters` and `check_state` are answered in the client
+        // (D093); the daemon accepts them so that a frame carrying them is
+        // still readable, and does nothing with them.
         let state = state();
         let report = match dispatch(
             &state,
             Request::Doctor {
-                check_adapters: false,
+                check_adapters: true,
                 check_state: true,
             },
             None,
@@ -497,13 +461,13 @@ mod tests {
             other => unreachable!("expected a doctor report, got: {other:?}"),
         };
 
-        let check = report
+        assert!(report.ok);
+        let names: Vec<&str> = report
             .checks
             .iter()
-            .find(|check| check.name == "state.file")
-            .expect("a state check");
-        assert!(check.ok);
-        assert!(check.detail.contains("not created yet"), "got: {check:?}");
+            .map(|check| check.name.as_str())
+            .collect();
+        assert_eq!(names, ["daemon"], "got: {report:?}");
     }
 
     #[tokio::test]
