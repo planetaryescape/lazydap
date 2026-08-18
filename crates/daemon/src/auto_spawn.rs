@@ -61,7 +61,7 @@ async fn spawn_and_wait(instance: &Instance) -> Result<DaemonClient> {
         // Somebody else is already starting one. Waiting is both simpler and
         // more correct than starting a second.
         tracing::debug!(target: "daemon.spawn", "another client is starting the daemon; waiting");
-        return connect_until(&instance.socket, deadline).await;
+        return connect_until(&instance.socket, deadline, None).await;
     };
 
     // Re-check under the lock: the winner of the race may have finished while
@@ -81,12 +81,27 @@ async fn spawn_and_wait(instance: &Instance) -> Result<DaemonClient> {
         std::fs::remove_file(&instance.socket).map_err(CliError::general)?;
     }
 
-    spawn_detached(instance)?;
-    connect_until(&instance.socket, deadline).await
+    // Where the log ends *before* the daemon starts, so a failure can be
+    // reported from the lines this daemon wrote rather than from whatever the
+    // previous one left in the same file.
+    let log_from = std::fs::metadata(&instance.log)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let mut child = spawn_detached(instance)?;
+    connect_until(
+        &instance.socket,
+        deadline,
+        Some(Spawned {
+            child: &mut child,
+            log: &instance.log,
+            log_from,
+        }),
+    )
+    .await
 }
 
 /// Start `lazydap daemon` as a detached process that outlives this command.
-fn spawn_detached(instance: &Instance) -> Result<()> {
+fn spawn_detached(instance: &Instance) -> Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(CliError::general)?;
     let log = open_log(&instance.log)?;
 
@@ -105,7 +120,7 @@ fn spawn_detached(instance: &Instance) -> Result<()> {
         // with it.
         .process_group(0);
 
-    command.spawn().map_err(|source| {
+    let child = command.spawn().map_err(|source| {
         CliError::unreachable(anyhow::anyhow!(
             "could not start the daemon ({}): {source}",
             exe.display()
@@ -118,7 +133,7 @@ fn spawn_detached(instance: &Instance) -> Result<()> {
         log = %instance.log.display(),
         "started the daemon",
     );
-    Ok(())
+    Ok(child)
 }
 
 /// Open the daemon's log, owner-only.
@@ -157,13 +172,45 @@ pub(crate) fn open_log(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Retry until the daemon answers or the deadline passes.
-async fn connect_until(socket: &Path, deadline: tokio::time::Instant) -> Result<DaemonClient> {
+/// The daemon this client started, for [`connect_until`] to watch.
+struct Spawned<'a> {
+    child: &'a mut std::process::Child,
+    log: &'a Path,
+    /// Where the log ended before the daemon started.
+    log_from: u64,
+}
+
+/// Retry until the daemon answers, dies, or the deadline passes.
+///
+/// Waiting out the full deadline is right when somebody *else* is starting the
+/// daemon, and wrong when we started it ourselves: a daemon that refuses to
+/// start — a `state.toml` with a typo in it is the ordinary way — is never
+/// going to answer, and ten seconds of silence per command hides a one-line
+/// diagnosis already sitting in the log. So a client that spawned the daemon
+/// passes it here and gets told the moment it exits.
+async fn connect_until(
+    socket: &Path,
+    deadline: tokio::time::Instant,
+    mut spawned: Option<Spawned<'_>>,
+) -> Result<DaemonClient> {
     let mut last_error = None;
     while tokio::time::Instant::now() < deadline {
         match DaemonClient::connect(socket).await {
             Ok(client) => return Ok(client),
             Err(error) => last_error = Some(error),
+        }
+        if let Some(spawned) = spawned.as_mut() {
+            // An error from `try_wait` means we cannot tell whether it is
+            // still there, which is the same position as not having asked.
+            if let Ok(Some(status)) = spawned.child.try_wait() {
+                return Err(CliError::unreachable(anyhow::anyhow!(
+                    "the daemon started and exited immediately ({status}): {}; \
+                     its full log is at {}",
+                    daemon_complaint(spawned.log, spawned.log_from)
+                        .unwrap_or_else(|| "it logged nothing".to_string()),
+                    spawned.log.display(),
+                )));
+            }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -175,6 +222,27 @@ async fn connect_until(socket: &Path, deadline: tokio::time::Instant) -> Result<
             .map(|error| format!(" ({error})"))
             .unwrap_or_default(),
     )))
+}
+
+/// What the daemon said on its way out, in one line.
+///
+/// Only the part of the log this daemon wrote, and preferably the `message`
+/// out of the structured error it exits with — the raw line is a JSON blob
+/// whose interesting half is buried in the middle of it.
+fn daemon_complaint(log: &Path, from: u64) -> Option<String> {
+    let written = std::fs::read(log).ok()?;
+    let tail = written.get(usize::try_from(from).ok()?..)?;
+    let last = String::from_utf8_lossy(tail)
+        .lines()
+        .rfind(|line| !line.trim().is_empty())?
+        .to_string();
+
+    Some(
+        serde_json::from_str::<serde_json::Value>(&last)
+            .ok()
+            .and_then(|value| value["message"].as_str().map(str::to_string))
+            .unwrap_or(last),
+    )
 }
 
 /// Ask whatever is listening to shut down, and wait for it to let go.

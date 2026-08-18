@@ -34,6 +34,18 @@ pub async fn run_daemon(instance: Instance) -> Result<()> {
             instance.socket.display(),
         )));
     }
+    // Before the socket, deliberately. A hand-edited `state.toml` with a typo
+    // in it is a normal way for this to fail, and a daemon that has already
+    // bound and then dies leaves a socket nothing answers on — which costs
+    // every later command the client's full spawn deadline before it gives up.
+    // Nothing is on disk yet, so failing here costs nothing.
+    let store = ProjectStore::load(&instance.project_root).map_err(|source| {
+        CliError::general(anyhow::anyhow!(
+            "cannot read {}: {source}",
+            instance.project_root.display()
+        ))
+    })?;
+
     if instance.socket.exists() {
         // Unanswered, so it is left over from a daemon that is gone.
         fs::remove_file(&instance.socket).map_err(CliError::general)?;
@@ -45,18 +57,18 @@ pub async fn run_daemon(instance: Instance) -> Result<()> {
             instance.socket.display()
         ))
     })?;
+    // From here on the socket and pid file exist, so every exit — including a
+    // `?` on the way up — has to take them with it.
+    let _files = BoundFiles {
+        socket: &instance.socket,
+        pid: &instance.pid,
+    };
     // The socket is an unauthenticated control channel for a debugger. Nobody
     // else on the machine gets to open it.
     fs::set_permissions(&instance.socket, fs::Permissions::from_mode(0o600))
         .map_err(CliError::general)?;
     write_pid_file(&instance.pid)?;
 
-    let store = ProjectStore::load(&instance.project_root).map_err(|source| {
-        CliError::general(anyhow::anyhow!(
-            "cannot read {}: {source}",
-            instance.project_root.display()
-        ))
-    })?;
     // One flusher per store, for the life of the daemon. Mutations only mark
     // the state dirty; this is what actually writes it (debounced, D006).
     tokio::spawn(Arc::clone(&store).run_flusher());
@@ -83,11 +95,25 @@ pub async fn run_daemon(instance: Instance) -> Result<()> {
         tracing::warn!(target: "daemon.store", %error, "could not persist project state on shutdown");
     }
     drop(listener);
-    let _ = fs::remove_file(&instance.socket);
-    clear_pid_file_if_ours(&instance.pid);
     tracing::info!(target: "daemon.ipc", "daemon stopped");
 
     result
+}
+
+/// The socket and pid file, removed when the daemon stops for any reason.
+///
+/// A `Drop` rather than a line at the end of [`run_daemon`], because the
+/// failures worth cleaning up after are the ones that leave through `?`.
+struct BoundFiles<'a> {
+    socket: &'a Path,
+    pid: &'a Path,
+}
+
+impl Drop for BoundFiles<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.socket);
+        clear_pid_file_if_ours(self.pid);
+    }
 }
 
 async fn accept_loop(listener: &UnixListener, state: &Arc<DaemonState>) -> Result<()> {

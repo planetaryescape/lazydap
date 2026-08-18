@@ -246,6 +246,52 @@ fn a_broken_config_does_not_take_the_recovery_commands_with_it() {
 }
 
 #[test]
+fn a_broken_state_file_fails_fast_and_leaves_no_socket_behind() {
+    // `.lazydap/state.toml` is documented as hand-editable (D006), so a typo
+    // in it is an ordinary way for the daemon to refuse to start. It used to
+    // bind its socket first and die after, which cost every later command the
+    // client's full ten-second spawn deadline and told it nothing.
+    let sandbox = Sandbox::new("statebad");
+    std::fs::write(
+        sandbox.project().join(".lazydap").join("state.toml"),
+        "[[breakpoints\nbroken",
+    )
+    .expect("write a malformed state file");
+
+    let started = std::time::Instant::now();
+    let output = sandbox.run_in_project(&["--format", "json", "status"]);
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success(), "a daemon that cannot start fails");
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "it must not wait out the spawn deadline; took {elapsed:?}",
+    );
+
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("errors are JSON on stderr");
+    let message = error["message"].as_str().expect("a message");
+    assert!(
+        message.contains("state.toml") && message.contains("TOML parse error"),
+        "the message must name the real problem: {message}",
+    );
+
+    // The socket lives in the runtime directory and the pid file in the data
+    // one; neither should exist.
+    let leftovers: Vec<String> = ["r", "d"]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(sandbox.root.join(dir)).expect("read the directory"))
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".sock") || name.ends_with(".pid"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a daemon that never served must leave nothing to connect to: {leftovers:?}",
+    );
+}
+
+#[test]
 fn doctor_reports_a_broken_config_rather_than_dying_of_it() {
     let sandbox = Sandbox::new("cfgdoc");
     let config = sandbox.write_config("[general\nwait_timeout_seconds = ");
