@@ -1735,3 +1735,54 @@ path" or "none of the first two dozen did", and only the first is actionable. An
 window now costs one more request rather than a plausible-looking absence. It is reached only
 by a stop two dozen library frames deep — never by an ordinary breakpoint, which stops in code
 with a path and does not search at all.
+
+---
+
+## D-WP2-1 — a hand-deleted entry in `state.toml` stays deleted
+
+**Status:** decided (2026-08-18, defect campaign WP2).
+
+**Why:** D006 calls `.lazydap/state.toml` hand-editable, and the store honoured half of
+that. An entry typed into the file was adopted on the next write; an entry *deleted* from
+it was written straight back, because the merge only ever looked for ids the file had and
+memory did not. From the user's side the file was editable in one direction — which makes
+it a cache lazydap humours rather than the record D006 says it is.
+
+**The rule.** The merge is three-way, against the file's text as lazydap last read or
+wrote it. An id in the file but not in that baseline was added by hand and is adopted; an
+id in the baseline but not in the file was deleted by hand and goes. An id in both keeps
+lazydap's version, unchanged from before: lazydap's is what a live adapter has already
+been told about, and a file that loses a tie is one `lazydap break` away from being right
+again.
+
+**What it does not do.** A deletion is not withdrawn from a *running* adapter — the
+breakpoint stops existing for the next launch. Editing the file under a live session was
+never a way to change what the debuggee is doing, and making it one would mean the file
+and the adapter racing each other.
+
+**Detection is by content, not mtime.** The comparison used to be `mtime == seen_mtime`,
+which cannot see an edit made inside the same clock tick as lazydap's own write — the file
+system's timestamp resolution decided whether a user's edit survived. The store now
+remembers the exact text it last read or wrote and compares bytes. The file is a few
+kilobytes, so keeping it costs nothing, and it is also what the three-way merge needs.
+
+## D-WP2-2 — the project-root walk stops at `$HOME`
+
+**Status:** decided (2026-08-18, defect campaign WP2).
+
+**Why:** the walk-up in `paths::project_root` had no ceiling. Anyone keeping dotfiles in a
+git repository has `~/.git`; some people have a `~/Cargo.toml`. Either one made `$HOME` the
+project root for *every* unmarked directory beneath it — so one `~/.lazydap/state.toml` and
+one daemon were shared by everything the user debugs, and breakpoints set in one project
+turned up in the next.
+
+**The rule.** `.git` and the language manifests are not consulted in the home directory,
+and the walk never climbs above it. `$HOME` is still a project root when it is asked for by
+name — a `.lazydap/` directory there — because that is an explicit statement rather than an
+accident of where someone keeps their dotfiles. A directory outside `$HOME` is unaffected;
+the ceiling is about the home directory specifically, not about depth.
+
+**And the marker has a shape.** `.lazydap` is matched as a *directory*. It was matched with
+`exists()`, so a file of that name stopped the walk at a root whose state file could never
+be written. `.git` deliberately keeps `exists()`: it is a plain file in a worktree or a
+submodule.

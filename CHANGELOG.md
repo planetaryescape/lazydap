@@ -64,6 +64,12 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v8*
 
 **The TUI no longer writes its own log lines across its panes.** Every other command logs to stderr, which is right for one that prints and exits and wrong for the one that takes the terminal over. Its logs now go to the instance log file, which `lazydap logs` already reads.
 
+**A typo in `.lazydap/state.toml` bricked every command for ten seconds each.** The daemon bound its socket and wrote its pid file *before* reading the project state, so a hand-edited file it could not parse left a socket nobody answers on — and every later command waited out the full spawn deadline before reporting `DaemonUnreachable` with the connection refusal, never the TOML error. The state file is now read first, so a daemon that cannot start leaves nothing behind, and the client watches the daemon it started: an immediate exit is reported straight away, with the daemon's own complaint in the message. Ten seconds and a misleading error became well under one and the parse error, with the line and column in it.
+
+**The state file's durability and its hand edits both got stricter.** The temporary file is now `fsync`ed before the rename, so a power cut cannot leave a `state.toml` that is present and empty; abandoned `state.toml.tmp.<pid>` files from a crash mid-write are swept on the next write. External edits are noticed by comparing bytes rather than mtimes, so an edit landing in the same clock tick as lazydap's own write is no longer silently reverted — and a breakpoint or watch *deleted* by hand now stays deleted instead of being written back on the next flush.
+
+**A `.git` in your home directory no longer makes every directory one project.** The project-root walk had no ceiling, so with dotfiles in `~/.git` — or a stray `~/Cargo.toml` — any unmarked directory under `$HOME` resolved to `$HOME`: one `~/.lazydap/state.toml` and one daemon shared across everything you debug. The walk now stops at the home directory, which is only a root if you asked for it with a `.lazydap/` directory. A *file* named `.lazydap` no longer counts as the marker either; it has to be a directory.
+
 ## [0.1.0] — 2026-07-31
 
 The first release. A debugger you drive from the shell, one command at a time, with JSON as the contract. Rough edges are listed under [Known limitations](#known-limitations) rather than left for you to find.
