@@ -231,7 +231,7 @@ non-zero when the buffer overflowed.
   "daemon_pid": 2452,
   "instance": "lazydap-demo-13cc8efcde46",
   "lazydap_version": "0.1.0",
-  "protocol_version": 7,
+  "protocol_version": 9,
   "session": {
     "adapter": "codelldb",
     "buffered_events": 11,

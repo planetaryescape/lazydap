@@ -1826,6 +1826,10 @@ while the report said it had worked. `--dry-run` previewed the same lie, consist
   means no condition, exactly as it does on the first. The alternative — merging, so an absent
   flag means "keep what was there" — makes `lazydap break x.c:5` un-say nothing and leaves no way
   to clear a condition short of removing the breakpoint and adding it back under a new id.
+  `enabled` is one of those fields, so **a bare re-set re-enables a breakpoint that had been
+  disabled with `--toggle`**; `--disabled` keeps it off. That follows from the rule rather than
+  being a separate one, and it is said out loud here because every other sentence about this
+  calls them "modifiers", which does not sound like it includes being switched off.
 - **The report distinguishes three outcomes,** `added` / `updated` / `unchanged`, because a
   script re-applying a list of breakpoints wants to know which of them it actually changed and
   `added` for all three is what hid this defect. `unchanged` is deliberately not folded into

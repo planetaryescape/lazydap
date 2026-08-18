@@ -143,7 +143,9 @@ same shape, so you parse it once.
 
 Setting a location is idempotent and last-write-wins: `break x.c:10 --condition
 'i == 3'` on a line you already broke on updates that breakpoint rather than
-adding a second one, and the modifiers you *omit* are cleared. Read `action` to
+adding a second one, and the modifiers you *omit* are cleared. That includes
+`enabled`: a re-set re-enables a breakpoint somebody had disabled with
+`--toggle`, so pass `--disabled` when you mean to keep it off. Read `action` to
 tell the three cases apart.
 
 If a mutation succeeds in the store but the debugger will not take it — an
@@ -317,7 +319,7 @@ Reading it does not consume it.
   "instance": "lazydap-myproject",
   "daemon_pid": 77256,
   "uptime_ms": 776,
-  "protocol_version": 8,
+  "protocol_version": 9,
   "lazydap_version": "0.1.0",
   "session": {
     "session_id": "971baa06-...",

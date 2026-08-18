@@ -120,8 +120,9 @@ addition.
 
 Setting the same line twice does not make two breakpoints — it edits the one that is there,
 keeping its id, and answers `"action": "updated"`. That also means the modifiers you leave out
-are cleared: `lazydap break hello.c:6` after the command above removes the condition. Ask for
-exactly what is already there and you get `"action": "unchanged"`.
+are cleared: `lazydap break hello.c:6` after the command above removes the condition. **A
+re-set also re-enables a breakpoint you had disabled with `--toggle`; pass `--disabled` to keep
+it off.** Ask for exactly what is already there and you get `"action": "unchanged"`.
 
 `--hit-condition` counts hits instead of testing a value: `--hit-condition '>= 10'` stops on
 the tenth arrival and after.

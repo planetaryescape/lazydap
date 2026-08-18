@@ -38,7 +38,7 @@ Nothing yet.
 
 **Protocol v8 → v9.** `action` on a breakpoint report gained `updated` and `unchanged`, so that setting a location that already has a breakpoint can say which of the three things it did. A new variant on an enum that crosses the wire is not additive — a v8 client fails to decode the whole frame rather than the one field — so it is a bump, the same way a new `AdapterKind` (v6) and a new `ErrorCode` (v8) were.
 
-**Setting a breakpoint on a location that already has one now edits it.** `lazydap break x.c:10 --condition 'i > 5'` on a line you had already broken on updates that breakpoint in place, keeping its id, and reports `"action": "updated"` — or `"unchanged"` when you asked for exactly what was already there. The whole request wins, including the parts you left out: no `--condition` means no condition, the same as it does on the first call.
+**Setting a breakpoint on a location that already has one now edits it.** `lazydap break x.c:10 --condition 'i > 5'` on a line you had already broken on updates that breakpoint in place, keeping its id, and reports `"action": "updated"` — or `"unchanged"` when you asked for exactly what was already there. The whole request wins, including the parts you left out: no `--condition` means no condition, the same as it does on the first call — and that covers `enabled` too, so a bare re-set re-enables a breakpoint you had disabled with `--toggle`. Pass `--disabled` to keep it off.
 
 ### Fixed
 

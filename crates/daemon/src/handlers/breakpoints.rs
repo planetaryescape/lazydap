@@ -58,16 +58,25 @@ pub async fn add(state: &Arc<DaemonState>, new: NewBreakpoint, dry_run: bool) ->
 
     let source = new.source.clone();
     let added = state.store.add(new);
-    // Nothing to announce when nothing moved: a subscriber redrawing on a
+    let changed = added.outcome != AddOutcome::Unchanged;
+    // Nothing to announce yet when nothing moved: a subscriber redrawing on a
     // no-op learns nothing, and would be told a change happened that did not.
-    if added.outcome != AddOutcome::Unchanged {
+    if changed {
         announce(state, std::slice::from_ref(&added.breakpoint));
     }
     // Sent even when unchanged, so that re-running the command is how you
     // retry a breakpoint the adapter refused the first time.
     let applied = apply(state, &[source])
         .await
-        .map_err(|error| recorded_anyway(error, std::slice::from_ref(&added.breakpoint)))?;
+        .map_err(|error| recorded_anyway(error, changed.then_some(&added.breakpoint)))?;
+    // A retry that did reach the adapter is news after all: the adapter can
+    // have verified the breakpoint at last, or moved it to the next line with
+    // code, and `record_breakpoints` emits nothing of its own. The project
+    // event says "the list is not what you last read", which a late bind makes
+    // true.
+    if !changed && applied {
+        announce(state, std::slice::from_ref(&added.breakpoint));
+    }
 
     Ok(Response::Breakpoints(BreakpointReport {
         action: action_for(added.outcome),
@@ -257,15 +266,33 @@ async fn apply(state: &Arc<DaemonState>, sources: &[PathBuf]) -> Result<bool> {
 /// which is why the announcement goes out *before* the adapter is told (so a
 /// subscriber is never left drawing the old list — the D043 bug) and why the
 /// error names what was recorded rather than reading as "nothing happened".
-fn recorded_anyway(mut error: IpcError, changed: &[Breakpoint]) -> IpcError {
-    let ids: Vec<u32> = changed.iter().map(|breakpoint| breakpoint.id.0).collect();
-    if let Some(details) = error.details.as_object_mut() {
-        details.insert(
-            "recorded_breakpoint_ids".to_string(),
-            serde_json::json!(ids),
-        );
-        details.insert("applied_to_session".to_string(), serde_json::json!(false));
+fn recorded_anyway<'a>(
+    mut error: IpcError,
+    changed: impl IntoIterator<Item = &'a Breakpoint>,
+) -> IpcError {
+    let ids: Vec<u32> = changed
+        .into_iter()
+        .map(|breakpoint| breakpoint.id.0)
+        .collect();
+    // A command that wrote nothing — a re-set of a location that already said
+    // exactly this — has nothing to claim beyond the adapter's own failure.
+    if ids.is_empty() {
+        return error;
     }
+
+    let mut details = match std::mem::take(&mut error.details) {
+        serde_json::Value::Object(details) => details,
+        // Nothing to preserve: a non-object `details` has no keys, and these
+        // two are what a caller needs here.
+        _ => serde_json::Map::new(),
+    };
+    details.insert(
+        "recorded_breakpoint_ids".to_string(),
+        serde_json::json!(ids),
+    );
+    details.insert("applied_to_session".to_string(), serde_json::json!(false));
+    error.details = serde_json::Value::Object(details);
+
     error.message = format!(
         "{} — the change to the project's breakpoints is recorded and will \
          apply to the next `lazydap launch`",
@@ -438,6 +465,43 @@ mod tests {
 
         assert_eq!(report.not_found, vec![BreakpointId(42)]);
         assert!(report.breakpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_re_set_that_changed_nothing_does_not_claim_to_have_recorded_anything() {
+        // The adapter failure is real; the claim that a change went with it
+        // would not be. Nothing was written — the location already said
+        // exactly this.
+        let state = state();
+        report(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 19),
+                dry_run: false,
+            },
+        )
+        .await;
+        live_session_with_a_dead_adapter(&state);
+
+        let error = crate::handlers::dispatch(
+            &state,
+            Request::BreakpointAdd {
+                breakpoint: new_breakpoint("/p/main.c", 19),
+                dry_run: false,
+            },
+        )
+        .await
+        .expect_err("the adapter is gone, so re-applying it cannot succeed");
+
+        assert_eq!(error.code, ErrorCode::AdapterCrashed, "got: {error}");
+        assert!(
+            !error.message.contains("recorded"),
+            "nothing was written, so nothing was recorded: {error}",
+        );
+        assert!(
+            error.details.get("recorded_breakpoint_ids").is_none(),
+            "got: {error}",
+        );
     }
 
     #[tokio::test]
