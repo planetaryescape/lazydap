@@ -16,15 +16,22 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::sync::{broadcast, watch};
 
+/// Slack for live subscribers — the TUI, and every `--wait`. A subscriber that
+/// reads more slowly than the session produces loses the oldest events rather
+/// than blocking the session.
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
 /// How many events a session holds for a client that has not asked for them
 /// yet. Between two CLI invocations a chatty debuggee can produce a lot of
-/// output; keeping the newest thousand bounds memory without losing the part
-/// anybody reads.
-const EVENT_BUFFER_CAPACITY: usize = 1000;
-
-/// Slack for live subscribers. Nobody subscribes until M11; a lagging client
-/// loses old events rather than blocking the session.
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// output; keeping the newest thousand-odd bounds memory without losing the
+/// part anybody reads.
+///
+/// Derived rather than chosen, because the two numbers are compared and not
+/// merely each "big enough". A `--wait` that falls behind the channel
+/// reconciles against this buffer (D-WP3-1), so a buffer smaller than the
+/// channel leaves a band of events that fell out of both and the reconciliation
+/// cannot see. Equal is the smallest size with no such band.
+const EVENT_BUFFER_CAPACITY: usize = EVENT_CHANNEL_CAPACITY;
 
 /// Everything one daemon owns.
 pub struct DaemonState {

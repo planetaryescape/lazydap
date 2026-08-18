@@ -1901,6 +1901,11 @@ The arithmetic that made a wait fall behind in the first place is also gone. The
 re-summed every chunk already kept for every chunk that arrived — quadratic, and about a
 billion operations for one megabyte of output arriving in small pieces. The total is carried.
 
+**The buffer is now sized off the channel rather than beside it.** They were 1000 and 1024,
+which left a 24-event band that had fallen out of both and that no reconciliation could
+recover. `EVENT_BUFFER_CAPACITY` is derived from `EVENT_CHANNEL_CAPACITY` so the two cannot
+drift apart again: whatever the channel drops, the buffer still holds.
+
 **Measured, honestly:** `floods.c` — 1500 lines of a kilobyte each — produces about 1510
 `output` events against codelldb, which is more than the channel holds, and the wait still
 kept up both before and after the fix (three baseline runs: `paused`, 1001 chunks,
@@ -1974,6 +1979,13 @@ which it cannot do down a socket that has been closed.
 `BadRequest` rather than a new code: the caller's own knob decides this, the existing code
 already covers "the request made no sense here", and a new `ErrorCode` variant is a wire change
 that would need a protocol bump to buy nothing a message cannot say.
+
+**Not yet covered: events pushed to a subscriber.** `serve_client`'s subscription arm sends
+event frames rather than replies, and one of those can be just as unframeable — a single
+enormous `Output` chunk — in which case it still breaks the connection. It needs a different
+answer from a request's, because there is no request to refuse: the event has to be dropped or
+replaced with something that says one was, and a subscriber that silently loses an event is the
+kind of hole D072 exists to close. Left as follow-up rather than guessed at here.
 
 ---
 
