@@ -10,6 +10,12 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 Nothing yet.
 
+## [0.2.7] — 2026-08-18
+
+### Changed
+
+**The docs describe the debugger that ships.** The skill, README, AGENTS.md, the site and the install text still described the v0.1.0 world in places: one adapter, a `DapProtocolError` for a reused handle (it is `StaleHandle`), an untagged v0.1.0, no deploy for the docs site, a doctor that failed on any missing adapter. All of it now says what the code does — three adapters and how one is picked, the `--wait` blob's `locals` and `user_frame`, `break` editing a location in place, doctor's verdict rule, the campaign's decisions D084–D099. The site's CLI reference generator also reads clap's singular `[alias: c]`, which newer clap prints for a single alias.
+
 ## [0.2.6] — 2026-08-18
 
 ### Changed
