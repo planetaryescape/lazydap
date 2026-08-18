@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.1] — 2026-08-18
+
 ### Changed
 
 **Protocol v8 → v9.** `action` on a breakpoint report gained `updated` and `unchanged`, so that setting a location that already has a breakpoint can say which of the three things it did. A new variant on an enum that crosses the wire is not additive — a v8 client fails to decode the whole frame rather than the one field — so it is a bump, the same way a new `AdapterKind` (v6) and a new `ErrorCode` (v8) were.

@@ -717,7 +717,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazydap-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "lazydap-core",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-daemon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-dap"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "lazydap-core",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lazydap-core",
  "serde",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "lazydap-tui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lazydap-core",
  "lazydap-protocol",
