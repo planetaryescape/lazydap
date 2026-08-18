@@ -230,7 +230,7 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
                 // the socket is fine and the request can still be answered.
                 // Hanging up instead is what a client read as "the daemon
                 // closed the connection before answering" and reported as an
-                // unreachable daemon (D-WP3-4).
+                // unreachable daemon (D091).
                 tracing::warn!(
                     target: "daemon.ipc",
                     request_id = id,
@@ -249,7 +249,7 @@ pub async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) {
         // A frame read while the reply above was still being produced, that
         // this build cannot decode. The reply it interrupted was owed first;
         // this is the same refusal the idle path sends, in the same place in
-        // the conversation (D-WP3-5).
+        // the conversation (D092).
         if let Some(error) = unreadable {
             let _ = connection.send(unreadable_frame(&error)).await;
             break;
@@ -282,7 +282,7 @@ fn unreadable_frame(error: &std::io::Error) -> IpcMessage {
 /// request half-written to an adapter, or a mutation half-applied, is never
 /// what gets abandoned: those run to completion and are answered into a socket
 /// that is no longer read, which is what the reply's send failure then ends
-/// the connection on (D-WP3-5).
+/// the connection on (D092).
 ///
 /// Only three things can come back from that read, and the difference between
 /// them is the whole of this function:

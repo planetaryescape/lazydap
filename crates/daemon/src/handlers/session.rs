@@ -294,7 +294,7 @@ pub async fn execute(
     };
     // The program finished while this request queued for the permit, so there
     // is nothing left to move. Refused in the words `live_session` would have
-    // used had it looked a moment later (D-WP3-2).
+    // used had it looked a moment later (D089).
     if let Some(RunClaim::Finished(state)) = claim {
         return Err(session_finished(session_id, state));
     }
@@ -308,7 +308,7 @@ pub async fn execute(
     // request — and a stop it reached between the claim above and the
     // subscription a line ago is this run's answer. The subscription is too
     // late to have seen it and the session's buffer is the only place it is
-    // (D-WP3-3).
+    // (D090).
     if already_running && let Some(waiting) = waiting.as_mut() {
         waiting.adopt_ending_since(before_claim, all_threads);
     }
@@ -321,7 +321,7 @@ pub async fn execute(
     // is already running clears both slots, and clearing the pause slot of a
     // `pause --wait` whose SIGSTOP is still in flight leaves that stop to be
     // reported as a genuine exception — D064's bug, re-opened from the one
-    // path that installs a marker for a request it never makes (D-WP3-3).
+    // path that installs a marker for a request it never makes (D090).
     let marker = (!already_running)
         .then(|| expect(&session, movement, thread_id))
         .flatten();

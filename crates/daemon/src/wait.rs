@@ -32,7 +32,7 @@ use tokio::time::Instant;
 /// A `--wait` holds the session's execution permit for as long as it runs, so
 /// one whose caller has hung up would keep every other client's `continue`
 /// queued behind a request nobody is waiting for. The daemon hands the wait
-/// this end of a channel it drops when the connection closes (D-WP3-5).
+/// this end of a channel it drops when the connection closes (D092).
 pub type Abandoned = tokio::sync::oneshot::Receiver<()>;
 
 /// The default a caller gets by saying nothing. Long enough for normal
@@ -94,7 +94,7 @@ pub struct Wait {
     /// Carried rather than recomputed: re-summing every chunk on every chunk
     /// is quadratic in the number of them, and a debuggee that prints a
     /// megabyte in small pieces made the wait task slow enough to fall behind
-    /// the broadcast and lose the very stop it was waiting for (D-WP3-1).
+    /// the broadcast and lose the very stop it was waiting for (D088).
     captured_bytes: usize,
     /// An outcome settled before the event loop ran.
     preempted: Option<WaitOutcome>,
@@ -160,7 +160,7 @@ impl Wait {
     /// and it is what makes this safe rather than the bug the backlog rule
     /// exists to prevent: a stop at or below it is the one the program was
     /// already sitting at, and reporting *that* would answer every `continue`
-    /// with the reason the previous one stopped for (D-WP3-3).
+    /// with the reason the previous one stopped for (D090).
     pub fn adopt_ending_since(&mut self, since: u64, all_threads: bool) {
         let Some(event) = self
             .session
@@ -196,7 +196,7 @@ impl Wait {
             // events this wait consumed are still nobody's, so the next wait —
             // from whatever client comes along — still reports them. The blob
             // is built only because the signature promises one; the connection
-            // it would go to is already gone (D-WP3-5).
+            // it would go to is already gone (D092).
             self.blob.state = WaitOutcome::Timeout;
             self.blob.elapsed_ms = self.started.elapsed().as_millis() as u64;
             return self.blob;
@@ -257,7 +257,7 @@ impl Wait {
                 // so rather than presenting a gap as the whole story — and
                 // then find out what the gap contained, because the buffer
                 // outlives the broadcast's backlog and the dropped range can
-                // hold the stop this wait exists to return (D-WP3-1).
+                // hold the stop this wait exists to return (D088).
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(target: "daemon.session", missed, "a wait fell behind its events");
                     self.record_loss(missed);
@@ -767,7 +767,7 @@ mod tests {
     /// lag tests below are *about* the relationship between this channel and
     /// the session's ring buffer, and a 64-slot channel against a 4096-event
     /// ring is a ratio production never has — it made those tests pass against
-    /// a buffer that could not have recovered anything (D-WP3-1).
+    /// a buffer that could not have recovered anything (D088).
     fn session() -> Arc<Session> {
         let (event_tx, _keep_open) =
             tokio::sync::broadcast::channel(crate::state::EVENT_CHANNEL_CAPACITY);
@@ -1294,7 +1294,7 @@ mod tests {
         // The total is carried rather than re-summed, because re-summing every
         // chunk on every chunk is quadratic and a debuggee printing a megabyte
         // in small pieces made the wait slow enough to fall behind its own
-        // events (D-WP3-1). Carrying it has to be exact: fifty of these fit
+        // events (D088). Carrying it has to be exact: fifty of these fit
         // the cap precisely, and the fifty-first is what trips it.
         let session = session();
         let wait = Wait::begin(&session);
@@ -1322,7 +1322,7 @@ mod tests {
         // range holds the `stopped`, and the blob comes back `timeout` while
         // `lazydap status` says `paused` — a lie the caller cannot detect.
         // The session's own buffer still has the stop, and reading it is the
-        // difference between an answer and a wedged agent (D-WP3-1).
+        // difference between an answer and a wedged agent (D088).
         let session = session();
         let wait = Wait::begin(&session);
 
@@ -1365,7 +1365,7 @@ mod tests {
     async fn a_stop_reached_before_the_subscription_is_this_run_s_answer() {
         // The already-running `continue`: nothing is sent, so the only record
         // of a stop reached between that decision and the subscription is the
-        // session's buffer (D-WP3-3).
+        // session's buffer (D090).
         let session = session();
         let before = session.event_watermark();
         session.emit(stopped(&session, 7, true));
@@ -1383,7 +1383,7 @@ mod tests {
         // The other half of the rule, and the reason `absorb_backlog` will not
         // fold a stop in on its own: the program was sitting at a stop nobody
         // had reported, and answering this `continue` with *that* would say
-        // every run stopped for the reason the previous one did (D-WP3-3).
+        // every run stopped for the reason the previous one did (D090).
         let session = session();
         session.emit(stopped(&session, 7, true));
         let before = session.event_watermark();
@@ -1405,7 +1405,7 @@ mod tests {
         // for as long as it runs, so a Ctrl-C used to leave every later
         // `continue` from every client queued behind a caller that was not
         // there. Nothing is marked delivered on the way out: the output this
-        // wait saw is still nobody's (D-WP3-5).
+        // wait saw is still nobody's (D092).
         let session = session();
         let wait = Wait::begin(&session);
         session.emit(output(&session, "printed before the hang-up\n"));

@@ -27,7 +27,7 @@ pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// part anybody reads.
 ///
 /// Derived rather than chosen, and **strictly larger** than the channel. A
-/// `--wait` that falls behind reconciles against this buffer (D-WP3-1), and
+/// `--wait` that falls behind reconciles against this buffer (D088), and
 /// that recovers something only where the buffer still holds events the channel
 /// has dropped. On a lag tokio rewinds the receiver to the oldest message the
 /// channel still holds, so a buffer the same size holds exactly what the
@@ -353,7 +353,7 @@ pub enum RunClaim {
     /// what was requested.
     AlreadyRunning,
     /// The program finished before the claim was made. Ask for nothing, write
-    /// nothing, and refuse (D-WP3-2).
+    /// nothing, and refuse (D089).
     Finished(SessionState),
 }
 
@@ -780,7 +780,7 @@ impl Session {
     /// program to its exit. Stamping `Running` over that left a dead session
     /// looking live: `restore_state` never fired, `reap_finished` never reaped
     /// it, and every later `launch` was refused with `SessionAlreadyActive`
-    /// until somebody ran `disconnect` (D-WP3-2).
+    /// until somebody ran `disconnect` (D089).
     pub fn claim_run(&self, resume_only: bool) -> RunClaim {
         let mut state = write(&self.state);
 
@@ -884,8 +884,8 @@ impl Session {
     /// Two readers want this, and both want it indexed by their own position
     /// rather than by what any wait has committed: a `--wait` that fell behind
     /// the broadcast, for which this is the only remaining record of what it
-    /// missed (D-WP3-1), and one that has to tell a stop it caused from the
-    /// stop the program was already sitting at (D-WP3-3).
+    /// missed (D088), and one that has to tell a stop it caused from the
+    /// stop the program was already sitting at (D090).
     pub fn events_since(&self, seq: u64) -> Vec<SeqEvent> {
         lock(&self.events).since(seq)
     }
@@ -1598,7 +1598,7 @@ mod tests {
         // passed seconds earlier. Stamping `Running` over `Exited` left a dead
         // session looking live: nothing restored the state, `reap_finished`
         // never reaped it, and every later `launch` was refused with
-        // `SessionAlreadyActive` until somebody ran `disconnect` (D-WP3-2).
+        // `SessionAlreadyActive` until somebody ran `disconnect` (D089).
         let session = ended_session();
         session.set_state(SessionState::Running);
         session.end_once(EndReason::Exited { exit_code: Some(0) });
@@ -1634,7 +1634,7 @@ mod tests {
     fn an_event_the_reader_has_already_seen_is_not_handed_back() {
         // What a `--wait` reads to catch up after falling behind the
         // broadcast: strictly newer than its own position, oldest first
-        // (D-WP3-1).
+        // (D088).
         let session = ended_session();
         session.emit(output_event(session.id, "first"));
         let mark = session.event_watermark();

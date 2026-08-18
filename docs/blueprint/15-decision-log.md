@@ -1879,7 +1879,7 @@ report success: the loser removed nothing and answered with an empty `not_found`
 
 ---
 
-## D-WP3-1 — a `--wait` that falls behind reconciles against the session, it does not wait out its timeout
+## D088 — a `--wait` that falls behind reconciles against the session, it does not wait out its timeout
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -1923,7 +1923,7 @@ lag is a certainty rather than a race.
 
 ---
 
-## D-WP3-2 — a program that has finished cannot be resumed, however far the request already got
+## D089 — a program that has finished cannot be resumed, however far the request already got
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -1943,7 +1943,7 @@ tell from the error whether it lost this race.
 
 ---
 
-## D-WP3-3 — a `continue` that sends nothing still answers for what happened after it decided
+## D090 — a `continue` that sends nothing still answers for what happened after it decided
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -1968,7 +1968,7 @@ touching the markers at all. It no longer touches them.
 
 ---
 
-## D-WP3-4 — a reply that cannot be framed is an error, not a hang-up
+## D091 — a reply that cannot be framed is an error, not a hang-up
 
 **Status:** decided (2026-08-18, defect campaign).
 
@@ -1997,7 +1997,7 @@ kind of hole D072 exists to close. Left as follow-up rather than guessed at here
 
 ---
 
-## D-WP3-5 — a client hanging up ends its `--wait`, and nothing else
+## D092 — a client hanging up ends its `--wait`, and nothing else
 
 **Status:** decided (2026-08-18, defect campaign).
 

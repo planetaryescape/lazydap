@@ -219,7 +219,7 @@ fn handle_event(session: &Arc<Session>, event: DapEvent) {
 /// `continue` that actually resumes the program clears it, which is where a
 /// caller has plainly moved on. A `continue` on a program that is already
 /// running sends nothing and so clears nothing — clearing there would strand
-/// exactly the SIGSTOP this marker exists to name (D-WP3-3).
+/// exactly the SIGSTOP this marker exists to name (D090).
 fn answered(session: &Arc<Session>, reason: &PauseReason, outstanding: Outstanding) {
     if matches!(reason, PauseReason::Pause) {
         if let Some(id) = outstanding.pause {

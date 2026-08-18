@@ -24,12 +24,12 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// something `serde_json` refuses — never reaches the wire at all, so the
 /// request that produced it can still be answered with an error saying why.
 /// Treating that as a dead peer is what made an over-sized reply look like
-/// "the daemon closed the connection before answering" (D-WP3-4).
+/// "the daemon closed the connection before answering" (D091).
 ///
 /// **Decoding.** A frame that cannot become a message means the peer is still
 /// there and still owed an answer — on id `0`, because a frame nobody can read
 /// has no id to answer on. Treating *that* as a hang-up cut short whatever was
-/// already in flight and swallowed the bad frame without a word (D-WP3-5).
+/// already in flight and swallowed the bad frame without a word (D092).
 ///
 /// Both kinds come out of the codec itself: `InvalidInput` from the length
 /// prefix refusing an over-long body, `InvalidData` from serialisation either
@@ -170,7 +170,7 @@ mod tests {
     fn a_frame_the_codec_cannot_read_is_told_apart_from_a_dead_socket() {
         // The decoding half of the same question. A frame that will not parse
         // leaves the peer alive and owed an answer; a peer that vanished
-        // mid-frame is `UnexpectedEof` and is owed nothing (D-WP3-5).
+        // mid-frame is `UnexpectedEof` and is owed nothing (D092).
         let body = b"{ this is not json }";
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn a_reply_too_large_to_frame_is_told_apart_from_a_dead_socket() {
         // What the daemon branches on to answer the request rather than hang
-        // up on it (D-WP3-4).
+        // up on it (D091).
         let oversized = IpcCodec::new()
             .encode(
                 IpcMessage::response(

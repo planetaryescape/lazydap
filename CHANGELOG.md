@@ -8,7 +8,19 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v9*
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+**`--wait` could report `timeout` for a program that had already stopped.** A debuggee chatty enough to outrun the wait's own event stream lost whatever was in the dropped range — and if that held the `stopped`, the wait sat there until its deadline while `lazydap status` said `paused`, which is the worst kind of wrong answer because nothing in the blob says it is one. Falling behind is now reconciled against the session's own record of what happened, so the outcome is the truth even when the events that carried it are gone. The arithmetic that made a wait slow enough to fall behind is gone too: the output cap re-summed every chunk it had kept, for every chunk that arrived.
+
+**A `continue --wait` on an already-running program could miss the stop it was waiting for.** Nothing is sent for one of those — the program is already doing it (D055) — and a stop reached in the gap between deciding that and subscribing belonged to nobody: the subscription was too late and the backlog deliberately does not adopt stops. It now reports that stop, and only that stop; the one the program was already sitting at still belongs to the run before.
+
+**A `pause --wait` racing a `continue --wait` from another client could report a crash.** The already-running `continue` sent nothing but still cleared both in-flight markers, so the `SIGSTOP` codelldb was about to deliver arrived with nothing to explain it and came back as `"reason": "exception"` — the bug fixed for the ordinary case in v0.1.0, from a path that installs a marker for a request it never makes.
+
+**A program that finished while another client's request was queued left the session wedged.** The finished check happens before the request queues for the session's execution permit, and a `continue --wait --timeout 0` from somebody else can run the program to its exit in between. The queued request then stamped the session back to `running` and asked a dead adapter to step: nothing put it back, nothing reaped it, and every later `lazydap launch` was refused with `SessionAlreadyActive` until somebody ran `disconnect`. It is now refused with the same error a step on a finished session has always given.
+
+**Hanging up on a `--wait` no longer wedges the session for everyone else.** A `continue --wait --timeout 0` holds the session's execution queue for as long as it runs, so a Ctrl-C left every later `continue` and `step` — from any client — waiting behind a caller that was not there, until each hit its own deadline and reported the daemon as unreachable. The daemon now notices the connection closing and ends that wait, and nothing else: a request already talking to the debugger runs to completion.
+
+**A reply too big for one frame is now an error rather than a closed connection.** The socket carries frames up to 16 MiB, and a reply past that — `variables --max 0` on a very large container, `output` on a session that printed a great deal — could not be encoded, so the daemon hung up and the client reported "the daemon closed the connection before answering" with exit 3: an unreachable daemon, for a request it had understood perfectly. It now answers `BadRequest` saying what happened and which flags narrow the question, and the connection stays usable.
 
 ## [0.2.1] — 2026-08-18
 
@@ -89,18 +101,6 @@ Nothing yet.
 **The state file's durability and its hand edits both got stricter.** The temporary file is now `fsync`ed before the rename, so a power cut cannot leave a `state.toml` that is present and empty; abandoned `state.toml.tmp.<pid>` files from a crash mid-write are swept on the next write. External edits are noticed by comparing bytes rather than mtimes, so an edit landing in the same clock tick as lazydap's own write is no longer silently reverted — and a breakpoint or watch *deleted* by hand now stays deleted instead of being written back on the next flush. A file that is missing or empty is not read as a deletion of everything, so `rm -rf .lazydap` or an editor caught mid-save cannot cost you the project's state.
 
 **A `.git` in your home directory no longer makes every directory one project.** The project-root walk had no ceiling, so with dotfiles in `~/.git` — or a stray `~/Cargo.toml` — any unmarked directory under `$HOME` resolved to `$HOME`: one `~/.lazydap/state.toml` and one daemon shared across everything you debug. The walk now stops at the home directory, which is only a root if you asked for it with a `.lazydap/` directory. A *file* named `.lazydap` no longer counts as the marker either; it has to be a directory.
-
-**`--wait` could report `timeout` for a program that had already stopped.** A debuggee chatty enough to outrun the wait's own event stream lost whatever was in the dropped range — and if that held the `stopped`, the wait sat there until its deadline while `lazydap status` said `paused`, which is the worst kind of wrong answer because nothing in the blob says it is one. Falling behind is now reconciled against the session's own record of what happened, so the outcome is the truth even when the events that carried it are gone. The arithmetic that made a wait slow enough to fall behind is gone too: the output cap re-summed every chunk it had kept, for every chunk that arrived.
-
-**A `continue --wait` on an already-running program could miss the stop it was waiting for.** Nothing is sent for one of those — the program is already doing it (D055) — and a stop reached in the gap between deciding that and subscribing belonged to nobody: the subscription was too late and the backlog deliberately does not adopt stops. It now reports that stop, and only that stop; the one the program was already sitting at still belongs to the run before.
-
-**A `pause --wait` racing a `continue --wait` from another client could report a crash.** The already-running `continue` sent nothing but still cleared both in-flight markers, so the `SIGSTOP` codelldb was about to deliver arrived with nothing to explain it and came back as `"reason": "exception"` — the bug fixed for the ordinary case in v0.1.0, from a path that installs a marker for a request it never makes.
-
-**A program that finished while another client's request was queued left the session wedged.** The finished check happens before the request queues for the session's execution permit, and a `continue --wait --timeout 0` from somebody else can run the program to its exit in between. The queued request then stamped the session back to `running` and asked a dead adapter to step: nothing put it back, nothing reaped it, and every later `lazydap launch` was refused with `SessionAlreadyActive` until somebody ran `disconnect`. It is now refused with the same error a step on a finished session has always given.
-
-**Hanging up on a `--wait` no longer wedges the session for everyone else.** A `continue --wait --timeout 0` holds the session's execution queue for as long as it runs, so a Ctrl-C left every later `continue` and `step` — from any client — waiting behind a caller that was not there, until each hit its own deadline and reported the daemon as unreachable. The daemon now notices the connection closing and ends that wait, and nothing else: a request already talking to the debugger runs to completion.
-
-**A reply too big for one frame is now an error rather than a closed connection.** The socket carries frames up to 16 MiB, and a reply past that — `variables --max 0` on a very large container, `output` on a session that printed a great deal — could not be encoded, so the daemon hung up and the client reported "the daemon closed the connection before answering" with exit 3: an unreachable daemon, for a request it had understood perfectly. It now answers `BadRequest` saying what happened and which flags narrow the question, and the connection stays usable.
 
 ## [0.1.0] — 2026-07-31
 

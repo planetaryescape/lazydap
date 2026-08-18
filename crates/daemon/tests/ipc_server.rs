@@ -479,7 +479,7 @@ async fn a_frame_the_daemon_cannot_read_is_answered_before_it_hangs_up() {
 ///
 /// The daemon reads ahead while a request runs, so it can notice a client
 /// hanging up on a `--wait` and stop holding the session's execution permit
-/// for it (D-WP3-5). Reading ahead must not cost anybody a request: the frame
+/// for it (D092). Reading ahead must not cost anybody a request: the frame
 /// it finds waits its turn rather than being dropped, which would hang the
 /// client on a reply that never comes.
 ///
@@ -577,7 +577,7 @@ async fn a_client_that_hangs_up_leaves_the_daemon_serving_everybody_else() {
 /// socket is fine and the request can still be refused in words. Breaking the
 /// connection instead is what a client reported as "the daemon closed the
 /// connection before answering", exit 3: an unreachable daemon, for a request
-/// the daemon understood perfectly and simply could not fit (D-WP3-4).
+/// the daemon understood perfectly and simply could not fit (D091).
 ///
 /// The instance name is the cheapest reply that can be made too big; the
 /// requests that reach this in practice are `variables --max 0` on a huge

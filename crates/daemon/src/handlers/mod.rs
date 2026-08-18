@@ -27,7 +27,7 @@ pub type Result<T> = std::result::Result<T, IpcError>;
 /// `None` for a caller with no connection behind it. Only the requests that
 /// block — a `--wait` — take it, and only the wait loop itself honours it: a
 /// half-sent DAP request or a half-applied mutation must never be what gets
-/// abandoned (D-WP3-5).
+/// abandoned (D092).
 pub async fn dispatch(
     state: &Arc<DaemonState>,
     request: Request,
@@ -297,7 +297,7 @@ fn live_session(state: &Arc<DaemonState>, session_id: SessionId) -> Result<Arc<S
 ///
 /// Shared with `session::execute`, which learns the same fact later: a program
 /// can finish between this check and the moment the execution permit is
-/// granted, and a caller must not be able to tell the two apart (D-WP3-2).
+/// granted, and a caller must not be able to tell the two apart (D089).
 pub(super) fn session_finished(session_id: SessionId, state: SessionState) -> IpcError {
     IpcError::new(
         ErrorCode::BadRequest,
