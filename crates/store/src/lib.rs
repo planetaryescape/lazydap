@@ -477,7 +477,7 @@ impl ProjectStore {
     /// between our load and our write must not be silently reverted — and
     /// "reverted" covers a deletion as much as an addition. Both are decided
     /// against a *baseline*: the text of the file as we last read or wrote it.
-    /// See [`merge_by_id`] for the rule, and D-WP2-1 for what it does not
+    /// See [`merge_by_id`] for the rule, and D084 for what it does not
     /// promise.
     fn adopt_external_edits(&self, state: &mut State) -> Result<()> {
         let (document, text) = file::read(&self.path)?;
@@ -864,7 +864,7 @@ mod tests {
 
     #[test]
     fn a_breakpoint_deleted_by_hand_stays_deleted() {
-        // The other half of the file being hand-editable (D-WP2-1). Deleting
+        // The other half of the file being hand-editable (D084). Deleting
         // an entry and watching it come back on the next write makes the file
         // look like a cache lazydap merely humours.
         let project = TempProject::new("handdel");

@@ -1738,7 +1738,7 @@ with a path and does not search at all.
 
 ---
 
-## D-WP2-1 — a hand-deleted entry in `state.toml` stays deleted
+## D084 — a hand-deleted entry in `state.toml` stays deleted
 
 **Status:** decided (2026-08-18, defect campaign WP2).
 
@@ -1785,7 +1785,7 @@ kilobytes, so keeping it costs nothing, and it is also what the three-way merge 
 
 ---
 
-## D-WP2-2 — the project-root walk stops at `$HOME`
+## D085 — the project-root walk stops at `$HOME`
 
 **Status:** decided (2026-08-18, defect campaign WP2).
 
