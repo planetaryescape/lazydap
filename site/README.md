@@ -73,5 +73,12 @@ is not a claim worth making.
 
 ## Deployment
 
-Not set up. `vercel.json` is present and correct; no project exists and no domain is chosen.
-`astro.config.mjs` reads `SITE_URL` from the environment and falls back to a placeholder.
+Vercel, to <https://lazydap.sh>. The project is linked through `site/.vercel/` (gitignored —
+`vercel link --scope planetaryescape` recreates it), and a release deploys with:
+
+```bash
+cd site && vercel deploy --prod --scope planetaryescape
+```
+
+`astro.config.mjs` reads `SITE_URL` from the environment and falls back to `https://lazydap.sh`,
+which is now the real one rather than a placeholder.

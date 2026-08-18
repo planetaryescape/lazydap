@@ -70,6 +70,13 @@ const BIN = resolveBinary();
 /** A binary that hangs must fail the build, not wedge it. Quirk 5 makes this real. */
 const HELP_TIMEOUT_MS = 10_000;
 
+// How clap marks a command's other spellings. One source, because the spelling
+// changes with clap's version — `[aliases: c]` up to 4.6.4, `[alias: c]` for a
+// single one from 4.6.5 — and two copies of it drift apart silently.
+const ALIAS_MARKER = String.raw`\[alias(?:es)?:\s*([^\]]+)\]`;
+const ALIAS_ANYWHERE = new RegExp(ALIAS_MARKER);
+const ALIAS_TRAILING = new RegExp(String.raw`\s*${ALIAS_MARKER}\s*$`);
+
 function help(args) {
   const spelled = ['lazydap', ...args, '--help'].join(' ');
   try {
@@ -183,12 +190,12 @@ function parseCommands(lines) {
   for (const line of lines) {
     const match = line.match(/^\s{2,8}([\w-]+)\s{2,}(.*)$/);
     if (match) {
-      // `[aliases: c]` is real information but belongs beside the name, not
+      // An alias is real information but belongs beside the name, not
       // trailing the summary.
-      const aliases = match[2].match(/\[aliases?:\s*([^\]]+)\]/);
+      const aliases = match[2].match(ALIAS_ANYWHERE);
       commands.push({
         name: match[1],
-        summary: match[2].replace(/\s*\[aliases?:[^\]]+\]\s*$/, '').trim(),
+        summary: match[2].replace(ALIAS_TRAILING, '').trim(),
         aliases: aliases ? aliases[1].split(',').map((a) => a.trim()) : [],
       });
     }
