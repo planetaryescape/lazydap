@@ -601,3 +601,32 @@ fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disco
         "the adapter outlived the session it was serving: {survivors:?}",
     );
 }
+
+#[test]
+fn disconnecting_without_terminating_says_so_honestly_when_debugpy_cannot_detach() {
+    let (_python, _turn) = require_python!();
+    let sandbox = Sandbox::new("keep");
+
+    sandbox.launch(&fixture("spins.py"));
+    assert_eq!(sandbox.wait("1")["state"], "timeout");
+
+    // debugpy does not advertise DAP's `supportTerminateDebuggee` — it sends a
+    // *differently spelled* `supportsTerminateDebuggee` and then never answers
+    // a `disconnect` carrying `terminateDebuggee: false` at all. lazydap used
+    // to send one anyway, wait out the ten-second request timeout, kill the
+    // adapter, watch the debuggee die with it, and report
+    // `terminated_debuggee: false`. Both halves of that were wrong (D-WP1-2).
+    let started = std::time::Instant::now();
+    let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
+
+    assert_eq!(
+        answer["terminated_debuggee"], true,
+        "the program does die, and the answer has to say so: {answer}",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "it must not wait out a request debugpy never answers: {:?}",
+        started.elapsed(),
+    );
+    // `assert_no_orphans` in `Drop` is the other half: it really is gone.
+}

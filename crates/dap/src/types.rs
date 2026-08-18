@@ -10,6 +10,17 @@ pub struct Capabilities {
     /// client may only send them when the adapter has said this; codelldb has
     /// not, and ignores all three (D067).
     pub supports_variable_paging: bool,
+    /// Whether `disconnect` honours `terminateDebuggee` — that is, whether this
+    /// adapter can be asked to leave the program running.
+    ///
+    /// **`support`, not `supports`.** The specification spells this one
+    /// capability without the `s`, alone among its neighbours, and it is not a
+    /// typo here: codelldb sends `supportTerminateDebuggee` and debugpy sends
+    /// `supportsTerminateDebuggee`, which is not the same field and is not the
+    /// one DAP defines (debugpy quirk 18). Reading the specification's spelling
+    /// predicts what all three adapters actually *do* with a
+    /// `terminateDebuggee: false`, and reading debugpy's does not (D-WP1-2).
+    pub support_terminate_debuggee: bool,
 }
 
 #[derive(Debug, Serialize)]

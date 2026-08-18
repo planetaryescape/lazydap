@@ -395,3 +395,37 @@ down with it in a daemon that treats any rejected response during the handshake
 as fatal; that path is now non-fatal for `setBreakpoints` specifically, but no
 adapter lazydap drives actually needs it (delve answers `could not find file
 /path/x.go` the same way, and codelldb likewise).
+
+---
+
+## 18. It misspells `supportTerminateDebuggee`, and cannot detach anyway
+
+DAP's capability for "you may ask me to leave the debuggee running" is spelled
+**`supportTerminateDebuggee`** — no `s` on `support`, alone among its
+neighbours, which is the specification's inconsistency rather than a typo here.
+
+debugpy's `initialize` answer does not contain that field. What it contains is:
+
+```json
+"supportsTerminateDebuggee": true,
+"supportsTerminateRequest": true,
+```
+
+`supportsTerminateRequest` is a real, correctly spelled capability about the
+`terminate` *request*. `supportsTerminateDebuggee` is not a field DAP defines,
+and it is the only thing debugpy says on the subject.
+
+It also does not behave as though the claim were true. Against a **running**
+program (debugpy 1.8.21, CPython 3.14.6, 2026-08-18):
+
+- `disconnect` with `terminateDebuggee: true` → answered in 0.05 s.
+- `disconnect` with `terminateDebuggee: false` → **never answered at all.**
+  lazydap's ten-second request timeout expires, the adapter is killed, and the
+  launcher kills the debuggee as it goes. The whole command took 12 s and the
+  program died regardless.
+
+**What lazydap does:** reads the specification's spelling, treats debugpy as an
+adapter that cannot detach, and carries out `--no-terminate` as a terminate —
+answering `terminated_debuggee: true`, which is what happens, and printing a
+warning on stderr saying why (D-WP1-2). The misspelled field is deliberately not
+read: trusting it would restore both the twelve-second wait and the false answer.

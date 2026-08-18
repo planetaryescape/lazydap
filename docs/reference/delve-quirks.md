@@ -388,6 +388,23 @@ Two smaller notes from the same session (delve 1.27.0, 2026-08-18):
 
 ---
 
+## 17. It cannot leave a debuggee running, and does not claim it can
+
+delve's `initialize` answer contains no `supportTerminateDebuggee` — DAP's
+capability for "you may ask me to leave the debuggee running", spelled without
+the `s` on `support`. That is honest of it. Measured on delve 1.27.0
+(2026-08-18): a `disconnect` carrying `terminateDebuggee: false` against a
+running Go program is answered promptly, and the debuggee is dead **0.08 s
+later**. Under `mode: "debug"` the compiled binary runs as delve's own child, and
+delve takes it with it however the request was phrased.
+
+**What lazydap does:** treats delve as an adapter that cannot detach, so
+`--no-terminate` is carried out as a terminate and answered
+`terminated_debuggee: true`, with a warning on stderr (D-WP1-2). The alternative
+was reporting `false` about a process that had been dead for eighty milliseconds.
+
+---
+
 ## Versions this was verified against
 
 | thing | version |

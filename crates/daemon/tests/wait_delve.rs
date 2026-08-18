@@ -465,32 +465,30 @@ fn the_compiled_binary_is_removed_when_an_exited_session_is_shut_down() {
     let blob = sandbox.wait("30");
     assert_eq!(blob["state"], "exited", "got: {blob}");
 
-    // `mode: "debug"` compiled exactly one binary. Whether it is still there
-    // depends on how fast delve acts on the disconnect the ended session sent
-    // it, so the assertion is about what must never survive rather than about
-    // that race: a file this test can name, still present after shutdown.
-    let created = sandbox.new_artifacts();
+    // `mode: "debug"` compiles exactly one binary, and whether it is still on
+    // disk right now is a race with delve acting on the disconnect the ended
+    // session sent it — `exits.go` can finish during its own launch, in which
+    // case the wind-down happens before this line. So the assertion is about
+    // what must never survive rather than about the race, and it is made after
+    // the shutdown, where both branches have to agree: nothing of this session
+    // is left in the temp directory.
     assert!(
-        created.len() <= 1,
-        "debug mode compiles one binary: {created:?}",
+        sandbox.new_artifacts().len() <= 1,
+        "debug mode compiles one binary: {:?}",
+        sandbox.new_artifacts(),
     );
-    let Some(binary) = created.first() else {
-        sandbox.run(&["shutdown"]);
-        return;
-    };
 
     // Shut down with no prior disconnect — the path that leaked.
     sandbox.run(&["shutdown"]);
     for _ in 0..30 {
-        if !binary.exists() {
-            break;
+        if sandbox.new_artifacts().is_empty() {
+            return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert!(
-        !binary.exists(),
-        "shutdown must remove delve's compiled binary: {}",
-        binary.display(),
+    unreachable!(
+        "delve's compiled binary outlived the daemon: {:?}",
+        sandbox.new_artifacts(),
     );
 }
 
@@ -739,4 +737,32 @@ fn an_adapter_whose_session_ended_is_reaped_rather_than_left_waiting_for_a_disco
         survivors.is_empty(),
         "the adapter outlived the session it was serving: {survivors:?}",
     );
+}
+
+#[test]
+fn disconnecting_without_terminating_says_so_honestly_when_delve_cannot_detach() {
+    let (_dlv, _turn) = require_dlv!();
+    let sandbox = Sandbox::new("keep");
+
+    sandbox.launch(&fixture("spins.go"));
+    assert_eq!(sandbox.wait("1")["state"], "timeout");
+
+    // delve does not advertise DAP's `supportTerminateDebuggee`, and it means
+    // it: the debuggee is delve's own child and dies with it whatever the
+    // request said. Reporting `terminated_debuggee: false` told a caller their
+    // program was still running when it had been dead for eighty milliseconds
+    // (D-WP1-2).
+    let started = std::time::Instant::now();
+    let answer = sandbox.json(&["--format", "json", "disconnect", "--no-terminate"]);
+
+    assert_eq!(
+        answer["terminated_debuggee"], true,
+        "the program does die, and the answer has to say so: {answer}",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "nothing here is worth waiting on: {:?}",
+        started.elapsed(),
+    );
+    // The sandbox's `Drop` checks the process *and* the compiled binary.
 }

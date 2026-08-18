@@ -118,6 +118,7 @@ pub async fn launch(
                     Arc::clone(&pending),
                     adapter,
                     outcome.capabilities,
+                    outcome.support_terminate_debuggee,
                 ),
                 pump: PumpStart { reader, pending },
                 capabilities: outcome.capabilities,
@@ -194,6 +195,12 @@ struct Outcome {
     exit_code: Option<i32>,
     output: Vec<OutputChunk>,
     debuggee: Option<StartedProcess>,
+    /// Whether the adapter can be asked to leave the debuggee running.
+    ///
+    /// Daemon-side only: it decides what `disconnect --no-terminate` does, and
+    /// nothing a client reads depends on it, so it stays off
+    /// [`AdapterCapabilities`] and out of the protocol's shape (D-WP1-2).
+    support_terminate_debuggee: bool,
 }
 
 impl Outcome {
@@ -208,6 +215,7 @@ impl Outcome {
             exit_code: None,
             output: Vec::new(),
             debuggee: None,
+            support_terminate_debuggee: false,
         }
     }
 }
@@ -228,6 +236,7 @@ async fn handshake(
     )
     .await??;
     outcome.capabilities = translate_capabilities(&capabilities);
+    outcome.support_terminate_debuggee = capabilities.support_terminate_debuggee;
 
     let launch_seq = transport
         .send_request("launch", &adapter.launch_args(request))
@@ -337,31 +346,27 @@ async fn handshake(
             },
             Incoming::Response(response) => {
                 if !response.success {
-                    // One file's breakpoints are not the launch. All three
-                    // adapters answer a `setBreakpoints` they cannot honour
-                    // with `verified: false` rather than a rejection (see the
-                    // quirks files) — but an adapter that does reject one used
-                    // to take the whole launch down with it, so a single stale
-                    // persisted breakpoint could make a project undebuggable.
-                    // Reported unbound instead, which is what an unbindable
-                    // breakpoint looks like everywhere else.
-                    if let Some(index) = breakpoint_seqs.remove(&response.request_seq) {
-                        let message = response.message.unwrap_or_default();
-                        tracing::warn!(
-                            target: "daemon.session",
-                            source = %breakpoints[index].0.display(),
-                            %message,
-                            "the adapter refused this file's breakpoints; the launch stands",
-                        );
-                        outcome
-                            .breakpoints
-                            .extend(unbound(&breakpoints[index].1, &message));
-                        continue;
+                    let message = response.message.unwrap_or_default();
+                    match rejection(response.request_seq, &mut breakpoint_seqs) {
+                        Rejection::Fatal => {
+                            return Err(AdapterError::Rejected {
+                                command: response.command,
+                                message,
+                            });
+                        }
+                        Rejection::Unbound { index } => {
+                            tracing::warn!(
+                                target: "daemon.session",
+                                source = %breakpoints[index].0.display(),
+                                %message,
+                                "the adapter refused this file's breakpoints; the launch stands",
+                            );
+                            outcome
+                                .breakpoints
+                                .extend(unbound(&breakpoints[index].1, &message));
+                            continue;
+                        }
                     }
-                    return Err(AdapterError::Rejected {
-                        command: response.command,
-                        message: response.message.unwrap_or_default(),
-                    });
                 }
                 if response.request_seq == launch_seq {
                     launch_answered = true;
@@ -474,6 +479,33 @@ fn applied_breakpoints(
             );
             Vec::new()
         }
+    }
+}
+
+/// What a rejected response during the handshake costs.
+#[derive(Debug, PartialEq, Eq)]
+enum Rejection {
+    /// The launch is over. `initialize`, `launch` and `configurationDone` are
+    /// each the launch itself failing.
+    Fatal,
+    /// One source file's breakpoints, and nothing else. The launch stands.
+    Unbound { index: usize },
+}
+
+/// Read a rejected response, and take its `setBreakpoints` off the outstanding
+/// list if that is what it was.
+///
+/// One file's breakpoints are not the launch: a single stale persisted
+/// breakpoint used to make a whole project undebuggable, because any rejected
+/// response during the handshake failed it. All three adapters lazydap drives
+/// answer a `setBreakpoints` they cannot honour with `verified: false` rather
+/// than a rejection (verified 2026-08-18; see the quirks files), so this is the
+/// branch no adapter currently takes — which is exactly why it is decided here,
+/// where a test can reach it, rather than only inside the read loop.
+fn rejection(request_seq: i64, outstanding: &mut HashMap<i64, usize>) -> Rejection {
+    match outstanding.remove(&request_seq) {
+        Some(index) => Rejection::Unbound { index },
+        None => Rejection::Fatal,
     }
 }
 
@@ -618,6 +650,63 @@ mod tests {
         let event: DapEvent = serde_json::from_str(r#"{"seq":1,"type":"event","event":"output"}"#)
             .expect("deserialise");
         assert!(output_chunk(&event).is_none());
+    }
+
+    #[test]
+    fn a_refused_set_breakpoints_costs_that_file_and_not_the_launch() {
+        // A stale breakpoint in a file the adapter will not take must not be
+        // able to make the project undebuggable.
+        let mut outstanding = HashMap::from([(7_i64, 2_usize)]);
+
+        assert_eq!(
+            rejection(7, &mut outstanding),
+            Rejection::Unbound { index: 2 },
+        );
+        assert!(
+            outstanding.is_empty(),
+            "the launch waits for every setBreakpoints, so a refused one has to \
+             stop being outstanding or the handshake never settles",
+        );
+    }
+
+    #[test]
+    fn a_refused_launch_is_still_the_end_of_the_launch() {
+        // The other half of the rule: `initialize`, `launch` and
+        // `configurationDone` failing *is* the launch failing, and softening
+        // that would report a session nobody can debug as one that started.
+        let mut outstanding = HashMap::from([(7_i64, 2_usize)]);
+
+        assert_eq!(rejection(9, &mut outstanding), Rejection::Fatal);
+        assert_eq!(
+            outstanding.len(),
+            1,
+            "an unrelated rejection must not consume somebody else's marker",
+        );
+    }
+
+    #[test]
+    fn an_unbound_file_reports_every_breakpoint_in_it_with_the_adapters_reason() {
+        let breakpoints = [Breakpoint {
+            id: lazydap_core::BreakpointId(4),
+            source: PathBuf::from("/tmp/ghost.go"),
+            line: 1,
+            column: None,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+            enabled: true,
+        }];
+
+        let reported = unbound(&breakpoints, "could not find file /tmp/ghost.go");
+
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].id, Some(lazydap_core::BreakpointId(4)));
+        assert!(!reported[0].verified);
+        assert_eq!(
+            reported[0].message.as_deref(),
+            Some("could not find file /tmp/ghost.go"),
+            "the adapter's own words are the whole answer to why nothing bound",
+        );
     }
 
     #[test]

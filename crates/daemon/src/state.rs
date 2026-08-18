@@ -11,7 +11,7 @@ use lazydap_protocol::{
 use lazydap_store::ProjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::sync::{broadcast, watch};
@@ -486,6 +486,10 @@ pub struct Session {
     /// said to leave the program running, which is the one case where a
     /// debuggee outliving its session is the answer rather than the bug.
     debuggee: Mutex<Option<Debuggee>>,
+    /// Set once a client has taken this session down itself, so the pump knows
+    /// not to send a `disconnect` of its own. See
+    /// [`begin_client_teardown`](Self::begin_client_teardown).
+    client_teardown: AtomicBool,
 }
 
 impl Session {
@@ -517,6 +521,7 @@ impl Session {
             breakpoints: Mutex::new(BreakpointMap::default()),
             handles: Mutex::new(HandleTable::new(handle_sequence)),
             debuggee: Mutex::new(None),
+            client_teardown: AtomicBool::new(false),
         }
     }
 
@@ -642,6 +647,23 @@ impl Session {
     /// true: there is nothing left to reap (D-WP1-1).
     pub fn release_debuggee(&self) -> Option<Debuggee> {
         lock(&self.debuggee).take()
+    }
+
+    /// A client is ending this session itself; the pump should not also try.
+    ///
+    /// `disconnect` usually provokes a `terminated`, and the pump answers a
+    /// session that has ended by disconnecting from the adapter (D-WP1-1) —
+    /// which would put a second `disconnect` on the wire behind the client's
+    /// own. Two execution-class requests to one adapter is what
+    /// non-negotiable #6 forbids, and the second carries the opposite
+    /// `terminateDebuggee` to the first.
+    pub fn begin_client_teardown(&self) {
+        self.client_teardown.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a client is already taking this session down.
+    pub fn client_teardown_started(&self) -> bool {
+        self.client_teardown.load(Ordering::SeqCst)
     }
 
     /// Remove a binary lazydap had delve compile, on teardown (best-effort).

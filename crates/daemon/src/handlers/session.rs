@@ -12,10 +12,15 @@ use std::time::Duration;
 /// How long an adapter asked to *leave the debuggee running* gets to exit
 /// before it is killed.
 ///
-/// It has been asked to detach, and detaching is work it does after it answers.
-/// Killing it at the acknowledgement rather than at the exit is what made
-/// `disconnect --no-terminate` kill the program it promised to keep.
-const DETACH_GRACE: Duration = Duration::from_secs(2);
+/// Short on purpose, and measured rather than guessed: codelldb — the only
+/// adapter that advertises `supportTerminateDebuggee` at all, so the only one
+/// that reaches this — does its detaching *before* it answers, taking 5.1 s over
+/// a running debuggee, and then never exits. With no wait at all its debuggee
+/// still survives, so a longer ceiling here buys nothing today and every
+/// millisecond of it is spent on every `--no-terminate`. What it insures
+/// against is the other shape: an adapter that acknowledges first and detaches
+/// afterwards, which would lose its debuggee to a kill at the acknowledgement.
+const DETACH_GRACE: Duration = Duration::from_millis(500);
 
 /// What kind of movement a stepping request asks for.
 #[derive(Debug, Clone, Copy)]
@@ -179,13 +184,15 @@ pub async fn disconnect(
     dry_run: bool,
 ) -> Result<Response> {
     if dry_run {
-        // The same lookup the real path makes, so a preview cannot claim it
-        // would end a session that is not there (non-negotiable #4).
+        // The same lookup and the same decision the real path makes, so a
+        // preview cannot claim it would end a session that is not there, or
+        // that it would keep a program this adapter cannot keep
+        // (non-negotiable #4).
         let session = find_session(state, session_id)?;
         return Ok(Response::Disconnected {
             session_id: session.id,
             dry_run: true,
-            terminated_debuggee: terminate && session.state().is_live(),
+            terminated_debuggee: terminates_debuggee(&session, terminate),
         });
     }
 
@@ -206,20 +213,41 @@ pub async fn disconnect(
     let session = teardown.session();
     let was_live = session.state().is_live();
 
+    // What is actually about to happen to the program, which is not always what
+    // was asked for: an adapter that cannot detach is asked to terminate
+    // instead, because asking it to detach anyway achieves nothing and — for
+    // debugpy, which simply never answers such a request — costs ten seconds of
+    // request timeout before it achieves nothing (D-WP1-2).
+    let terminating = terminates_debuggee(session, terminate);
+    if terminating && !terminate {
+        tracing::info!(
+            target: "daemon.session",
+            session_id = %session_id,
+            adapter = %session.adapter_kind,
+            "this adapter cannot leave a debuggee running; terminating it instead",
+        );
+    }
+
+    // The pump must not send a `disconnect` of its own behind this one: the
+    // request below usually provokes `terminated`, and a second `disconnect`
+    // is a second execution-class request to one adapter (non-negotiable #6)
+    // which, in the terminating case, could countermand the first.
+    session.begin_client_teardown();
+
     // `--no-terminate` promises the program keeps running, and the daemon has
     // two ways to break that promise: killing the adapter before it has
     // finished detaching, and D045's reaper killing the debuggee when the pump
     // reads that killed adapter as one that died. So the pid is given up first
     // — there is then nothing left to reap — and the adapter is given time to
     // leave on its own below (D-WP1-1).
-    if !terminate {
+    if !terminating {
         session.release_debuggee();
     }
 
     // Ask nicely first so the adapter can detach or kill the debuggee as
     // requested, then make sure the process is gone either way. A refused or
     // timed-out disconnect must not leave an adapter behind.
-    if was_live && let Err(error) = session.adapter().disconnect(terminate).await {
+    if was_live && let Err(error) = session.adapter().disconnect(terminating).await {
         tracing::warn!(
             target: "daemon.session",
             session_id = %session_id,
@@ -234,7 +262,7 @@ pub async fn disconnect(
     // then stays running regardless (quirk 25), so waiting for it in the
     // ordinary case would cost every `lazydap disconnect` the whole grace for
     // nothing.
-    if !terminate && !session.adapter().wait_for_exit(DETACH_GRACE).await {
+    if !terminating && !session.adapter().wait_for_exit(DETACH_GRACE).await {
         tracing::debug!(
             target: "daemon.session",
             session_id = %session_id,
@@ -253,12 +281,30 @@ pub async fn disconnect(
     session.end_once(EndReason::Disconnected);
     drop(teardown);
 
-    tracing::info!(target: "daemon.session", session_id = %session_id, terminate, "disconnected");
+    tracing::info!(
+        target: "daemon.session",
+        session_id = %session_id,
+        terminate,
+        terminating,
+        "disconnected",
+    );
     Ok(Response::Disconnected {
         session_id,
         dry_run: false,
-        terminated_debuggee: terminate && was_live,
+        terminated_debuggee: terminating && was_live,
     })
+}
+
+/// Whether this disconnect ends the program, given what was asked for and what
+/// the adapter can do.
+///
+/// One function so the preview and the mutation cannot drift (non-negotiable
+/// #4), and so the one surprising rule lives in one place: `--no-terminate`
+/// against an adapter that does not advertise `supportTerminateDebuggee` is
+/// honoured as a *terminate*, because that is what happens either way and
+/// reporting otherwise is the lie this exists to remove (D-WP1-2).
+fn terminates_debuggee(session: &Session, terminate: bool) -> bool {
+    terminate || !session.adapter().can_detach()
 }
 
 /// Move the program, and — if asked — wait for it to settle.

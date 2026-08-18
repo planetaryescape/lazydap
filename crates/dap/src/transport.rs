@@ -578,18 +578,6 @@ impl DapWriter {
         Ok(self.child.try_wait()?.is_some())
     }
 
-    /// Wait for the adapter to exit of its own accord.
-    ///
-    /// For the caller that asked it to leave and would rather it went by
-    /// itself: an adapter killed mid-`disconnect` never gets to detach from its
-    /// debuggee. Cancellation-safe, so a caller can bound it with a timeout and
-    /// pull the plug when the patience runs out. Closing stdin is part of
-    /// going: a stdio adapter is waiting on it.
-    pub async fn wait(&mut self) -> Result<()> {
-        self.child.wait().await?;
-        Ok(())
-    }
-
     /// Kill the adapter process.
     pub async fn shutdown(mut self) -> Result<()> {
         self.child.kill().await?;

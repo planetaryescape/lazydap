@@ -72,7 +72,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
     // ended, and the `terminated` that says so was read by the handshake. There
     // is nothing left to wait for, so the wind-down starts here rather than
     // never (D-WP1-1).
-    let mut winding_down = (!session.state().is_live()).then(|| wind_down(&session));
+    let mut winding_down = ended_by_itself(&session).then(|| wind_down(&session));
 
     loop {
         let incoming = match winding_down {
@@ -103,6 +103,17 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
                         // first; that is its business, not ours.
                         let _ = sender.send(response);
                     }
+                    // Ordinary once the session is over: the handshake stops
+                    // reading the moment it sees `terminated`, so a program
+                    // that ends during its own launch leaves the
+                    // `configurationDone` answer for the pump to find. Only a
+                    // *live* session losing an answer is worth a warning.
+                    None if !session.state().is_live() => tracing::debug!(
+                        target: "daemon.session",
+                        session_id = %session.id,
+                        command = response.command,
+                        "an answer that arrived after the session had ended",
+                    ),
                     None => tracing::warn!(
                         target: "daemon.session",
                         session_id = %session.id,
@@ -114,7 +125,7 @@ async fn run(mut reader: DapReader, pending: Pending, session: Arc<Session>) {
             }
             Ok(Incoming::Event(event)) => {
                 handle_event(&session, event);
-                if winding_down.is_none() && !session.state().is_live() {
+                if winding_down.is_none() && ended_by_itself(&session) {
                     winding_down = Some(wind_down(&session));
                 }
             }
@@ -172,6 +183,16 @@ fn wind_down(session: &Arc<Session>) -> Instant {
         session.adapter().kill().await;
     });
     Instant::now() + WIND_DOWN_DEADLINE
+}
+
+/// Whether this session ended without a client taking it down.
+///
+/// Only that case is the pump's to wind down. A `lazydap disconnect` is already
+/// sending its own `disconnect` and killing the adapter after it; adding a
+/// second one behind it puts two of them on the wire, carrying opposite
+/// `terminateDebuggee` values (D-WP1-2).
+fn ended_by_itself(session: &Arc<Session>) -> bool {
+    !session.state().is_live() && !session.client_teardown_started()
 }
 
 fn handle_event(session: &Arc<Session>, event: DapEvent) {

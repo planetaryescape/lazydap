@@ -33,6 +33,7 @@ This doc is the canonical place for "this codelldb thing surprised us." Cross-li
 | 23 | [`setBreakpoints` answers `verified: true` with `Resolved locations: 0`](#23-setbreakpoints-answers-verified-true-with-resolved-locations-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 24 | [`threads` on a running process answers with a thread whose id is `0`](#24-threads-on-a-running-process-answers-with-a-thread-whose-id-is-0) | Dogfooding round two (2026-08-02) | codelldb 1.12.2 / Darwin 25.5.0 |
 | 25 | [It keeps its socket — and its process — after `terminated`, until it is disconnected from](#25-it-keeps-its-socket--and-its-process--after-terminated-until-it-is-disconnected-from) | Defect campaign WP1 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 |
+| 26 | [Detaching from a running debuggee takes five seconds, and happens before the answer](#26-detaching-from-a-running-debuggee-takes-five-seconds-and-happens-before-the-answer) | Defect campaign WP1 (2026-08-18) | codelldb 1.12.2 / Darwin 25.6.0 |
 
 Quirks 11 to 20 are all about **reading values** — the summary strings in `value`, and what
 `eval` will and will not do. They were found in one sitting against a Rust fixture holding one
@@ -1520,6 +1521,48 @@ whatever is still in flight 250 ms to arrive, and then kills the adapter itself
 - D-WP1-1 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
 - `crates/daemon/src/adapter/pump.rs` — `wind_down`
 - D045 — the sibling rule for the *debuggee* an adapter leaves behind
+
+---
+
+## 26. Detaching from a running debuggee takes five seconds, and happens before the answer
+
+### Symptom
+
+`lazydap disconnect --no-terminate` against a running program takes about five
+and a half seconds. Almost all of it is one request.
+
+### Root cause
+
+Measured 2026-08-18, from the daemon's own log:
+
+```text
+06:40:00.181  dap.send: request seq=5 command="disconnect"
+06:40:05.293  dap.recv.response: request_seq=5 command="disconnect" success=true
+```
+
+5.1 seconds inside codelldb, which has to stop the process, take LLDB off it and
+let it go again. Two useful facts fall out of that timing:
+
+- codelldb does the detaching **before** it answers, so the response is the
+  confirmation rather than an acknowledgement. Killing the adapter the moment it
+  answers is safe: with no grace at all, the debuggee still survives (measured).
+- It still does not exit afterwards — quirk 25 — so something has to kill it
+  either way.
+
+codelldb is the **only** adapter lazydap drives that advertises DAP's
+`supportTerminateDebuggee`, and the only one that honours a
+`terminateDebuggee: false` at all (debugpy quirk 18, delve quirk 17).
+
+### Fix or workaround
+
+Nothing to fix; the five seconds are codelldb doing the work that was asked for.
+lazydap's own grace after the answer is 500 ms, kept only for an adapter that
+might acknowledge first and detach afterwards (D-WP1-2).
+
+### Cross-references
+
+- D-WP1-2 in [`docs/blueprint/15-decision-log.md`](../blueprint/15-decision-log.md)
+- Quirk 25 — the same adapter not exiting when it is done
 
 ---
 

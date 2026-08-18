@@ -167,6 +167,9 @@ pub fn for_kind(kind: AdapterKind) -> &'static dyn DebugAdapter {
 /// How long to wait for the adapter to answer one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often to look at an adapter that has been asked to leave.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Requests we have sent and not yet seen a response to, keyed by DAP `seq`.
 ///
 /// The pump owns delivery; request callers own the waiting end.
@@ -335,6 +338,9 @@ pub struct AdapterHandle {
     adapter: &'static dyn DebugAdapter,
     /// What the adapter said it could do, in its `initialize` answer.
     capabilities: AdapterCapabilities,
+    /// Whether it can be asked to leave the debuggee running. See
+    /// [`can_detach`](Self::can_detach).
+    support_terminate_debuggee: bool,
 }
 
 /// Proof that the holder may move the program.
@@ -355,6 +361,7 @@ impl AdapterHandle {
         pending: Pending,
         adapter: &'static dyn DebugAdapter,
         capabilities: AdapterCapabilities,
+        support_terminate_debuggee: bool,
     ) -> Self {
         Self {
             writer: Mutex::new(Some(writer)),
@@ -362,6 +369,7 @@ impl AdapterHandle {
             pending,
             adapter,
             capabilities,
+            support_terminate_debuggee,
         }
     }
 
@@ -381,6 +389,7 @@ impl AdapterHandle {
             // before it gets that far.
             adapter: for_kind(AdapterKind::Codelldb),
             capabilities: AdapterCapabilities::default(),
+            support_terminate_debuggee: false,
         }
     }
 
@@ -742,6 +751,19 @@ impl AdapterHandle {
         }
     }
 
+    /// Whether this adapter can be asked to leave the debuggee running.
+    ///
+    /// DAP's `supportTerminateDebuggee` — spelled without the `s`, which is the
+    /// specification's own inconsistency and not a typo. Of the three adapters
+    /// lazydap drives, only codelldb sends it, and only codelldb honours a
+    /// `terminateDebuggee: false`: delve kills the debuggee with itself, and
+    /// debugpy never answers the request at all. So this is read as the
+    /// permission it is, and `disconnect --no-terminate` reports what actually
+    /// happened rather than what was asked for (D-WP1-2).
+    pub fn can_detach(&self) -> bool {
+        self.support_terminate_debuggee
+    }
+
     /// Give the adapter `grace` to exit on its own, and say whether it did.
     ///
     /// The half of teardown that [`kill`](Self::kill) cannot do: an adapter
@@ -749,13 +771,30 @@ impl AdapterHandle {
     /// detaching from the debuggee, which is what `disconnect --no-terminate`
     /// asked it to do (D-WP1-1). `false` means the patience ran out and the
     /// caller should kill it.
+    ///
+    /// Polled rather than awaited on the child, so the writer lock is taken for
+    /// each look and not for the whole wait: everything else that speaks to the
+    /// adapter needs that lock, including the pump's refusals, and holding it
+    /// for seconds during teardown queues them all behind a process that is
+    /// probably never going to exit anyway.
     pub async fn wait_for_exit(&self, grace: Duration) -> bool {
-        let mut writer = self.writer.lock().await;
-        // Already killed, and killing reaps: there is nothing left to wait for.
-        let Some(writer) = writer.as_mut() else {
-            return true;
-        };
-        tokio::time::timeout(grace, writer.wait()).await.is_ok()
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            match self.writer.lock().await.as_mut() {
+                // Already killed, and killing reaps: nothing left to wait for.
+                None => return true,
+                Some(writer) => match writer.has_exited() {
+                    Ok(true) => return true,
+                    // A child we cannot ask about is one we cannot wait for.
+                    Err(_) => return false,
+                    Ok(false) => {}
+                },
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+        }
     }
 
     /// Kill the adapter process and reap it.

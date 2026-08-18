@@ -2105,12 +2105,67 @@ answer said `terminated_debuggee: false` while the program was being killed.
 
 **The rule now:** an intention to leave the debuggee running is recorded before
 anything that could look like a crash. `Session::release_debuggee` gives up the
-pid first — there is then nothing for D045 to reap — and the adapter is given two
-seconds to exit on its own before it is killed. That wait is only taken when
-`--no-terminate` was asked for: codelldb never exits on its own, so waiting for
-it on the ordinary path would cost every `lazydap disconnect` the full grace for
-nothing.
+pid first — there is then nothing for D045 to reap — and the adapter is given a
+short bounded window to exit on its own before it is killed. That wait is only
+taken when the program is actually being kept: codelldb never exits on its own,
+so waiting for it on the ordinary path would cost every `lazydap disconnect` the
+full grace for nothing. **Which adapters this covers is D-WP1-2's subject** —
+today, only codelldb can detach at all.
 
 **What this does not change.** `--wait` still returns at the ending; the
 wind-down happens behind it. An adapter that will not go is still killed, which is
 what the graces are for: a promise to be tidy is not a promise to wait forever.
+
+---
+
+## D-WP1-2 — `--no-terminate` is a request, and the answer says what actually happened
+
+**Status:** decided (2026-08-18, second-opinion review of WP1).
+
+**Why:** `lazydap disconnect --no-terminate` reported `terminated_debuggee: false`
+against all three adapters, and only one of them was telling the truth. Measured
+on 2026-08-18, against a program that was running at the time:
+
+| adapter | `supportTerminateDebuggee` | what happened | how long it took |
+|---|---|---|---|
+| codelldb 1.12.2 | `true` | debuggee kept running | 5.1 s — codelldb detaches *before* it answers |
+| debugpy 1.8.21 | absent (see below) | debuggee died | 12 s — it never answers the request at all |
+| delve 1.27.0 | absent | debuggee died in 0.08 s | 0.06 s |
+
+So two of three answers were a lie, and one of them cost twelve seconds to tell:
+ten of `REQUEST_TIMEOUT` waiting for a response debugpy does not send, plus the
+detach grace on top.
+
+**The capability is spelled `supportTerminateDebuggee`, without the `s`.** That
+is the DAP specification's own inconsistency — every neighbouring field is
+`supports…` — and it is load-bearing here. codelldb sends the specification's
+spelling. **debugpy sends `supportsTerminateDebuggee`**, which is not that field,
+and does not honour a `terminateDebuggee: false` anyway. delve sends neither.
+Reading the specification's spelling predicts what all three adapters *do*;
+reading debugpy's own spelling would predict the opposite of what debugpy does.
+
+**The rule:** `--no-terminate` is honoured when the adapter advertises
+`supportTerminateDebuggee`, and is otherwise carried out as a terminate — the
+same disconnect, with `terminateDebuggee: true` — because that is what happens
+either way and the alternative is a slower route to the same place with a false
+report at the end. `terminated_debuggee` in the response is what actually
+happened, never what was asked for, and the client prints a one-line warning on
+**stderr** naming the reason. One function, `terminates_debuggee`, decides it for
+both the mutation and its `--dry-run` (non-negotiable #4).
+
+**Rejected: trusting debugpy's misspelled claim.** It would restore the twelve
+second wait and the false answer, in the name of a field DAP does not define.
+
+**Rejected: putting the capability in `AdapterCapabilities`.** It is in the
+protocol's `Launched` response, so adding a field there is a wire-shape change,
+and nothing a client does needs it: what a client needs is the honest
+`terminated_debuggee` it already gets. The flag stays daemon-side, on
+`AdapterHandle`.
+
+**A second `disconnect` is not allowed on the wire.** The client's `disconnect`
+usually provokes `terminated`, which is precisely the event that makes D-WP1-1's
+pump disconnect — so both fired, and the pump's carried the opposite
+`terminateDebuggee` to the client's. Two execution-class requests to one adapter
+is non-negotiable #6. `Session::begin_client_teardown` marks the session before
+the client's request goes out, and the pump winds down only a session that ended
+without one.
