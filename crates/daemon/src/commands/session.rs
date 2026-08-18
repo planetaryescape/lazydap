@@ -8,7 +8,7 @@ use crate::cli::WaitArgs;
 use crate::client::DaemonClient;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use crate::output::{OutputFormat, View, or_dash, render_fields};
+use crate::output::{OutputFormat, View, eprint_line, or_dash, render_fields};
 use lazydap_core::{AdapterKind, StepKind};
 use lazydap_protocol::{
     ErrorCode, IpcError, LaunchRequest, Request, Response, StableState, StatusReport,
@@ -198,7 +198,9 @@ pub async fn disconnect(
             true => "the program would be terminated",
             false => "the program was terminated",
         };
-        eprintln!("warning: this adapter cannot leave a debuggee running; {outcome}");
+        eprint_line(&format!(
+            "warning: this adapter cannot leave a debuggee running; {outcome}"
+        ));
     }
 
     View::single(

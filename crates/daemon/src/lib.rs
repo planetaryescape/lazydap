@@ -289,7 +289,9 @@ fn check_config(instance: &Instance, command: &Command, format: OutputFormat) ->
     }
 
     if format == OutputFormat::Table {
-        eprintln!("warning: {problem}; carrying on with the defaults");
+        output::eprint_line(&format!(
+            "warning: {problem}; carrying on with the defaults"
+        ));
     } else {
         tracing::warn!(target: "cli.config", %problem, "carrying on with the defaults");
     }
@@ -443,14 +445,12 @@ fn init_tracing(is_daemon: bool) {
 /// a *result*, and an error is not one. What matters is that a caller parsing
 /// anything at all gets something parseable rather than a sentence.
 fn report(error: &CliError, format: OutputFormat) {
-    match format {
-        OutputFormat::Table => eprintln!("error: {:#}", error.source),
-        _ => eprintln!(
-            "{}",
-            serde_json::to_string(&error.as_json())
-                .unwrap_or_else(|_| format!(r#"{{"error":"{}"}}"#, error.label))
-        ),
-    }
+    let line = match format {
+        OutputFormat::Table => format!("error: {:#}", error.source),
+        _ => serde_json::to_string(&error.as_json())
+            .unwrap_or_else(|_| format!(r#"{{"error":"{}"}}"#, error.label)),
+    };
+    output::eprint_line(&line);
 }
 
 #[cfg(test)]

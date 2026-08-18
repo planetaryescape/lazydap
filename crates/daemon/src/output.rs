@@ -221,9 +221,13 @@ pub fn print_line(line: &str) -> Result<Wrote> {
 /// Print one line to stderr, treating a closed reader as nothing to report.
 ///
 /// `eprintln!` panics on `EPIPE` exactly as `println!` does, and
-/// `lazydap nosuch 2>&1 | head -1` is a normal thing to type. There is no
-/// `Wrote` to hand back: nothing lazydap says on stderr is followed by more of
-/// it, and a diagnostic nobody read is not a failure worth a second one.
+/// `lazydap break /nope.c:1 2>&1 | head -1` is a normal thing to type — so
+/// every error, warning and usage message lazydap writes goes through here, the
+/// way every result goes through [`print_line`].
+///
+/// There is no `Wrote` to hand back. Nothing on stderr is a stream a caller
+/// keeps producing, and a diagnostic nobody read is not worth a second
+/// diagnostic about the first.
 pub fn eprint_line(line: &str) {
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "{line}");

@@ -4,7 +4,7 @@ use super::{active_session_id, unexpected};
 use crate::auto_spawn::ensure_daemon_running;
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use crate::output::{OutputFormat, Row, View, or_dash};
+use crate::output::{OutputFormat, Row, View, eprint_line, or_dash};
 use lazydap_core::{EvalContext, VariableFilter};
 use lazydap_protocol::{Request, Response};
 
@@ -149,11 +149,11 @@ pub async fn variables(
         // On stderr so it cannot corrupt a pipeline, but said out loud: a
         // partial list that looks complete is the thing the cap must not
         // create. The JSON carries `truncated` for anything parsing it.
-        eprintln!(
+        eprint_line(&format!(
             "warning: more variables than the cap; showing a prefix. \
              Use `--start {}` for the next page, or `--max 0` for all of them",
             start.unwrap_or(0) as usize + variables.len(),
-        );
+        ));
     }
 
     View::list(
@@ -263,7 +263,9 @@ pub async fn output(instance: &Instance, since: Option<u64>, format: OutputForma
         // On stderr, so it cannot corrupt a pipeline reading stdout — but said
         // out loud, because a partial transcript that looks complete is worse
         // than no transcript.
-        eprintln!("warning: {dropped} event(s) were dropped before anybody read them");
+        eprint_line(&format!(
+            "warning: {dropped} event(s) were dropped before anybody read them"
+        ));
     }
 
     View::list(

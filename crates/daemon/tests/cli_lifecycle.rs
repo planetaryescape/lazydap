@@ -708,26 +708,47 @@ fn a_closed_pipe_ends_the_command_quietly_rather_than_panicking() {
 }
 
 #[test]
-fn the_two_commands_that_do_not_print_through_lazydap_survive_a_closed_pipe_too() {
-    // `clap_complete` writes the script itself and clap renders its own usage
-    // errors, so neither went through `print_line` and both panicked on
-    // `EPIPE` — the completions script into a `| head` while installing it,
-    // and a usage error whenever stderr was folded into a piped stdout.
-    // Neither needs a sandbox: `completions` starts nothing, and a command
-    // clap cannot parse never gets far enough to look for a daemon.
-    for (script, expected) in [
+fn the_writers_that_bypassed_the_printer_survive_a_closed_pipe_too() {
+    // `clap_complete` writes the completion script itself, and clap's usage
+    // errors, lazydap's own errors and every stderr warning went out through
+    // `eprintln!` — so none of them went through `print_line`, and all of them
+    // panicked on `EPIPE`. Piping a completion script into a pager, or folding
+    // stderr into a piped stdout to read an error, exited 101.
+    //
+    // None of these needs a sandbox: `completions` starts nothing, a command
+    // clap cannot parse never looks for a daemon, and `break` on a file that
+    // is not there is refused before one is started.
+    for (what, script, expected) in [
         (
+            "the completion script",
             format!("{{ {LAZYDAP} completions bash; echo \"rc=$?\" >&2; }} | true"),
             "rc=0",
         ),
         (
             // Both streams go into the closed pipe, so the exit code has to
             // come back out on a third descriptor to be observable at all.
+            "a usage error",
             format!(
                 "exec 3>&2; {{ {LAZYDAP} --format json nosuchcommand 2>&1; \
                  echo \"rc=$?\" >&3; }} | true"
             ),
             "rc=2",
+        ),
+        (
+            "a runtime error as JSON",
+            format!(
+                "exec 3>&2; {{ {LAZYDAP} --format json break /nonexistent.c:1 2>&1; \
+                 echo \"rc=$?\" >&3; }} | true"
+            ),
+            "rc=1",
+        ),
+        (
+            "a runtime error as prose",
+            format!(
+                "exec 3>&2; {{ {LAZYDAP} --format table break /nonexistent.c:1 2>&1; \
+                 echo \"rc=$?\" >&3; }} | true"
+            ),
+            "rc=1",
         ),
     ] {
         let output = Command::new("sh")
@@ -737,8 +758,8 @@ fn the_two_commands_that_do_not_print_through_lazydap_survive_a_closed_pipe_too(
             .expect("run the pipeline");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains(expected), "`{script}` gave: {stderr}");
-        assert!(!stderr.contains("panicked"), "`{script}` gave: {stderr}");
+        assert!(stderr.contains(expected), "{what} gave: {stderr}");
+        assert!(!stderr.contains("panicked"), "{what} gave: {stderr}");
     }
 }
 

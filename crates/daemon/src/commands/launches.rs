@@ -15,7 +15,7 @@
 use crate::commands::session::{self, LaunchOptions};
 use crate::error::{CliError, Result};
 use crate::instance::Instance;
-use crate::output::{OutputFormat, Row, View};
+use crate::output::{OutputFormat, Row, View, eprint_line};
 use lazydap_config::{LaunchJsonError, launch_json};
 use lazydap_core::LaunchConfig;
 use lazydap_protocol::{ErrorCode, IpcError};
@@ -114,7 +114,7 @@ pub async fn run(
     // Warnings go to stderr, not into the result: stdout belongs to the JSON
     // the caller is parsing.
     for warning in &catalogue.warnings {
-        eprintln!("warning: {warning}");
+        eprint_line(&format!("warning: {warning}"));
     }
 
     session::launch(
