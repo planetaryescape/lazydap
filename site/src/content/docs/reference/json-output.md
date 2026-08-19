@@ -231,7 +231,7 @@ non-zero when the buffer overflowed.
 {
   "daemon_pid": 2452,
   "instance": "lazydap-demo-13cc8efcde46",
-  "lazydap_version": "0.2.8",
+  "lazydap_version": "0.2.9",
   "protocol_version": 10,
   "session": {
     "adapter": "codelldb",
@@ -266,7 +266,7 @@ and at least one `adapter.*` check did. A missing adapter has its own `"ok": fal
 not make the run fail on its own.
 
 ```json
-{ "lazydap": "0.2.8", "protocol": 10 }
+{ "lazydap": "0.2.9", "protocol": 10 }
 ```
 
 The two versions move independently. The protocol one is what a daemon from an older build

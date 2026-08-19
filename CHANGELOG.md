@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v10
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.9] — 2026-08-19
+
 ### Added
 
 **A demo GIF, at the top of the README.** Under half a minute of the loop the rest of the page describes, against a real C program: a conditional breakpoint, a launch stopped at entry, a `continue --wait` that answers in JSON with where and why it stopped, then `eval` and `stack`. It is recorded from a committed [vhs](https://github.com/charmbracelet/vhs) tape, `docs/demo/demo.tape`, which builds its own fixture and runs its own daemon instance under `/tmp` — so anyone can regenerate it and get the same session.

@@ -16,7 +16,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   2026-07-31. [M23 — js-debug](docs/implementation/tasks/M23-jsdebug-adapter.md) is blocked at
   its own scope gate behind it: the parent session debugs nothing, and a single-level
   child-session milestone has to come first.
-- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.8 shipped 2026-08-18.** All ten went out
+- **v0.1.0 shipped 2026-07-31; v0.2.0 through v0.2.8 shipped 2026-08-18, v0.2.9 on 2026-08-19.** All eleven went out
   through [.github/workflows/product-release.yml](.github/workflows/product-release.yml) as
   prereleases, with macOS arm64/x86_64 and Linux x86_64 tarballs, SHA-256 sums and
   `lazydap.skill` attached. `install.sh` and the Homebrew tap (M21) are both live; the docs
@@ -27,8 +27,8 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   startup, the store and project-root detection (v0.2.0); breakpoints (v0.2.1); `--wait` and the
   execution queue (v0.2.2); the CLI surface, `doctor` and the paths errors (v0.2.3); adapter
   lifecycle (v0.2.4); the TUI (v0.2.5); the adapter-id mapping race that Linux exposed once CI
-  ran the real adapters (v0.2.6); this docs sweep (v0.2.7); and the follow-ups it left (v0.2.8, D100). The protocol went **v8 → v9** on
-  the way (D086) and **v9 → v10** in the follow-ups (D101), and decisions **D084–D100** record the rules that changed; the CHANGELOG sections say what a
+  ran the real adapters (v0.2.6); this docs sweep (v0.2.7); and the follow-ups it left (v0.2.8, D100; v0.2.9, D101–D102). The protocol went **v8 → v9** on
+  the way (D086) and **v9 → v10** in the follow-ups (D101), and decisions **D084–D102** record the rules that changed; the CHANGELOG sections say what a
   user sees. The theme: answers that were confidently wrong rather than absent — a `--wait`
   reporting `timeout` for a program that had stopped, a `break --condition` silently dropping
   the condition, `--no-terminate` killing the program and saying it had not, and one leaked

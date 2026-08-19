@@ -354,7 +354,7 @@ documented in this file works end to end against C, Python and Go programs. What
 - **Breakpoints bind under symlinked paths.** A file whose breakpoints the adapter declines while naming a location it could have used is re-sent under that name, once, when nothing in it bound and the suggestion resolves to the same file (D048, quirk 8). This is what makes a debuggee under `/tmp` on macOS work.
 - **Not yet:** `attach` (M24, next), `until`, `source`, `restart`, conditional breakpoints from the TUI, js-debug for Node (M23, blocked at its own scope gate), the rest of the config schema.
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
-- **Milestones complete:** workspace setup and M0–M22. Phases A, B, C and D are done. M23 and M24 are the two open ones. Released: `v0.1.0` on 2026-07-31, then `v0.2.0`–`v0.2.8` on 2026-08-18 out of a defect campaign; every one of them went out through `.github/workflows/product-release.yml`.
+- **Milestones complete:** workspace setup and M0–M22. Phases A, B, C and D are done. M23 and M24 are the two open ones. Released: `v0.1.0` on 2026-07-31, then `v0.2.0`–`v0.2.8` on 2026-08-18 and `v0.2.9` on 2026-08-19 out of a defect campaign; every one of them went out through `.github/workflows/product-release.yml`.
 
 Note the protocol is at **v10** (D101: `Request::Doctor` lost `check_adapters`
 and `check_state` — both checks have run in the client since D093 — so it now goes

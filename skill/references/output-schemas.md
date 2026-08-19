@@ -328,7 +328,7 @@ Reading it does not consume it.
   "daemon_pid": 77256,
   "uptime_ms": 776,
   "protocol_version": 10,
-  "lazydap_version": "0.2.8",
+  "lazydap_version": "0.2.9",
   "session": {
     "session_id": "971baa06-...",
     "adapter": "codelldb",
@@ -357,7 +357,7 @@ Reading it does not consume it.
 ```
 
 ```json
-{ "lazydap": "0.2.8", "protocol": 10 }
+{ "lazydap": "0.2.9", "protocol": 10 }
 ```
 
 ```json
