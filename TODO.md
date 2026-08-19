@@ -33,10 +33,12 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   reporting `timeout` for a program that had stopped, a `break --condition` silently dropping
   the condition, `--no-terminate` killing the program and saying it had not, and one leaked
   adapter process per session that ended on its own.
-- **Follow-ups the campaign left**, less the four v0.2.8 fixed — the unframeable subscriber
+- **Follow-ups the campaign left**, all closed. v0.2.8 took four — the unframeable subscriber
   event, `completions` panicking on `EPIPE`, `Request::Doctor`'s dead daemon-side flags, and
-  `install.sh`'s missing `GITHUB_TOKEN` passthrough. The one left is not a milestone yet:
-  - **The demo GIF** is still missing (M15's step 4). Not a blocker; the README works without it.
+  `install.sh`'s missing `GITHUB_TOKEN` passthrough — and the round after it took the last
+  three: `Request::Doctor`'s now-unread fields came off the wire (protocol **v9 → v10**,
+  D-WP10-1), `state.unknown` is three-way merged like everything else in the file (D-WP10-2),
+  and the demo GIF M15's step 4 asked for is recorded from [docs/demo/demo.tape](docs/demo/demo.tape).
 
 ### Repo state notes (for cold-start agent)
 

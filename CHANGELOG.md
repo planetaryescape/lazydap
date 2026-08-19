@@ -8,6 +8,10 @@ The **lazydap protocol** is versioned separately from the binary. It is at **v10
 
 ## [Unreleased]
 
+### Added
+
+**A demo GIF, at the top of the README.** Thirty seconds of the loop the rest of the page describes, against a real C program: a conditional breakpoint, a launch stopped at entry, a `continue --wait` that answers in JSON with where and why it stopped, then `eval` and `stack`. It is recorded from a committed [vhs](https://github.com/charmbracelet/vhs) tape, `docs/demo/demo.tape`, which builds its own fixture and runs its own daemon instance under `/tmp` — so anyone can regenerate it and get the same session.
+
 ### Changed
 
 **Protocol v9 → v10.** `Request::Doctor` lost `check_adapters` and `check_state`. Both checks moved into the CLI in v0.2.3 and the daemon stopped reading the fields in v0.2.8, so the request now asks for nothing and goes on the wire as `"Doctor"` rather than `{"Doctor":{...}}`. Removing a field breaks in both directions — an old daemon reads `"Doctor"` as the wrong shape, a new one reads the old shape the same way — and because the version travels in the same envelope as the payload, that failure lands as an unreadable frame rather than a clean `VersionMismatch`. Bumping is what stops the frame being sent at all: every other request still decodes, so the handshake reports the mismatch and `lazydap shutdown` clears it (D-WP10-1). `lazydap doctor --check-adapters` and `--check-state` are unchanged; they always narrowed what the client runs, not what it asked the daemon for.

@@ -310,4 +310,4 @@ plus 59), verified live against real codelldb.
    is the standing default and the workflow has no publish job.
 2. Re-date `## [0.1.0] — 2026-07-30` in `CHANGELOG.md` if the tag is cut on another day.
 3. `git tag v0.1.0 && git push origin v0.1.0`. Everything downstream of that is automated.
-4. The demo GIF (step 4 above) is still unmade. Not a blocker.
+4. The demo GIF (step 4 above) — done 2026-08-18, `docs/demo/demo.tape` → `docs/demo/lazydap-demo.gif`.
