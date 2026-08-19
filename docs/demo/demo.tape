@@ -11,6 +11,7 @@ Output docs/demo/lazydap-demo.gif
 
 Require jq
 Require clang
+Require codelldb
 
 Set Shell "bash"
 Set Theme "Catppuccin Mocha"

@@ -28,7 +28,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   execution queue (v0.2.2); the CLI surface, `doctor` and the paths errors (v0.2.3); adapter
   lifecycle (v0.2.4); the TUI (v0.2.5); the adapter-id mapping race that Linux exposed once CI
   ran the real adapters (v0.2.6); this docs sweep (v0.2.7); and the follow-ups it left (v0.2.8, D100). The protocol went **v8 → v9** on
-  the way (D086) and **v9 → v10** in the follow-ups (D-WP10-1), and decisions **D084–D100** record the rules that changed; the CHANGELOG sections say what a
+  the way (D086) and **v9 → v10** in the follow-ups (D101), and decisions **D084–D100** record the rules that changed; the CHANGELOG sections say what a
   user sees. The theme: answers that were confidently wrong rather than absent — a `--wait`
   reporting `timeout` for a program that had stopped, a `break --condition` silently dropping
   the condition, `--no-terminate` killing the program and saying it had not, and one leaked
@@ -37,7 +37,7 @@ Living list of what's next. Detailed per-milestone files in [`docs/implementatio
   event, `completions` panicking on `EPIPE`, `Request::Doctor`'s dead daemon-side flags, and
   `install.sh`'s missing `GITHUB_TOKEN` passthrough — and the round after it took the last
   three: `Request::Doctor`'s now-unread fields came off the wire (protocol **v9 → v10**,
-  D-WP10-1), `state.unknown` is three-way merged like everything else in the file (D-WP10-2),
+  D101), `state.unknown` is three-way merged like everything else in the file (D102),
   and the demo GIF M15's step 4 asked for is recorded from [docs/demo/demo.tape](docs/demo/demo.tape).
 
 ### Repo state notes (for cold-start agent)

@@ -2398,7 +2398,7 @@ answer.
 
 ---
 
-## D-WP10-1 — `Request::Doctor` has no fields, and taking them off is protocol v10
+## D101 — `Request::Doctor` has no fields, and taking them off is protocol v10
 
 **Status:** decided (2026-08-18, defect campaign WP10).
 
@@ -2428,7 +2428,7 @@ never the request's fields.
 
 ---
 
-## D-WP10-2 — the unmodelled sections of `state.toml` are three-way merged too, by key
+## D102 — the unmodelled sections of `state.toml` are three-way merged too, by key
 
 **Status:** decided (2026-08-18, defect campaign WP10).
 

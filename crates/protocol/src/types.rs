@@ -87,7 +87,7 @@ use std::path::PathBuf;
 /// `AdapterKind` and D075's `ErrorCode` had, and the same reason for a bump:
 /// the failure belongs at the handshake, where `lazydap shutdown` clears it.
 ///
-/// v10 (D-WP10-1): [`Request::Doctor`] lost `check_adapters` and `check_state`
+/// v10 (D101): [`Request::Doctor`] lost `check_adapters` and `check_state`
 /// and became a unit variant, so it now goes on the wire as `"Doctor"` rather
 /// than `{"Doctor":{...}}`. Removing a field breaks in *both* directions —
 /// serde reads `"Doctor"` against the old shape as `invalid type: unit
@@ -1092,6 +1092,17 @@ mod tests {
         let decoded: Request = serde_json::from_str(&json).expect("deserialise");
 
         assert_eq!(decoded, request, "got: {json}");
+    }
+
+    #[test]
+    fn the_v9_doctor_shape_is_a_hard_decode_failure_too() {
+        // D101: `Doctor` lost its two fields, so the frame a v9 client
+        // sends is a struct variant where this build expects a unit one. That
+        // is not a soft mismatch either — the same reason as below, from the
+        // other direction — which is why v10 is a bump and not a quiet edit.
+        let frame = r#"{"version":9,"id":5,"payload":{"Request":{"Doctor":{"check_adapters":true,"check_state":true}}}}"#;
+        let error = serde_json::from_str::<IpcMessage>(frame).expect_err("old Doctor shape");
+        assert!(error.to_string().contains("expected unit"), "got: {error}",);
     }
 
     #[test]

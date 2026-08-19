@@ -356,7 +356,7 @@ documented in this file works end to end against C, Python and Go programs. What
 - All four gates pass, plus `bash scripts/check_architecture_boundaries.sh`.
 - **Milestones complete:** workspace setup and M0–M22. Phases A, B, C and D are done. M23 and M24 are the two open ones. Released: `v0.1.0` on 2026-07-31, then `v0.2.0`–`v0.2.8` on 2026-08-18 out of a defect campaign; every one of them went out through `.github/workflows/product-release.yml`.
 
-Note the protocol is at **v10** (D-WP10-1: `Request::Doctor` lost `check_adapters`
+Note the protocol is at **v10** (D101: `Request::Doctor` lost `check_adapters`
 and `check_state` — both checks have run in the client since D093 — so it now goes
 on the wire as `"Doctor"`, a shape neither an older nor a newer peer can decode.
 v9 was D086: `action` on a breakpoint report gained

@@ -728,8 +728,9 @@ fn merge_tables(
     baseline: &toml::Table,
     from_file: &toml::Table,
 ) -> (toml::Table, Vec<String>) {
-    // The file's order first, so a rewrite keeps the sections where the person
-    // editing it put them; ours can only be keys the file no longer has.
+    // Every key either side has: the file's, then whatever ours still holds
+    // that the file dropped. Order is the table's own (`toml::Table` sorts its
+    // keys), so this decides only which keys are visited, not where they land.
     let keys = from_file
         .keys()
         .chain(ours.keys().filter(|key| !from_file.contains_key(*key)));

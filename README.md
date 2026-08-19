@@ -10,7 +10,7 @@ It exists for the work where a debugger is not optional: memory you manage by ha
 
 ![A terminal recording: lazydap break sets a conditional breakpoint on inspects.c:14, lazydap launch starts the program stopped at entry, lazydap continue --wait answers with JSON saying it stopped on the breakpoint at line 14, lazydap eval i prints 3, lazydap stack prints the two frames, then disconnect and shutdown.](docs/demo/lazydap-demo.gif)
 
-*Thirty seconds of the whole loop: a conditional breakpoint, a launch, a wait that answers in JSON, and two questions about the stop. Recorded from [`docs/demo/demo.tape`](docs/demo/demo.tape).*
+*Under half a minute of the whole loop: a conditional breakpoint, a launch, a wait that answers in JSON, and two questions about the stop. Recorded from [`docs/demo/demo.tape`](docs/demo/demo.tape).*
 
 ## The loop
 
