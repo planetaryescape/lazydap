@@ -872,7 +872,15 @@ fn a_crash_inside_a_library_names_the_frame_in_the_user_s_code() {
     let sandbox = Sandbox::new("usrfrm");
 
     let program = toolchain.build("library_crash.c");
-    sandbox.json(&["--format", "json", "launch", &program.to_string_lossy()]);
+    // Stopped at entry first: a crash that lands before the `continue` is
+    // issued would be resumed past, and the program would simply exit.
+    sandbox.json(&[
+        "--format",
+        "json",
+        "launch",
+        &program.to_string_lossy(),
+        "--stop-on-entry",
+    ]);
     let blob = sandbox.wait("30");
 
     assert_eq!(blob["state"], "paused", "got: {blob}");
@@ -1088,7 +1096,15 @@ fn a_handle_from_a_session_that_has_ended_is_refused_by_the_next_one() {
 
     // Session A: stop inside the library crash, where the locals are distinctive.
     let crashes = toolchain.build("library_crash.c");
-    sandbox.json(&["--format", "json", "launch", &crashes.to_string_lossy()]);
+    // `--stop-on-entry` on both launches: what is under test is the handle,
+    // not who wins the race between the debuggee and the `continue`.
+    sandbox.json(&[
+        "--format",
+        "json",
+        "launch",
+        &crashes.to_string_lossy(),
+        "--stop-on-entry",
+    ]);
     let first = sandbox.wait("30");
     let stale = first["locals"]["variables_reference"].to_string();
     let names = |value: &Value| -> Vec<String> {
@@ -1109,7 +1125,13 @@ fn a_handle_from_a_session_that_has_ended_is_refused_by_the_next_one() {
     sandbox.run(&["disconnect"]);
     let inspects = toolchain.build("inspects.c");
     sandbox.breakpoint("inspects.c", 20);
-    sandbox.json(&["--format", "json", "launch", &inspects.to_string_lossy()]);
+    sandbox.json(&[
+        "--format",
+        "json",
+        "launch",
+        &inspects.to_string_lossy(),
+        "--stop-on-entry",
+    ]);
     let second = sandbox.wait("30");
     assert_eq!(second["state"], "paused", "got: {second}");
     // Mint enough handles that session A's number would have been reachable
