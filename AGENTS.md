@@ -2,9 +2,9 @@
 
 Read this when you (an AI agent — Claude, Cursor, Copilot, etc.) are asked to work on lazydap or use lazydap to debug code. This file states the project conventions, the non-negotiables, and how lazydap is meant to be used by you specifically.
 
-## ⚠️ This is the shipping repository — teaching mode is OFF
+## This is the shipping repository: teaching mode is off
 
-**Do not teach. Do not slow down for pedagogy. Build.**
+Don't teach or slow down for pedagogy here. Build.
 
 lazydap exists in two parallel repositories. This is the shipping one:
 
@@ -18,7 +18,7 @@ lazydap exists in two parallel repositories. This is the shipping one:
 | Session logs | none | Obsidian vault |
 
 If you were asked to teach, explain slowly, ask the user to predict output, or run a
-session from `docs/teaching/sessions.md` — **you are in the wrong repository.** Say so and
+session from `docs/teaching/sessions.md`, you are in the wrong repository. Say so and
 point at `~/code/planetaryescape/lazydap-learn`.
 
 ### How to work here
@@ -36,7 +36,7 @@ one thing shipping speed does not get to trade away.
 
 ### The teaching material that's still in this repo
 
-`docs/teaching/`, `docs/book/`, `docs/chain/`, `.skills/teaching/`, and `.bookgen/` are
+`docs/teaching/`, `docs/book/`, `docs/chain/`, and `.skills/teaching/` are
 retained here as **reference, not instruction**. The chapters are often the clearest
 written explanation of why a given piece is shaped the way it is — read them when you need
 that. Never run them as a session, and don't maintain them here; `lazydap-learn` owns them.
@@ -46,7 +46,7 @@ snapshot (2026-05-02) — deliberately not kept current here. `lazydap-learn` tr
 version. Don't run bookgen's updater against this repo; it would re-vendor teaching
 machinery this repo has no use for.
 
-## 📁 Project docs: `docs/` is the source of truth
+## Project docs: `docs/` is the source of truth
 
 All project documentation lives in [`docs/`](docs/). Three sub-directories matter:
 
@@ -61,7 +61,7 @@ Key entry points:
 - [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md) — every architectural decision with rationale
 - [`docs/blueprint/14-roadmap.md`](docs/blueprint/14-roadmap.md) — phased delivery plan
 
-The blueprint is **stable**. Don't edit it without an explicit conversation. New decisions get added as `D0NN` entries to the decision log; reality drift gets captured in `16-addendum.md`.
+The blueprint is **stable**. Don't edit it without an explicit conversation. New decisions get added as `DNNN` entries to the decision log; reality drift gets captured in `16-addendum.md`.
 
 ### `docs/implementation/` — the task manager (ship-mode)
 
@@ -77,15 +77,6 @@ Structure:
 - [`docs/implementation/00-workspace-setup.md`](docs/implementation/00-workspace-setup.md) — prerequisite to M0
 - [`docs/implementation/01-phase-A.md`](docs/implementation/01-phase-A.md) through `05-phase-E.md` — phase docs (groups of milestones)
 - [`docs/implementation/tasks/M00-...`](docs/implementation/tasks/) through `M24-...` — one MD file per milestone
-
-**How agents work with tasks:**
-
-1. **Pick the next task.** Look at [`/TODO.md`](TODO.md) for current state. The first unchecked milestone is the next one to work on. (Or pick whichever the user names explicitly.)
-2. **Read the task file.** Each milestone file (`docs/implementation/tasks/MNN-*.md`) is self-contained: what / why / how / success criteria / files / verify / depends on. Read it fully before starting.
-3. **Confirm dependencies.** The task file lists what previous milestones must be complete. Don't skip ahead.
-4. **Do the work.** End to end, in one pass where you can. `cargo test --workspace` and `cargo clippy --workspace --all-targets` green before you call it done.
-5. **Mark the task done.** Check the box in `/TODO.md`. Add a brief completion note at the bottom of the task file (date completed, any deviations from the plan, any follow-ups discovered).
-6. **Add new tasks.** If a milestone reveals work that needs its own milestone, create a new `MNN-name.md` file in `docs/implementation/tasks/` with the same template. Add it to `/TODO.md` and to the relevant phase doc.
 
 **The implementation directory is the project's working memory.** Treat it that way: write to it, read from it, keep it current.
 
@@ -110,18 +101,6 @@ These accumulate as we go. Add to them whenever a question takes >10 minutes to 
 ### `/TODO.md` is the lightweight index
 
 Top-level [`TODO.md`](TODO.md) is the at-a-glance task list with checkboxes pointing into `docs/implementation/tasks/`. **It's an index, not a task store** — the per-milestone files have the real content. Keep `/TODO.md` in sync with task completion.
-
-### What this means for you (the agent)
-
-When you start working on lazydap:
-
-1. Read this `AGENTS.md` (you're doing it now)
-2. Read [`/TODO.md`](TODO.md) — current state
-3. Read the task file for the milestone you're picking up (or being asked to work on)
-4. If you need to recenter: skim [`docs/blueprint/00-overview.md`](docs/blueprint/00-overview.md) and [`docs/blueprint/15-decision-log.md`](docs/blueprint/15-decision-log.md)
-5. If you discover new work: add a milestone file in `docs/implementation/tasks/` and update `/TODO.md`
-
-Everything is in the repo. Source-controlled. Portable. Reviewable in PRs. No external trackers.
 
 ## What lazydap is, in one paragraph
 
@@ -204,7 +183,7 @@ $ lazydap <subcommand> --help      # specific
 $ lazydap completions <shell>      # tab-completion install
 ```
 
-The full reference for agent use lives in `lazydap.skill/references/commands.md`.
+The full reference for agent use lives in `skill/references/commands.md` (packed into `lazydap.skill`).
 
 ### Error handling
 
@@ -248,23 +227,10 @@ These are paid for in pain (mostly mxr's). Violating them creates work for every
 7. **Tests cross real boundaries.** There is no `FakeAdapter`; `AdapterHandle::detached()` (`#[cfg(test)]`) stands in for one where the thing under test is session bookkeeping. The canonical tests run real codelldb, debugpy and delve.
 8. **`tracing` from the first line of `main`.** No `println!` debug calls.
 
-### What "small blast radius" means here
-
-If your task is "fix a bug in `lazydap continue --wait`":
-
-- Touch only the wait-loop code.
-- Don't refactor the surrounding event handler "for consistency."
-- Don't delete unused imports you noticed.
-- Don't add error handling for cases that can't happen.
-- At the end, mention what you noticed but didn't change. The user decides.
-
 ### Workflow expectations
 
-- Read the relevant `MNN-*.md` task file before writing code. It tells you what to do, why, and what success looks like.
-- If a decision isn't made, ask. Don't fabricate. The user will help reason it out.
-- Use `cargo test --workspace` before claiming done. Use `cargo clippy --workspace --all-targets` for lints. Both must pass.
 - Update the relevant blueprint or task MD file if your code changes the architecture.
-- Don't add a sixth IPC bucket without explicit approval.
+- Don't add a fifth IPC bucket without a `15-decision-log.md` entry.
 
 ### Release shorthand
 
@@ -274,8 +240,7 @@ If the user says `ship it`, run the full release flow:
    the release workflow's guard refuses to publish a section matching
    `unreleased|not (yet )?tagged|until the tag is cut`, on purpose.
 2. Bump the workspace version in the root `Cargo.toml` if the current version's tag already
-   exists. Never overwrite a tag or a GitHub release; releases are immutable — a bad one is
-   followed by a fixed one, not replaced.
+   exists.
 3. Full gates on the exact commit being shipped: `cargo fmt --all -- --check`,
    `cargo clippy --workspace --all-targets`, `cargo test --workspace --all-targets`,
    `bash scripts/check_architecture_boundaries.sh`, `scripts/build-skill.sh` + clean
@@ -322,11 +287,10 @@ Source of truth: the steps above and
 what actually runs from the tag. The protocol version does not need bumping for a
 release — only for wire-shape changes (see D032/D043/D050/D056 for what counts).
 
-## What you (the agent) should NOT do
+## What you (the agent) should not do
 
 - Don't add features without a milestone or task file describing them.
 - Don't introduce a framework (axum, actix, anyhow-everywhere, etc.) without explicit user approval. The dependency budget is small.
-- Don't write Rust that's "clever." Read the code; if a future-you reading this in 6 months would have to think, simplify.
 - Don't write tests that mock things lazydap actually owns (the daemon, the store, the adapter trait). Mock external systems only.
 - Don't bypass `lazydap.skill`'s CLI surface to call internal APIs. If the agent UX is wrong, fix the CLI.
 - Don't add AI features into the core. AI is an external client — same as the TUI, same as everything else.

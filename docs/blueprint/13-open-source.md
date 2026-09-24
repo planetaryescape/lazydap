@@ -28,7 +28,6 @@ lazydap/
 ├── README.md
 ├── ARCHITECTURE.md
 ├── AGENTS.md
-├── CLAUDE.md
 ├── TODO.md
 ├── LICENSE-MIT
 ├── LICENSE-APACHE
